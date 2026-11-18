@@ -247,7 +247,25 @@ export type NotificationKind =
   | 'comment_mention'
   | 'pro_activated'
   | 'pro_expiring_soon'
-  | 'pro_expired';
+  | 'pro_expired'
+  | 'admin_announcement';
+
+export type AdminNotificationTarget = 'all' | 'pro' | 'free' | 'user';
+
+export interface AdminBroadcastRecord {
+  id: string;
+  target: AdminNotificationTarget;
+  recipientCount: number;
+  title: string;
+  message: string;
+  link: string;
+  createdAt: string;
+}
+
+export interface SiteConfig {
+  siteName: string;
+  faviconUrl: string;
+}
 
 export interface NotificationRecord {
   id: string;

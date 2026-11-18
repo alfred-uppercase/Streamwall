@@ -5,9 +5,11 @@ import { Clock, Heart, Play, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { TYPE_LABELS } from '../shared/types';
 import { api } from '../lib/client';
+import { useDocumentTitle } from '../lib/siteConfig';
 import { PosterCard, PosterSkeletonGrid } from '../components/PosterCard';
 
 export function FavoritesPage() {
+  useDocumentTitle('Ma liste');
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<'favorites' | 'progress' | 'history'>('favorites');
   const [favType, setFavType] = useState<'all' | 'film' | 'serie' | 'anime'>('all');

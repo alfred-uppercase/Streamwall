@@ -4,6 +4,7 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { RotateCcw, Search } from 'lucide-react';
 import type { CatalogueFilters } from '../shared/types';
 import { api } from '../lib/client';
+import { useDocumentTitle } from '../lib/siteConfig';
 import { PosterCard, PosterSkeletonGrid } from '../components/PosterCard';
 
 const CURRENT_YEAR = new Date().getFullYear();
@@ -30,6 +31,17 @@ export function CataloguePage() {
     (searchParams.get('sort') as CatalogueFilters['sort']) || 'recent'
   );
   const [page, setPage] = useState(Math.max(1, Number(searchParams.get('page')) || 1));
+
+  const pageTitle = q
+    ? `Recherche « ${q} »`
+    : type === 'film'
+      ? 'Films'
+      : type === 'serie'
+        ? 'Séries'
+        : type === 'anime'
+          ? 'Animes'
+          : 'Catalogue';
+  useDocumentTitle(pageTitle);
 
   // Debounce search query
   useEffect(() => {

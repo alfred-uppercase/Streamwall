@@ -10,6 +10,7 @@ import {
   Heart,
   Home,
   LayoutGrid,
+  Megaphone,
   MessageSquare,
   Search,
   Shield,
@@ -19,6 +20,7 @@ import {
 } from 'lucide-react';
 import type { NotificationRecord } from '../shared/types';
 import { api, useAuth } from '../lib/client';
+import { useSiteConfig } from '../lib/siteConfig';
 import { UserAvatar } from './UserAvatar';
 
 function renderNotificationIcon(kind: NotificationRecord['kind']) {
@@ -29,6 +31,8 @@ function renderNotificationIcon(kind: NotificationRecord['kind']) {
       return <Clock className="size-4 text-amber-400" />;
     case 'pro_expired':
       return <AlertTriangle className="size-4 text-rose-400" />;
+    case 'admin_announcement':
+      return <Megaphone className="size-4 text-primary" />;
     default:
       return <MessageSquare className="size-4 text-primary" />;
   }
@@ -36,6 +40,7 @@ function renderNotificationIcon(kind: NotificationRecord['kind']) {
 
 export function Navbar() {
   const { user, isMember, isAdmin, isPro } = useAuth();
+  const { siteName } = useSiteConfig();
   const isFetching = useIsFetching();
   const location = useLocation();
   const navigate = useNavigate();
@@ -140,7 +145,13 @@ export function Navbar() {
             to="/"
             className="font-display text-xl font-bold tracking-tight text-foreground whitespace-nowrap shrink-0 sm:text-2xl"
           >
-            Stream<span className="text-primary">Wall</span>
+            {siteName === 'StreamWall' ? (
+              <>
+                Stream<span className="text-primary">Wall</span>
+              </>
+            ) : (
+              siteName
+            )}
           </Link>
 
           {/* Zone 2: Desktop Navigation Links */}

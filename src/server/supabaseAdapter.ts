@@ -11,6 +11,7 @@ import {
   type PlayerKey,
   type PlayerTemplates,
   type RankingEntry,
+  type SiteConfig,
   type UserProfile,
   type WatchEventRecord,
 } from '../shared/types.ts';
@@ -213,6 +214,28 @@ export async function sbGetTmdbApiKey(fallbackKey: string): Promise<string> {
     // Fall back gracefully
   }
   return fallbackKey;
+}
+
+export async function sbGetSiteConfig(fallback: SiteConfig): Promise<SiteConfig> {
+  try {
+    const sb = createAdminClient() ?? createAnonClient();
+    const { data } = await sb
+      .from('app_settings')
+      .select('key,value')
+      .in('key', ['site_name', 'favicon_url']);
+    const out: SiteConfig = { ...fallback };
+    for (const row of (data ?? []) as { key: string; value: string }[]) {
+      if (row.key === 'site_name' && typeof row.value === 'string' && row.value.trim()) {
+        out.siteName = row.value.trim();
+      }
+      if (row.key === 'favicon_url' && typeof row.value === 'string' && row.value.trim()) {
+        out.faviconUrl = row.value.trim();
+      }
+    }
+    return out;
+  } catch {
+    return fallback;
+  }
 }
 
 export async function sbGetPlayerTemplates(): Promise<PlayerTemplates> {

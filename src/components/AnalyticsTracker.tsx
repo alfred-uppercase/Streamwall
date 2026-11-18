@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
+import { useSiteConfig } from '../lib/siteConfig';
 
 const VISITOR_STORAGE_KEY = 'tapenaka_vid';
 const SESSION_STORAGE_KEY = 'tapenaka_sid';
@@ -43,27 +44,32 @@ function getOrCreateSessionId(): string {
   }
 }
 
-function resolveRouteTitle(pathname: string): string {
-  if (pathname === '/') return 'Accueil — StreamWall';
-  if (pathname.startsWith('/catalogue')) return 'Catalogue — StreamWall';
-  if (pathname.startsWith('/suggestion')) return 'Suggestion — StreamWall';
-  if (pathname.startsWith('/favoris')) return 'Ma liste — StreamWall';
-  if (pathname.startsWith('/profil')) return 'Mon profil — StreamWall';
-  if (pathname.startsWith('/admin')) return 'Administration — StreamWall';
-  if (pathname.startsWith('/auth')) return 'Connexion — StreamWall';
-  if (pathname.startsWith('/reset-password')) return 'Réinitialisation — StreamWall';
+function resolveRouteTitle(pathname: string, siteName: string): string {
+  if (document.title && document.title !== 'Tapenaka — StreamWall') {
+    return document.title;
+  }
+  if (pathname === '/') return `Accueil — ${siteName}`;
+  if (pathname.startsWith('/catalogue')) return `Catalogue — ${siteName}`;
+  if (pathname.startsWith('/suggestion')) return `Suggestion — ${siteName}`;
+  if (pathname.startsWith('/abonnement')) return `Devenir Pro — ${siteName}`;
+  if (pathname.startsWith('/favoris')) return `Ma liste — ${siteName}`;
+  if (pathname.startsWith('/profil')) return `Mon profil — ${siteName}`;
+  if (pathname.startsWith('/admin')) return `Administration — ${siteName}`;
+  if (pathname.startsWith('/auth')) return `Connexion — ${siteName}`;
+  if (pathname.startsWith('/reset-password')) return `Réinitialisation — ${siteName}`;
 
   const heading = document.querySelector('main h1')?.textContent?.trim();
   if (heading && heading.length > 1 && heading !== 'Chargement…') {
-    return `${heading.slice(0, 90)} — StreamWall`;
+    return `${heading.slice(0, 90)} — ${siteName}`;
   }
-  return document.title || 'StreamWall';
+  return document.title || siteName;
 }
 
 export function AnalyticsTracker() {
   const location = useLocation();
+  const { siteName } = useSiteConfig();
   const lastPathRef = useRef<string>('');
-  const lastTitleRef = useRef<string>('StreamWall');
+  const lastTitleRef = useRef<string>(siteName);
   const lastPingAtRef = useRef<number>(Date.now());
 
   useEffect(() => {
@@ -73,7 +79,7 @@ export function AnalyticsTracker() {
     lastPathRef.current = cleanPath;
 
     const sendCollect = () => {
-      const title = resolveRouteTitle(cleanPath);
+      const title = resolveRouteTitle(cleanPath, siteName);
       lastTitleRef.current = title;
       lastPingAtRef.current = Date.now();
       const screenResolution =
@@ -109,7 +115,7 @@ export function AnalyticsTracker() {
     return () => {
       window.clearTimeout(delayTimer);
     };
-  }, [location.pathname]);
+  }, [location.pathname, siteName]);
 
   useEffect(() => {
     const sendPing = (useBeacon: boolean) => {
@@ -119,7 +125,7 @@ export function AnalyticsTracker() {
       const deltaSec = Math.max(1, Math.min(45, Math.round((now - lastPingAtRef.current) / 1000)));
       lastPingAtRef.current = now;
 
-      const latestTitle = resolveRouteTitle(lastPathRef.current || location.pathname);
+      const latestTitle = resolveRouteTitle(lastPathRef.current || location.pathname, siteName);
       lastTitleRef.current = latestTitle;
 
       const payload = JSON.stringify({
@@ -164,7 +170,7 @@ export function AnalyticsTracker() {
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('pagehide', onPageHide);
     };
-  }, [location.pathname]);
+  }, [location.pathname, siteName]);
 
   return null;
 }

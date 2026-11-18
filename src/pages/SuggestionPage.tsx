@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Play, Shuffle } from 'lucide-react';
 import { TYPE_LABELS } from '../shared/types';
 import { api } from '../lib/client';
+import { useDocumentTitle } from '../lib/siteConfig';
 import { PosterCard, PosterSkeletonGrid } from '../components/PosterCard';
 
 const TYPES = [
@@ -14,6 +15,7 @@ const TYPES = [
 ] as const;
 
 export function SuggestionPage() {
+  useDocumentTitle('Suggestion');
   const [type, setType] = useState('all');
   const [genre, setGenre] = useState('');
   const [seed, setSeed] = useState(1);

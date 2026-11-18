@@ -15,6 +15,7 @@ import {
   stripOriginFromTemplate,
 } from './src/shared/types.ts';
 import type {
+  AdminNotificationTarget,
   CatalogueFilters,
   CataloguePage,
   CastMember,
@@ -27,6 +28,7 @@ import type {
   PlayerKey,
   PlayerTemplates,
   RankingEntry,
+  SiteConfig,
   Slide,
   UserProfile,
   WatchEventRecord,
@@ -49,6 +51,7 @@ import {
   sbGetMemberData,
   sbGetPlayerTemplates,
   sbGetRankings,
+  sbGetSiteConfig,
   sbGetTmdbApiKey,
   sbResolveUser,
 } from './src/server/supabaseAdapter.ts';
@@ -100,9 +103,11 @@ import {
 import {
   clearUserNotifications,
   createNotification,
+  listAdminBroadcasts,
   listUserNotifications,
   markAllNotificationsRead,
   markNotificationRead,
+  recordAdminBroadcast,
 } from './src/server/notificationsStore.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -164,6 +169,8 @@ interface DatabaseShape {
     api_origin: string;
     embed_provider?: string;
     tmdb_api_key?: string;
+    site_name?: string;
+    favicon_url?: string;
     players: PlayerTemplates;
   };
   users: StoredUser[];
@@ -205,6 +212,8 @@ function createSeedDb(): DatabaseShape {
       api_origin: DEFAULT_ORIGIN,
       embed_provider: DEFAULT_ORIGIN,
       tmdb_api_key: DEFAULT_TMDB_API_KEY,
+      site_name: 'StreamWall',
+      favicon_url: '/favicon.ico',
       players: { ...DEFAULT_PLAYERS },
     },
     users: [
@@ -505,6 +514,46 @@ async function getPlayerTemplates(): Promise<PlayerTemplates> {
     return sbGetPlayerTemplates();
   }
   return db.settings.players;
+}
+
+const DEFAULT_SITE_CONFIG: SiteConfig = {
+  siteName: 'StreamWall',
+  faviconUrl: '/favicon.ico',
+};
+
+async function getSiteConfig(): Promise<SiteConfig> {
+  const local: SiteConfig = {
+    siteName: (db.settings.site_name || DEFAULT_SITE_CONFIG.siteName).trim() || DEFAULT_SITE_CONFIG.siteName,
+    faviconUrl: (db.settings.favicon_url || DEFAULT_SITE_CONFIG.faviconUrl).trim() || DEFAULT_SITE_CONFIG.faviconUrl,
+  };
+  if (isSupabaseEnabled()) {
+    return sbGetSiteConfig(local);
+  }
+  return local;
+}
+
+const FAVICON_MIME_BY_EXT: Record<string, string> = {
+  ico: 'image/x-icon',
+  png: 'image/png',
+  svg: 'image/svg+xml',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+};
+
+function findUploadedFaviconFile(): { filePath: string; contentType: string } | null {
+  try {
+    if (!fs.existsSync(DATA_DIR)) return null;
+    for (const ext of Object.keys(FAVICON_MIME_BY_EXT)) {
+      const candidate = path.join(DATA_DIR, `tapenaka-favicon.${ext}`);
+      if (fs.existsSync(candidate)) {
+        return { filePath: candidate, contentType: FAVICON_MIME_BY_EXT[ext] };
+      }
+    }
+  } catch {
+    // Ignore fs errors
+  }
+  return null;
 }
 
 function parseCookies(cookieHeader: string | undefined): Record<string, string> {
@@ -2731,6 +2780,28 @@ async function startServer() {
     res.json({ ok: true, role: target.role });
   });
 
+  app.get('/api/site/config', async (_req, res) => {
+    res.json(await getSiteConfig());
+  });
+
+  app.get('/api/site/favicon', (_req, res) => {
+    const uploaded = findUploadedFaviconFile();
+    if (uploaded) {
+      res
+        .status(200)
+        .setHeader('content-type', uploaded.contentType)
+        .setHeader('cache-control', 'public, max-age=300')
+        .send(fs.readFileSync(uploaded.filePath));
+      return;
+    }
+    const fallback = path.join(__dirname, 'public', 'favicon.ico');
+    if (fs.existsSync(fallback)) {
+      res.sendFile(fallback);
+      return;
+    }
+    res.status(404).end();
+  });
+
   app.get('/api/admin/settings', async (req, res) => {
     const auth = await requireAdmin(req, res);
     if (!auth) return;
@@ -2740,7 +2811,188 @@ async function startServer() {
       players: await getPlayerTemplates(),
       tmdbApiKey: await getTmdbApiKey(),
       smtp: getAdminSmtpStatus(),
+      site: await getSiteConfig(),
     });
+  });
+
+  app.put('/api/admin/settings/site', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+
+    const current = await getSiteConfig();
+    const rawName = String(req.body?.siteName ?? current.siteName).trim().slice(0, 60);
+    if (!rawName) {
+      res.status(400).json({ error: 'Le nom du site ne peut pas être vide.' });
+      return;
+    }
+
+    let nextFaviconUrl = current.faviconUrl || '/favicon.ico';
+    const uploadDataUrl =
+      typeof req.body?.faviconUploadDataUrl === 'string'
+        ? req.body.faviconUploadDataUrl.trim()
+        : '';
+
+    if (uploadDataUrl) {
+      const m = uploadDataUrl.match(
+        /^data:image\/(x-icon|vnd\.microsoft\.icon|png|svg\+xml|jpeg|jpg|webp);base64,([A-Za-z0-9+/=\s]+)$/i
+      );
+      if (!m) {
+        res.status(400).json({
+          error: 'Format de favicon non supporté. Utilisez ICO, PNG, SVG, JPG ou WEBP.',
+        });
+        return;
+      }
+      const mimeSub = m[1].toLowerCase();
+      const ext =
+        mimeSub === 'svg+xml'
+          ? 'svg'
+          : mimeSub === 'x-icon' || mimeSub === 'vnd.microsoft.icon'
+            ? 'ico'
+            : mimeSub === 'jpeg'
+              ? 'jpg'
+              : mimeSub;
+      const buf = Buffer.from(m[2].replace(/\s+/g, ''), 'base64');
+      if (buf.length === 0 || buf.length > 1_500_000) {
+        res.status(400).json({ error: 'Le fichier favicon doit faire moins de 1,5 Mo.' });
+        return;
+      }
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      for (const oldExt of Object.keys(FAVICON_MIME_BY_EXT)) {
+        const oldPath = path.join(DATA_DIR, `tapenaka-favicon.${oldExt}`);
+        if (fs.existsSync(oldPath)) {
+          try {
+            fs.unlinkSync(oldPath);
+          } catch {
+            // Ignore cleanup failure
+          }
+        }
+      }
+      fs.writeFileSync(path.join(DATA_DIR, `tapenaka-favicon.${ext}`), buf);
+      nextFaviconUrl = `/api/site/favicon?v=${Date.now()}`;
+    } else if (typeof req.body?.faviconUrl === 'string') {
+      const rawUrl = req.body.faviconUrl.trim();
+      if (!rawUrl) {
+        nextFaviconUrl = '/favicon.ico';
+      } else if (/^(\/[^\s"'<>]+|https?:\/\/[^\s"'<>]+)$/i.test(rawUrl)) {
+        nextFaviconUrl = rawUrl;
+      } else {
+        res.status(400).json({
+          error: 'URL de favicon invalide (ex. /favicon.ico ou https://exemple.com/icon.png).',
+        });
+        return;
+      }
+    }
+
+    if (isSupabaseEnabled() && auth.sbClient) {
+      const writer = createAdminClient() ?? auth.sbClient;
+      const now = new Date().toISOString();
+      const { error } = await writer.from('app_settings').upsert([
+        { key: 'site_name', value: rawName, updated_at: now },
+        { key: 'favicon_url', value: nextFaviconUrl, updated_at: now },
+      ]);
+      if (error) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+    }
+
+    db.settings.site_name = rawName;
+    db.settings.favicon_url = nextFaviconUrl;
+    saveDb(db);
+
+    res.json({
+      site: {
+        siteName: rawName,
+        faviconUrl: nextFaviconUrl,
+      },
+    });
+  });
+
+  app.get('/api/admin/notifications', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    res.json({ broadcasts: listAdminBroadcasts() });
+  });
+
+  app.post('/api/admin/notifications', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+
+    const rawTarget = String(req.body?.target ?? 'all');
+    const target: AdminNotificationTarget = ['all', 'pro', 'free', 'user'].includes(rawTarget)
+      ? (rawTarget as AdminNotificationTarget)
+      : 'all';
+    const title = String(req.body?.title ?? '').trim().slice(0, 120);
+    const message = String(req.body?.message ?? '').trim().slice(0, 400);
+    const rawLink = String(req.body?.link ?? '/').trim();
+    const link = rawLink && /^(\/[^\s"'<>]*|https?:\/\/[^\s"'<>]+)$/i.test(rawLink) ? rawLink : '/';
+
+    if (!title || !message) {
+      res.status(400).json({ error: 'Renseignez un titre et un message pour la notification.' });
+      return;
+    }
+
+    let knownUserIds: string[] = [];
+    if (isSupabaseEnabled() && auth.sbClient) {
+      try {
+        const sbOverview = await sbGetAdminOverview(auth.sbClient);
+        knownUserIds = sbOverview.users.map((u) => u.id);
+      } catch (err) {
+        res.status(500).json({
+          error: err instanceof Error ? err.message : 'Impossible de charger les utilisateurs Supabase.',
+        });
+        return;
+      }
+    } else {
+      knownUserIds = db.users.map((u) => u.id);
+    }
+
+    let recipientIds: string[] = [];
+    if (target === 'user') {
+      const requested: string[] = Array.isArray(req.body?.userIds)
+        ? (req.body.userIds as unknown[]).map((x) => String(x).trim()).filter(Boolean)
+        : [];
+      const single = req.body?.userId ? String(req.body.userId).trim() : '';
+      const rawSelected: string[] = [...new Set(single ? [...requested, single] : requested)];
+      if (rawSelected.length === 0) {
+        res.status(400).json({ error: 'Sélectionnez au moins un utilisateur cible.' });
+        return;
+      }
+      const knownSet = new Set(knownUserIds);
+      recipientIds = knownSet.size > 0 ? rawSelected.filter((id) => knownSet.has(id)) : rawSelected;
+      if (recipientIds.length === 0) {
+        res.status(404).json({ error: 'Aucun utilisateur valide trouvé dans la sélection.' });
+        return;
+      }
+    } else if (target === 'pro') {
+      recipientIds = knownUserIds.filter((id) => isUserPro(id));
+    } else if (target === 'free') {
+      recipientIds = knownUserIds.filter((id) => !isUserPro(id));
+    } else {
+      recipientIds = knownUserIds;
+    }
+
+    let sentCount = 0;
+    for (const userId of recipientIds) {
+      const created = createNotification({
+        userId,
+        kind: 'admin_announcement',
+        title,
+        message,
+        link,
+      });
+      if (created) sentCount += 1;
+    }
+
+    const broadcast = recordAdminBroadcast({
+      target,
+      recipientCount: sentCount,
+      title,
+      message,
+      link,
+    });
+
+    res.json({ ok: true, sentCount, broadcast });
   });
 
   app.put('/api/admin/settings/smtp', async (req, res) => {

@@ -2,7 +2,12 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { NotificationKind, NotificationRecord } from '../shared/types.ts';
+import type {
+  AdminBroadcastRecord,
+  AdminNotificationTarget,
+  NotificationKind,
+  NotificationRecord,
+} from '../shared/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', '..', '.data');
@@ -10,6 +15,7 @@ const NOTIFICATIONS_FILE = path.join(DATA_DIR, 'tapenaka-notifications.json');
 
 interface NotificationsDatabase {
   notifications: NotificationRecord[];
+  adminBroadcasts?: AdminBroadcastRecord[];
 }
 
 function loadNotificationsDb(): NotificationsDatabase {
@@ -19,13 +25,16 @@ function loadNotificationsDb(): NotificationsDatabase {
         fs.readFileSync(NOTIFICATIONS_FILE, 'utf-8')
       ) as NotificationsDatabase;
       if (parsed && Array.isArray(parsed.notifications)) {
-        return parsed;
+        return {
+          notifications: parsed.notifications,
+          adminBroadcasts: Array.isArray(parsed.adminBroadcasts) ? parsed.adminBroadcasts : [],
+        };
       }
     }
   } catch {
     // Re-seed if corrupted
   }
-  return { notifications: [] };
+  return { notifications: [], adminBroadcasts: [] };
 }
 
 function saveNotificationsDb(state: NotificationsDatabase): void {
@@ -74,6 +83,33 @@ export function createNotification(input: {
   }
   saveNotificationsDb(notificationsDb);
   return record;
+}
+
+export function recordAdminBroadcast(input: {
+  target: AdminNotificationTarget;
+  recipientCount: number;
+  title: string;
+  message: string;
+  link: string;
+}): AdminBroadcastRecord {
+  const entry: AdminBroadcastRecord = {
+    id: `brd_${crypto.randomBytes(6).toString('hex')}`,
+    target: input.target,
+    recipientCount: input.recipientCount,
+    title: input.title.trim().slice(0, 120),
+    message: input.message.trim().slice(0, 400),
+    link: input.link || '/',
+    createdAt: new Date().toISOString(),
+  };
+  const list = notificationsDb.adminBroadcasts ?? [];
+  list.unshift(entry);
+  notificationsDb.adminBroadcasts = list.slice(0, 40);
+  saveNotificationsDb(notificationsDb);
+  return entry;
+}
+
+export function listAdminBroadcasts(): AdminBroadcastRecord[] {
+  return notificationsDb.adminBroadcasts ?? [];
 }
 
 export function listUserNotifications(userId: string): {

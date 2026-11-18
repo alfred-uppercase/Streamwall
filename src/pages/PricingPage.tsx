@@ -17,6 +17,7 @@ import {
 import { toast } from 'sonner';
 import type { BillingCycle, PaymentOrder, SubscriptionPlan } from '../shared/types';
 import { api, useAuth } from '../lib/client';
+import { useDocumentTitle, useSiteConfig } from '../lib/siteConfig';
 import { ProCrownBadge, UserAvatar } from '../components/UserAvatar';
 
 const CYCLE_LABELS: Record<BillingCycle, string> = {
@@ -75,6 +76,8 @@ function renderOrderStatus(order: PaymentOrder) {
 }
 
 export function PricingPage() {
+  useDocumentTitle('Devenir Pro');
+  const { siteName } = useSiteConfig();
   const { user, isMember, isPro, refreshUser } = useAuth();
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
@@ -185,7 +188,7 @@ export function PricingPage() {
       {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-6 border-b border-border pb-6">
         <div className="max-w-2xl space-y-2">
-          <p className="text-xs font-medium text-primary">Abonnements StreamWall · Offres Gratuit & Pro</p>
+          <p className="text-xs font-medium text-primary">Abonnements {siteName} · Offres Gratuit & Pro</p>
           <h1 className="font-display text-3xl font-bold tracking-tight text-foreground sm:text-4xl">
             Passez en Pro sans publicité
           </h1>

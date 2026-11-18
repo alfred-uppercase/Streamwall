@@ -2,6 +2,8 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { useLocation } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import type {
+  AdminBroadcastRecord,
+  AdminNotificationTarget,
   AdminOverview,
   AdminPaymentSecretsStatus,
   AdminSmtpSettings,
@@ -20,6 +22,7 @@ import type {
   PaymentOrder,
   PlanTier,
   PlayerTemplates,
+  SiteConfig,
   SubscriptionPlan,
   UserProfile,
   UserSubscription,
@@ -263,6 +266,7 @@ export const api = {
         body: JSON.stringify({ role }),
       }
     ),
+  siteConfig: () => apiRequest<SiteConfig>('/api/site/config'),
   adminSettings: () =>
     apiRequest<{
       origin: string;
@@ -270,7 +274,33 @@ export const api = {
       players: PlayerTemplates;
       tmdbApiKey: string;
       smtp: AdminSmtpStatus;
+      site: SiteConfig;
     }>('/api/admin/settings'),
+  adminSaveSiteConfig: (payload: {
+    siteName: string;
+    faviconUrl?: string;
+    faviconUploadDataUrl?: string | null;
+  }) =>
+    apiRequest<{ site: SiteConfig }>('/api/admin/settings/site', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  adminNotificationHistory: () =>
+    apiRequest<{ broadcasts: AdminBroadcastRecord[] }>('/api/admin/notifications'),
+  adminSendNotification: (payload: {
+    target: AdminNotificationTarget;
+    userIds?: string[];
+    title: string;
+    message: string;
+    link?: string;
+  }) =>
+    apiRequest<{ ok: boolean; sentCount: number; broadcast: AdminBroadcastRecord }>(
+      '/api/admin/notifications',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
   adminSaveOrigin: (origin: string) =>
     apiRequest<{ origin: string }>('/api/admin/settings/origin', {
       method: 'PUT',

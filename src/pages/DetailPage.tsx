@@ -20,6 +20,7 @@ import { toast } from 'sonner';
 import { TYPE_LABELS } from '../shared/types';
 import type { CastMember, Episode, Item, ItemType, SeasonMeta } from '../shared/types';
 import { api, useAuth } from '../lib/client';
+import { useDocumentTitle } from '../lib/siteConfig';
 import { FavoriteButton, PosterCard } from '../components/PosterCard';
 import { CommentsSection } from '../components/CommentsSection';
 
@@ -136,6 +137,7 @@ export function DetailPage() {
   });
 
   const item = detailQuery.data?.item ?? null;
+  useDocumentTitle(item ? item.titre : TYPE_LABELS[type] ?? 'Détails');
   const episodes = useMemo(() => detailQuery.data?.episodes ?? [], [detailQuery.data?.episodes]);
 
   // Group episodes by season

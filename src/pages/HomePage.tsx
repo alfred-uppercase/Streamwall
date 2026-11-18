@@ -5,6 +5,7 @@ import { ArrowRight, ChevronLeft, ChevronRight, Play, X } from 'lucide-react';
 import { TYPE_LABELS } from '../shared/types';
 import type { Slide, WatchProgress } from '../shared/types';
 import { api, useAuth } from '../lib/client';
+import { useDocumentTitle } from '../lib/siteConfig';
 import { PosterCard, PosterSkeletonGrid } from '../components/PosterCard';
 import { ProCrownBadge, UserAvatar } from '../components/UserAvatar';
 
@@ -53,19 +54,19 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
           alt=""
           referrerPolicy="no-referrer"
           onError={() => setFailedBackdrops((prev) => ({ ...prev, [current.id]: true }))}
-          className="absolute inset-0 h-full w-full object-cover opacity-50 transition-opacity duration-300"
+          className="absolute inset-0 h-full w-full object-cover opacity-90 brightness-110 transition-opacity duration-300"
         />
-        {/* Measured multi-stop scrim guaranteeing >= 4.5:1 text contrast */}
-        <div className="absolute inset-0 bg-gradient-to-r from-background via-background/85 to-background/25" />
-        <div className="absolute inset-0 bg-gradient-to-t from-background via-transparent to-transparent" />
+        {/* Lighter multi-stop scrim keeping hero artwork bright while preserving text legibility */}
+        <div className="absolute inset-0 bg-gradient-to-r from-background/85 via-background/40 to-transparent" />
+        <div className="absolute inset-0 bg-gradient-to-t from-background/65 via-transparent to-transparent" />
 
         <div className="relative z-10 flex min-h-[24rem] sm:min-h-[27rem] items-center justify-between gap-8 px-6 py-10 sm:px-10 md:px-12">
           <div className="max-w-2xl space-y-4">
-            <p className="text-xs font-medium text-primary tabular-nums">
+            <p className="text-xs font-medium text-primary tabular-nums drop-shadow-xs">
               {metaParts.join(' · ')}
             </p>
 
-            <h1 className="font-display text-3xl font-bold tracking-tight text-foreground sm:text-4xl md:text-5xl">
+            <h1 className="font-display text-3xl font-bold tracking-tight text-foreground drop-shadow-sm sm:text-4xl md:text-5xl">
               {current.titre}
             </h1>
 
@@ -242,6 +243,7 @@ function ContinueWatchingSection({ items }: { items: WatchProgress[] }) {
 }
 
 export function HomePage() {
+  useDocumentTitle('Accueil');
   const { isMember, user } = useAuth();
   const homeQuery = useQuery({
     queryKey: ['home', user?.id ?? 'guest'],

@@ -10,6 +10,7 @@ import {
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { api, AuthProvider, useAuth } from './lib/client';
+import { SiteConfigProvider, useSiteConfig } from './lib/siteConfig';
 import { ThemeProvider, useTheme } from './lib/theme';
 import { Navbar } from './components/Navbar';
 import { HomePage } from './pages/HomePage';
@@ -56,6 +57,7 @@ function RequireMember({ children }: { children: React.ReactNode }) {
 }
 
 function AppShell() {
+  const { siteName } = useSiteConfig();
   const billingPlansQuery = useQuery({
     queryKey: ['billing-plans'],
     queryFn: () => api.billingPlans(),
@@ -112,7 +114,7 @@ function AppShell() {
       <footer className="mt-16 border-t border-border bg-background/80">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-4 py-6 text-xs text-muted-foreground sm:px-6">
           <p>
-            StreamWall · Projet Tapenaka — Catalogue de films, séries et animes en streaming.
+            {siteName} · Projet Tapenaka — Catalogue de films, séries et animes en streaming.
           </p>
           <div className="flex items-center gap-5">
             <Link to="/catalogue" className="hover:text-foreground">
@@ -151,9 +153,11 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <AuthProvider>
-          <ThemeProvider>
-            <AppWithTheme />
-          </ThemeProvider>
+          <SiteConfigProvider>
+            <ThemeProvider>
+              <AppWithTheme />
+            </ThemeProvider>
+          </SiteConfigProvider>
         </AuthProvider>
       </BrowserRouter>
     </QueryClientProvider>

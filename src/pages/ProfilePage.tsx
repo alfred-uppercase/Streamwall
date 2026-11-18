@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, Crown, LogOut, Moon, Palette, RotateCcw, Search, Shield, Shuffle, Sun, UserPlus, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, useAuth } from '../lib/client';
+import { useDocumentTitle } from '../lib/siteConfig';
 import { THEME_PRESETS, useTheme } from '../lib/theme';
 import {
   AVATAR_PRESETS,
@@ -14,6 +15,7 @@ import {
 } from '../components/UserAvatar';
 
 export function ProfilePage() {
+  useDocumentTitle('Mon profil');
   const { user, isAdmin, isPro, refreshUser, signOut } = useAuth();
   const navigate = useNavigate();
   const queryClient = useQueryClient();

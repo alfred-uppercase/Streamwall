@@ -3,9 +3,11 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowRight, KeyRound, Shield, UserRound } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, useAuth } from '../lib/client';
+import { useDocumentTitle, useSiteConfig } from '../lib/siteConfig';
 
 export function AuthPage() {
   const { isMember, backend, setSession } = useAuth();
+  const { siteName } = useSiteConfig();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -16,6 +18,14 @@ export function AuthPage() {
   const [busy, setBusy] = useState(false);
   const [resetPath, setResetPath] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState('');
+
+  useDocumentTitle(
+    mode === 'signup'
+      ? 'Inscription'
+      : mode === 'forgot'
+        ? 'Mot de passe oublié'
+        : 'Connexion'
+  );
 
   useEffect(() => {
     const verifyToken = searchParams.get('verify');
@@ -111,7 +121,13 @@ export function AuthPage() {
       <div className="rounded-xl border border-border bg-card p-6 sm:p-8">
         <div className="mb-6 text-center">
           <Link to="/" className="font-display text-3xl font-bold text-foreground">
-            Stream<span className="text-primary">Wall</span>
+            {siteName === 'StreamWall' ? (
+              <>
+                Stream<span className="text-primary">Wall</span>
+              </>
+            ) : (
+              siteName
+            )}
           </Link>
           <h1 className="mt-3 font-display text-xl font-semibold text-foreground">
             {mode === 'login'
@@ -259,6 +275,7 @@ export function AuthPage() {
 }
 
 export function ResetPasswordPage() {
+  useDocumentTitle('Nouveau mot de passe');
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { isMember } = useAuth();

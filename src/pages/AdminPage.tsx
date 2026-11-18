@@ -1,21 +1,22 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Activity,
-  AlertTriangle,
   BarChart3,
+  Bell,
   CheckCircle2,
   CreditCard,
-  Crown,
   Database,
   Eye,
   EyeOff,
+  Globe,
   Mail,
   RefreshCw,
+  RotateCcw,
   Send,
-  Shield,
   Trash2,
+  Upload,
   Users,
   XCircle,
 } from 'lucide-react';
@@ -24,20 +25,21 @@ import {
   fillTemplate,
   isFullUrlTemplate,
   PLAYER_KEYS,
-  TYPE_LABELS,
 } from '../shared/types';
 import type {
   AdminSmtpSettings,
   ApiHealthReport,
   EmailProvider,
-  Item,
   PlayerKey,
   PlayerTemplates,
 } from '../shared/types';
 import { api, useAuth } from '../lib/client';
+import { useDocumentTitle, useSiteConfig } from '../lib/siteConfig';
 import { AdminAnalyticsTab } from '../components/AdminAnalyticsTab';
 import { AdminBillingTab } from '../components/AdminBillingTab';
-import { ProCrownBadge, UserAvatar } from '../components/UserAvatar';
+import { AdminUsersTab } from '../components/AdminUsersTab';
+import { AdminNotificationsTab } from '../components/AdminNotificationsTab';
+import { ProCrownBadge } from '../components/UserAvatar';
 
 const PLAYER_FIELDS: { key: PlayerKey; label: string; hint: string }[] = [
   {
@@ -52,47 +54,41 @@ const PLAYER_FIELDS: { key: PlayerKey; label: string; hint: string }[] = [
   },
 ];
 
-function ItemRow({ item, extra }: { item: Item; extra?: string }) {
-  return (
-    <Link
-      to={`/${item.item_type}/${item.id}`}
-      className="flex items-center gap-3 rounded-lg p-2.5 transition-colors hover:bg-accent"
-    >
-      {item.poster && (
-        <img
-          src={item.poster}
-          alt=""
-          referrerPolicy="no-referrer"
-          className="h-12 w-8 shrink-0 rounded object-cover"
-        />
-      )}
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium text-foreground">{item.titre}</p>
-        <p className="text-xs text-muted-foreground">
-          {TYPE_LABELS[item.item_type] ?? item.item_type}
-          {item.annee ? ` · ${item.annee}` : ''}
-        </p>
-      </div>
-      {extra && <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{extra}</span>}
-    </Link>
-  );
-}
+type AdminTab =
+  | 'analytics'
+  | 'offers'
+  | 'users'
+  | 'notifications'
+  | 'api'
+  | 'players'
+  | 'comments';
 
-type AdminTab = 'analytics' | 'offers' | 'users' | 'stats' | 'api' | 'players' | 'comments';
 const VALID_TABS: AdminTab[] = [
   'analytics',
   'offers',
   'users',
-  'stats',
+  'notifications',
   'api',
   'players',
   'comments',
 ];
 
+const TAB_TITLE_MAP: Record<AdminTab, string> = {
+  analytics: 'Administration · Statistiques',
+  offers: 'Administration · Offres & Paiements',
+  users: 'Administration · Utilisateurs',
+  notifications: 'Administration · Notifications',
+  api: 'Administration · Configuration & API',
+  players: 'Administration · Lecteurs',
+  comments: 'Administration · Modération',
+};
+
 export function AdminPage() {
   const { user: currentUser, backend, isAdmin, refreshUser } = useAuth();
+  const { siteName } = useSiteConfig();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
+  const faviconFileInputRef = useRef<HTMLInputElement>(null);
 
   const rawTab = searchParams.get('tab') as AdminTab | null;
   const tab: AdminTab = rawTab && VALID_TABS.includes(rawTab) ? rawTab : 'users';
@@ -100,10 +96,9 @@ export function AdminPage() {
     setSearchParams({ tab: next }, { replace: true });
   };
 
-  const [period, setPeriod] = useState<'top7' | 'top30'>('top7');
-  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
-  const [assignPlanId, setAssignPlanId] = useState('pro');
-  const [assignDays, setAssignDays] = useState('30');
+  useDocumentTitle(isAdmin ? TAB_TITLE_MAP[tab] : 'Accès réservé');
+
+  const [preselectedNotifyUserIds, setPreselectedNotifyUserIds] = useState<string[]>([]);
 
   const overviewQuery = useQuery({
     queryKey: ['admin-overview'],
@@ -118,17 +113,15 @@ export function AdminPage() {
     enabled: isAdmin,
   });
 
-  const historyQuery = useQuery({
-    queryKey: ['admin-history', selectedUserId],
-    queryFn: () => api.adminUserHistory(selectedUserId!),
-    enabled: Boolean(isAdmin && selectedUserId),
-  });
-
   const settingsQuery = useQuery({
     queryKey: ['admin-settings'],
     queryFn: () => api.adminSettings(),
     enabled: isAdmin,
   });
+
+  const [siteNameInput, setSiteNameInput] = useState('');
+  const [faviconUrlInput, setFaviconUrlInput] = useState('');
+  const [faviconUploadDataUrl, setFaviconUploadDataUrl] = useState<string | null>(null);
 
   const [originInput, setOriginInput] = useState('');
   const [embedProviderInput, setEmbedProviderInput] = useState('');
@@ -143,6 +136,13 @@ export function AdminPage() {
   const [brevoKeyInput, setBrevoKeyInput] = useState('');
   const [showBrevoKey, setShowBrevoKey] = useState(false);
   const [testEmailTo, setTestEmailTo] = useState('');
+
+  useEffect(() => {
+    if (settingsQuery.data?.site) {
+      if (!siteNameInput) setSiteNameInput(settingsQuery.data.site.siteName);
+      if (!faviconUrlInput) setFaviconUrlInput(settingsQuery.data.site.faviconUrl);
+    }
+  }, [settingsQuery.data?.site, siteNameInput, faviconUrlInput]);
 
   useEffect(() => {
     if (settingsQuery.data?.origin && !originInput) {
@@ -168,42 +168,22 @@ export function AdminPage() {
     }
   }, [currentUser?.email, testEmailTo]);
 
-  useEffect(() => {
-    if (!selectedUserId && overviewQuery.data?.users.length) {
-      setSelectedUserId(overviewQuery.data.users[0].id);
-    }
-  }, [overviewQuery.data?.users, selectedUserId]);
-
-  const roleMutation = useMutation({
-    mutationFn: ({ userId, role }: { userId: string; role: 'admin' | 'member' }) =>
-      api.adminSetUserRole(userId, role),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['admin-overview'] });
-      toast.success('Rôle utilisateur mis à jour');
-    },
-    onError: (err) => toast.error(err instanceof Error ? err.message : 'Action refusée'),
-  });
-
-  const assignSubMutation = useMutation({
-    mutationFn: ({
-      userId,
-      planId,
-      durationDays,
-    }: {
-      userId: string;
-      planId: string;
-      durationDays?: number;
-    }) => api.adminAssignUserSubscription(userId, { planId, durationDays }),
+  const saveSiteConfigMutation = useMutation({
+    mutationFn: (payload: {
+      siteName: string;
+      faviconUrl?: string;
+      faviconUploadDataUrl?: string | null;
+    }) => api.adminSaveSiteConfig(payload),
     onSuccess: (res) => {
-      void queryClient.invalidateQueries({ queryKey: ['admin-overview'] });
-      void refreshUser();
-      toast.success(
-        res.subscription.tier === 'pro'
-          ? `Statut Pro activé (${res.subscription.planName})`
-          : 'Compte repassé en offre Basic (Gratuit)'
-      );
+      setSiteNameInput(res.site.siteName);
+      setFaviconUrlInput(res.site.faviconUrl);
+      setFaviconUploadDataUrl(null);
+      if (faviconFileInputRef.current) faviconFileInputRef.current.value = '';
+      void queryClient.invalidateQueries({ queryKey: ['site-config'] });
+      void queryClient.invalidateQueries({ queryKey: ['admin-settings'] });
+      toast.success('Nom du site et favicon enregistrés');
     },
-    onError: (err) => toast.error(err instanceof Error ? err.message : 'Attribution impossible'),
+    onError: (err) => toast.error(err instanceof Error ? err.message : 'Enregistrement impossible'),
   });
 
   const saveOriginMutation = useMutation({
@@ -281,12 +261,29 @@ export function AdminPage() {
     },
   });
 
+  function handleFaviconFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 1_500_000) {
+      toast.error('Le fichier favicon doit faire moins de 1,5 Mo.');
+      e.target.value = '';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setFaviconUploadDataUrl(reader.result);
+      }
+    };
+    reader.readAsDataURL(file);
+  }
+
   if (!isAdmin) {
     return (
       <main className="mx-auto max-w-4xl px-4 py-16 text-center sm:px-6">
         <h1 className="font-display text-3xl font-bold text-foreground">Accès réservé</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Cette console et l’onglet Statistiques sont accessibles uniquement aux administrateurs StreamWall.
+          Cette console est accessible uniquement aux administrateurs {siteName}.
         </p>
         {currentUser && (
           <p className="mt-2 mb-6 text-xs text-muted-foreground">
@@ -306,9 +303,7 @@ export function AdminPage() {
   const data = overviewQuery.data;
   const availablePlans = billingQuery.data?.plans ?? [];
   const onlineUsers = data?.users.filter((u) => u.online) ?? [];
-  const watchingNow = onlineUsers.filter((u) => u.currentItem);
   const totalWeekPlays = (data?.top7 ?? []).reduce((sum, r) => sum + r.plays, 0);
-  const selectedUser = data?.users.find((u) => u.id === selectedUserId) ?? null;
 
   const mergedPlayers: PlayerTemplates | null = settingsQuery.data
     ? { ...settingsQuery.data.players, ...playerEdits }
@@ -321,6 +316,7 @@ export function AdminPage() {
     settingsQuery.data?.embedProvider ||
     'https://streamwall.behoririka.mg'
   ).replace(/\/+$/, '');
+  const previewFaviconSrc = faviconUploadDataUrl || faviconUrlInput || '/favicon.ico';
 
   return (
     <main className="mx-auto max-w-7xl space-y-8 px-4 py-8 sm:px-6 sm:py-10">
@@ -330,7 +326,7 @@ export function AdminPage() {
             Console d’administration
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Statistiques Web Analytics, offres & paiements (Par Carte ou Crypto), membres Supabase, lecteurs et domaine API.
+            Statistiques, offres & paiements (Par Carte ou Crypto), utilisateurs, notifications, configuration du site et lecteurs.
           </p>
         </div>
         <div className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-1.5 text-xs text-muted-foreground">
@@ -372,8 +368,8 @@ export function AdminPage() {
             ['analytics', 'Statistiques', BarChart3],
             ['offers', 'Offres & Paiements', CreditCard],
             ['users', 'Utilisateurs', Users],
-            ['stats', 'Les plus regardés', null],
-            ['api', 'État & Domaine API', null],
+            ['notifications', 'Notifications', Bell],
+            ['api', 'Configuration & API', Globe],
             ['players', 'Lecteurs', null],
             ['comments', 'Modération', null],
           ] as const
@@ -402,345 +398,157 @@ export function AdminPage() {
       {/* TAB: OFFERS & PAYMENTS */}
       {tab === 'offers' && <AdminBillingTab />}
 
-      {/* TAB 1: USERS */}
+      {/* TAB: DYNAMIC USERS TABLE */}
       {tab === 'users' && (
-        <div className="space-y-4">
-          {overviewQuery.isError && (
-            <div className="flex items-start gap-2.5 rounded-xl border border-destructive/40 bg-destructive/10 p-4 text-xs text-foreground">
-              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" />
-              <div>
-                <p className="font-semibold">Erreur de chargement des utilisateurs Supabase</p>
-                <p className="mt-0.5 text-muted-foreground">
-                  {overviewQuery.error instanceof Error
-                    ? overviewQuery.error.message
-                    : 'Vérifiez vos secrets Supabase et les droits RLS.'}
-                </p>
-              </div>
-            </div>
-          )}
-
-          {data?.warning && (
-            <div className="flex items-start gap-2.5 rounded-xl border border-primary/40 bg-card p-4 text-xs text-foreground">
-              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-primary" />
-              <p className="text-muted-foreground">{data.warning}</p>
-            </div>
-          )}
-
-          <div className="grid gap-6 lg:grid-cols-2">
-            <section className="rounded-xl border border-border bg-card p-5">
-              <div className="mb-4 flex items-center justify-between gap-2">
-                <h2 className="font-display text-xl font-semibold text-foreground">
-                  Comptes & Présence ({watchingNow.length} en lecture)
-                </h2>
-                {data?.source && (
-                  <span className="text-xs text-muted-foreground">
-                    {data.source === 'supabase_auth'
-                      ? 'Supabase Auth'
-                      : data.source === 'supabase_rpc'
-                        ? 'Supabase RPC'
-                        : data.source === 'supabase_profiles'
-                          ? 'Supabase Profiles'
-                          : 'Local'}
-                  </span>
-                )}
-              </div>
-              <ul className="divide-y divide-border">
-                {(data?.users ?? []).map((u) => (
-                  <li key={u.id}>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedUserId(u.id)}
-                      className={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-3 text-left transition-colors ${
-                        selectedUserId === u.id ? 'bg-accent' : 'hover:bg-accent/60'
-                      }`}
-                    >
-                      <div className="flex min-w-0 items-center gap-3">
-                        <UserAvatar
-                          avatar={u.avatar}
-                          seed={u.id}
-                          username={u.username}
-                          isPro={u.isPro}
-                          size="sm"
-                        />
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <p className="truncate text-sm font-semibold text-foreground">
-                              {u.username || 'Sans pseudo'}
-                            </p>
-                            {u.isPro && <ProCrownBadge />}
-                            {u.isAdmin && (
-                              <span className="text-xs font-medium text-primary">· Admin</span>
-                            )}
-                          </div>
-                          <p className="truncate text-xs text-muted-foreground">{u.email}</p>
-                        </div>
-                      </div>
-
-                      <div className="shrink-0 text-right text-xs tabular-nums">
-                        <p className={u.online ? 'font-semibold text-emerald-400' : 'text-muted-foreground'}>
-                          {u.online
-                            ? u.currentItem
-                              ? `En lecture : ${u.currentItem.titre}`
-                              : 'En ligne'
-                            : u.lastSeen
-                              ? `Vu ${new Date(u.lastSeen).toLocaleTimeString('fr-FR', {
-                                  hour: '2-digit',
-                                  minute: '2-digit',
-                                })}`
-                              : 'Hors ligne'}
-                        </p>
-                        <p className="mt-0.5 text-muted-foreground">{u.plays} lecture(s)</p>
-                      </div>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </section>
-
-            <section className="rounded-xl border border-border bg-card p-5 space-y-6">
-              {!selectedUser ? (
-                <p className="text-sm text-muted-foreground">
-                  Sélectionnez un utilisateur pour consulter son activité et gérer son statut Pro.
-                </p>
-              ) : (
-                <div>
-                  <div className="mb-5 flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
-                    <div className="flex items-center gap-3">
-                      <UserAvatar
-                        avatar={selectedUser.avatar}
-                        seed={selectedUser.id}
-                        username={selectedUser.username}
-                        isPro={selectedUser.isPro}
-                        size="md"
-                      />
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <h2 className="font-display text-xl font-semibold text-foreground">
-                            {selectedUser.username || selectedUser.email}
-                          </h2>
-                          {selectedUser.isPro && <ProCrownBadge />}
-                        </div>
-                        <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">
-                          {selectedUser.online ? 'Actuellement en ligne' : 'Hors ligne'} · Inscrit le{' '}
-                          {new Date(selectedUser.createdAt).toLocaleDateString('fr-FR')}
-                        </p>
-                      </div>
-                    </div>
-
-                    {selectedUser.id !== currentUser?.id && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          roleMutation.mutate({
-                            userId: selectedUser.id,
-                            role: selectedUser.isAdmin ? 'member' : 'admin',
-                          })
-                        }
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent whitespace-nowrap shrink-0"
-                      >
-                        <Shield className="size-3.5 text-primary" />
-                        <span>
-                          {selectedUser.isAdmin ? 'Rétrograder Membre' : 'Promouvoir Admin'}
-                        </span>
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Manual Pro / Basic Assignment Block */}
-                  <div className="mb-6 border-b border-border pb-5 space-y-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <Crown
-                          className={`size-4 ${
-                            selectedUser.isPro
-                              ? 'fill-amber-400 text-amber-400'
-                              : 'text-muted-foreground'
-                          }`}
-                        />
-                        <h3 className="text-sm font-semibold text-foreground">
-                          Statut Abonnement :{' '}
-                          {selectedUser.isPro
-                            ? `${selectedUser.subscription?.planName || 'Pro'}`
-                            : 'Basic (Gratuit)'}
-                        </h3>
-                      </div>
-                      <span className="text-xs text-muted-foreground tabular-nums">
-                        {selectedUser.isPro
-                          ? selectedUser.subscription?.expiresAt
-                            ? `Expire le ${new Date(selectedUser.subscription.expiresAt).toLocaleDateString('fr-FR')}`
-                            : 'Durée illimitée'
-                          : 'Rétrogradation auto à expiration'}
-                      </span>
-                    </div>
-
-                    <div className="grid gap-3 sm:grid-cols-3">
-                      <label className="block text-xs">
-                        <span className="mb-1 block text-muted-foreground">Offre</span>
-                        <select
-                          value={assignPlanId}
-                          onChange={(e) => {
-                            const nextId = e.target.value;
-                            setAssignPlanId(nextId);
-                            const found = availablePlans.find((p) => p.id === nextId);
-                            if (found) setAssignDays(String(found.durationDays));
-                          }}
-                          className="w-full rounded-lg border border-input bg-background px-3 py-2 text-xs text-foreground focus:border-primary focus:outline-none"
-                        >
-                          {(availablePlans.length > 0
-                            ? availablePlans
-                            : [
-                                { id: 'pro', name: 'Pro Mensuel' },
-                                { id: 'pro_yearly', name: 'Pro Annuel' },
-                                { id: 'free', name: 'Gratuit (Basic)' },
-                              ]
-                          ).map((p) => (
-                            <option key={p.id} value={p.id}>
-                              {p.name}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      <label className="block text-xs">
-                        <span className="mb-1 block text-muted-foreground">
-                          Durée (jours, 0 = ∞)
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          disabled={assignPlanId === 'free'}
-                          value={assignDays}
-                          onChange={(e) => setAssignDays(e.target.value)}
-                          className="w-full rounded-lg border border-input bg-background px-3 py-2 text-xs text-foreground tabular-nums focus:border-primary focus:outline-none disabled:opacity-50"
-                        />
-                      </label>
-
-                      <div className="flex items-end gap-2">
-                        <button
-                          type="button"
-                          disabled={assignSubMutation.isPending}
-                          onClick={() =>
-                            assignSubMutation.mutate({
-                              userId: selectedUser.id,
-                              planId: assignPlanId,
-                              durationDays: Math.max(0, Number(assignDays) || 0),
-                            })
-                          }
-                          className="flex-1 rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap"
-                        >
-                          Appliquer
-                        </button>
-                        {selectedUser.isPro && (
-                          <button
-                            type="button"
-                            disabled={assignSubMutation.isPending}
-                            onClick={() =>
-                              assignSubMutation.mutate({
-                                userId: selectedUser.id,
-                                planId: 'free',
-                                durationDays: 0,
-                              })
-                            }
-                            className="rounded-lg border border-border bg-background px-2.5 py-2 text-xs font-medium text-muted-foreground hover:text-destructive whitespace-nowrap"
-                          >
-                            Passer Basic
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <h3 className="mb-2 text-xs font-semibold text-muted-foreground">
-                    En cours de lecture
-                  </h3>
-                  {selectedUser.online && selectedUser.currentItem ? (
-                    <ItemRow item={selectedUser.currentItem} extra="En direct" />
-                  ) : (
-                    <p className="mb-4 text-sm text-muted-foreground">Aucune lecture active.</p>
-                  )}
-
-                  <h3 className="mt-6 mb-2 text-xs font-semibold text-muted-foreground">
-                    Historique de visionnage
-                  </h3>
-                  {historyQuery.isLoading ? (
-                    <p className="text-sm text-muted-foreground">Chargement…</p>
-                  ) : historyQuery.data?.history.length ? (
-                    <div className="max-h-96 space-y-1 overflow-y-auto pr-1">
-                      {historyQuery.data.history.map((h) => (
-                        <ItemRow
-                          key={h.id}
-                          item={h.item}
-                          extra={new Date(h.viewedAt).toLocaleString('fr-FR', {
-                            dateStyle: 'short',
-                            timeStyle: 'short',
-                          })}
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-sm text-muted-foreground">Aucun visionnage enregistré.</p>
-                  )}
-                </div>
-              )}
-            </section>
-          </div>
-        </div>
+        <AdminUsersTab
+          data={data}
+          isError={overviewQuery.isError}
+          error={overviewQuery.error}
+          availablePlans={availablePlans}
+          currentUser={currentUser}
+          onRefreshUser={refreshUser}
+          onNotifyUser={(userId) => {
+            setPreselectedNotifyUserIds([userId]);
+            setTab('notifications');
+          }}
+        />
       )}
 
-      {/* TAB 2: STATS */}
-      {tab === 'stats' && (
-        <section className="rounded-xl border border-border bg-card p-6">
-          <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
-            <h2 className="font-display text-xl font-semibold text-foreground">
-              Titres les plus regardés
-            </h2>
-            <div className="inline-flex items-center gap-1 rounded-lg border border-border bg-background p-1">
-              <button
-                type="button"
-                onClick={() => setPeriod('top7')}
-                className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-                  period === 'top7'
-                    ? 'bg-primary text-primary-foreground'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                7 derniers jours
-              </button>
-              <button
-                type="button"
-                onClick={() => setPeriod('top30')}
-                className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-                  period === 'top30'
-                    ? 'bg-primary text-primary-foreground'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                30 derniers jours
-              </button>
-            </div>
-          </div>
-
-          {data?.[period].length ? (
-            <div className="grid gap-2 md:grid-cols-2">
-              {data[period].map((entry, idx) => (
-                <ItemRow
-                  key={`${entry.item.item_type}:${entry.item.id}-${idx}`}
-                  item={entry.item}
-                  extra={`#${idx + 1} · ${entry.viewers} spectateur(s) · ${entry.plays} lecture(s)`}
-                />
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              Aucun visionnage sur cette période.
-            </p>
-          )}
-        </section>
+      {/* TAB: ADMIN NOTIFICATIONS */}
+      {tab === 'notifications' && (
+        <AdminNotificationsTab
+          users={data?.users ?? []}
+          preselectedUserIds={preselectedNotifyUserIds}
+        />
       )}
 
-      {/* TAB 3: API ORIGIN & LIVE HEALTH DIAGNOSTIC */}
+      {/* TAB: SITE CONFIG, API ORIGIN & EMAIL */}
       {tab === 'api' && (
         <div className="space-y-6">
+          {/* Site Name & Favicon Configuration */}
+          <section className="rounded-xl border border-border bg-card p-6 space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-4">
+              <div className="flex items-center gap-3">
+                <div className="grid size-10 shrink-0 place-items-center rounded-xl border border-border bg-background overflow-hidden">
+                  <img
+                    src={previewFaviconSrc}
+                    alt="Aperçu favicon"
+                    className="size-6 object-contain"
+                  />
+                </div>
+                <div>
+                  <h2 className="font-display text-xl font-semibold text-foreground">
+                    Configuration du site (Nom & Favicon)
+                  </h2>
+                  <p className="text-xs text-muted-foreground">
+                    Personnalisez le nom affiché dans l’en-tête, les titres d’onglets navigateur et l’icône (favicon).
+                  </p>
+                </div>
+              </div>
+
+              {/* Live Browser Tab Preview */}
+              <div className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-1.5 text-xs text-muted-foreground">
+                <img
+                  src={previewFaviconSrc}
+                  alt=""
+                  className="size-4 shrink-0 object-contain"
+                />
+                <span className="max-w-48 truncate font-medium text-foreground">
+                  Accueil — {siteNameInput.trim() || siteName}
+                </span>
+              </div>
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                saveSiteConfigMutation.mutate({
+                  siteName: siteNameInput.trim(),
+                  faviconUrl: faviconUrlInput.trim(),
+                  faviconUploadDataUrl,
+                });
+              }}
+              className="space-y-4"
+            >
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="block text-xs">
+                  <span className="mb-1.5 block font-medium text-foreground">Nom du site</span>
+                  <input
+                    required
+                    maxLength={60}
+                    value={siteNameInput}
+                    onChange={(e) => setSiteNameInput(e.target.value)}
+                    placeholder="StreamWall"
+                    className="w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
+                  />
+                </label>
+
+                <label className="block text-xs">
+                  <span className="mb-1.5 block font-medium text-foreground">
+                    URL du Favicon (ou importez un fichier ci-dessous)
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      value={faviconUrlInput}
+                      onChange={(e) => {
+                        setFaviconUrlInput(e.target.value);
+                        setFaviconUploadDataUrl(null);
+                      }}
+                      placeholder="/favicon.ico ou https://..."
+                      className="w-full rounded-lg border border-input bg-background px-3.5 py-2.5 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      title="Réinitialiser par défaut (/favicon.ico)"
+                      onClick={() => {
+                        setFaviconUrlInput('/favicon.ico');
+                        setFaviconUploadDataUrl(null);
+                        if (faviconFileInputRef.current) faviconFileInputRef.current.value = '';
+                      }}
+                      className="inline-flex h-10 shrink-0 items-center gap-1 rounded-lg border border-border bg-background px-3 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+                    >
+                      <RotateCcw className="size-3.5" />
+                      <span>Défaut</span>
+                    </button>
+                  </div>
+                </label>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-border bg-background/60 p-4">
+                <div className="flex flex-wrap items-center gap-3">
+                  <input
+                    ref={faviconFileInputRef}
+                    type="file"
+                    accept=".ico,.png,.svg,.jpg,.jpeg,.webp,image/x-icon,image/png,image/svg+xml,image/jpeg,image/webp"
+                    onChange={handleFaviconFileChange}
+                    className="hidden"
+                    id="admin-favicon-upload"
+                  />
+                  <label
+                    htmlFor="admin-favicon-upload"
+                    className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-card px-3.5 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-accent"
+                  >
+                    <Upload className="size-3.5 text-primary" />
+                    <span>Importer un fichier favicon (.ico, .png, .svg)</span>
+                  </label>
+                  {faviconUploadDataUrl && (
+                    <span className="text-xs font-medium text-emerald-400">
+                      Nouveau fichier prêt à être enregistré
+                    </span>
+                  )}
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={saveSiteConfigMutation.isPending || !siteNameInput.trim()}
+                  className="rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap shrink-0"
+                >
+                  {saveSiteConfigMutation.isPending ? 'Enregistrement…' : 'Enregistrer la configuration du site'}
+                </button>
+              </div>
+            </form>
+          </section>
+
           <section className="rounded-xl border border-border bg-card p-6">
             <h2 className="mb-1 font-display text-xl font-semibold text-foreground">
               Domaine source de l’API
@@ -784,7 +592,7 @@ export function AdminPage() {
 
           <section className="rounded-xl border border-border bg-card p-6">
             <h2 className="mb-1 font-display text-xl font-semibold text-foreground">
-              Embed provider (Modifiable)
+              Embed provider
             </h2>
             <p className="mb-4 text-sm text-muted-foreground">
               Domaine de base utilisé pour charger les lecteurs embed. Les endpoints comme{' '}
@@ -881,7 +689,6 @@ export function AdminPage() {
                 </label>
               </div>
 
-              {/* Email provider selector */}
               <div className="flex flex-wrap gap-2">
                 {(
                   [
@@ -1093,7 +900,7 @@ export function AdminPage() {
                       onChange={(e) =>
                         setSmtpEdit((prev) => ({ ...prev, fromName: e.target.value }))
                       }
-                      placeholder="StreamWall"
+                      placeholder={siteName}
                       className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none"
                     />
                   </label>
@@ -1192,7 +999,7 @@ export function AdminPage() {
 
             {!healthReport ? (
               <p className="text-sm text-muted-foreground">
-                Cliquez sur « Tester la connectivité » pour mesurer la disponibilité et la latence réelle des 4 endpoints du serveur amont.
+                Cliquez sur « Tester la connectivité » pour mesurer la disponibilité et la latence réelle des endpoints du serveur amont.
               </p>
             ) : (
               <div className="overflow-x-auto">
@@ -1238,7 +1045,7 @@ export function AdminPage() {
         </div>
       )}
 
-      {/* TAB 4: GUEST PLAYER TEMPLATES */}
+      {/* TAB: GUEST PLAYER TEMPLATES */}
       {tab === 'players' && mergedPlayers && (
         <section className="rounded-xl border border-border bg-card p-6">
           <h2 className="mb-1 font-display text-xl font-semibold text-foreground">
@@ -1308,7 +1115,7 @@ export function AdminPage() {
         </section>
       )}
 
-      {/* TAB 5: COMMENT MODERATION */}
+      {/* TAB: COMMENT MODERATION */}
       {tab === 'comments' && (
         <section className="rounded-xl border border-border bg-card p-6">
           <h2 className="mb-4 font-display text-xl font-semibold text-foreground">
