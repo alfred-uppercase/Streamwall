@@ -8,13 +8,10 @@ import {
   CheckCircle2,
   CreditCard,
   Database,
-  Eye,
-  EyeOff,
   Globe,
   Mail,
   RefreshCw,
   RotateCcw,
-  Send,
   Trash2,
   Upload,
   Users,
@@ -27,9 +24,7 @@ import {
   PLAYER_KEYS,
 } from '../shared/types';
 import type {
-  AdminSmtpSettings,
   ApiHealthReport,
-  EmailProvider,
   PlayerKey,
   PlayerTemplates,
 } from '../shared/types';
@@ -39,6 +34,7 @@ import { AdminAnalyticsTab } from '../components/AdminAnalyticsTab';
 import { AdminBillingTab } from '../components/AdminBillingTab';
 import { AdminUsersTab } from '../components/AdminUsersTab';
 import { AdminNotificationsTab } from '../components/AdminNotificationsTab';
+import { AdminEmailsTab } from '../components/AdminEmailsTab';
 import { ProCrownBadge } from '../components/UserAvatar';
 
 const PLAYER_FIELDS: { key: PlayerKey; label: string; hint: string }[] = [
@@ -59,6 +55,7 @@ type AdminTab =
   | 'offers'
   | 'users'
   | 'notifications'
+  | 'emails'
   | 'api'
   | 'players'
   | 'comments';
@@ -68,6 +65,7 @@ const VALID_TABS: AdminTab[] = [
   'offers',
   'users',
   'notifications',
+  'emails',
   'api',
   'players',
   'comments',
@@ -78,6 +76,7 @@ const TAB_TITLE_MAP: Record<AdminTab, string> = {
   offers: 'Administration · Offres & Paiements',
   users: 'Administration · Utilisateurs',
   notifications: 'Administration · Notifications',
+  emails: 'Administration · Emails & Logs',
   api: 'Administration · Configuration & API',
   players: 'Administration · Lecteurs',
   comments: 'Administration · Modération',
@@ -128,14 +127,6 @@ export function AdminPage() {
   const [tmdbKeyInput, setTmdbKeyInput] = useState('');
   const [healthReport, setHealthReport] = useState<ApiHealthReport | null>(null);
   const [playerEdits, setPlayerEdits] = useState<Partial<PlayerTemplates>>({});
-  const [smtpEdit, setSmtpEdit] = useState<Partial<AdminSmtpSettings>>({});
-  const [smtpPassInput, setSmtpPassInput] = useState('');
-  const [showSmtpPass, setShowSmtpPass] = useState(false);
-  const [resendKeyInput, setResendKeyInput] = useState('');
-  const [showResendKey, setShowResendKey] = useState(false);
-  const [brevoKeyInput, setBrevoKeyInput] = useState('');
-  const [showBrevoKey, setShowBrevoKey] = useState(false);
-  const [testEmailTo, setTestEmailTo] = useState('');
 
   useEffect(() => {
     if (settingsQuery.data?.site) {
@@ -161,12 +152,6 @@ export function AdminPage() {
       setTmdbKeyInput(settingsQuery.data.tmdbApiKey);
     }
   }, [settingsQuery.data?.tmdbApiKey, tmdbKeyInput]);
-
-  useEffect(() => {
-    if (currentUser?.email && !testEmailTo) {
-      setTestEmailTo(currentUser.email);
-    }
-  }, [currentUser?.email, testEmailTo]);
 
   const saveSiteConfigMutation = useMutation({
     mutationFn: (payload: {
@@ -204,25 +189,6 @@ export function AdminPage() {
       toast.success('Embed provider enregistré');
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : 'URL Embed provider invalide'),
-  });
-
-  const saveSmtpMutation = useMutation({
-    mutationFn: (payload: Partial<AdminSmtpSettings>) => api.adminSaveSmtp(payload),
-    onSuccess: () => {
-      setSmtpEdit({});
-      setSmtpPassInput('');
-      setResendKeyInput('');
-      setBrevoKeyInput('');
-      void queryClient.invalidateQueries({ queryKey: ['admin-settings'] });
-      toast.success('Configuration email enregistrée');
-    },
-    onError: (err) => toast.error(err instanceof Error ? err.message : 'Enregistrement impossible'),
-  });
-
-  const testSmtpMutation = useMutation({
-    mutationFn: (to: string) => api.adminTestSmtp(to),
-    onSuccess: (res) => toast.success(res.message),
-    onError: (err) => toast.error(err instanceof Error ? err.message : 'Échec du test email'),
   });
 
   const saveTmdbMutation = useMutation({
@@ -308,9 +274,6 @@ export function AdminPage() {
   const mergedPlayers: PlayerTemplates | null = settingsQuery.data
     ? { ...settingsQuery.data.players, ...playerEdits }
     : null;
-  const mergedSmtp = settingsQuery.data?.smtp
-    ? { ...settingsQuery.data.smtp, ...smtpEdit }
-    : null;
   const embedBase = (
     embedProviderInput ||
     settingsQuery.data?.embedProvider ||
@@ -369,6 +332,7 @@ export function AdminPage() {
             ['offers', 'Offres & Paiements', CreditCard],
             ['users', 'Utilisateurs', Users],
             ['notifications', 'Notifications', Bell],
+            ['emails', 'Emails & Logs', Mail],
             ['api', 'Configuration & API', Globe],
             ['players', 'Lecteurs', null],
             ['comments', 'Modération', null],
@@ -419,6 +383,14 @@ export function AdminPage() {
         <AdminNotificationsTab
           users={data?.users ?? []}
           preselectedUserIds={preselectedNotifyUserIds}
+        />
+      )}
+
+      {/* TAB: EMAILS, TEMPLATES & MAIL LOGS */}
+      {tab === 'emails' && (
+        <AdminEmailsTab
+          smtpStatus={settingsQuery.data?.smtp}
+          supabaseServiceRoleConfigured={settingsQuery.data?.supabaseServiceRoleConfigured}
         />
       )}
 
@@ -658,329 +630,30 @@ export function AdminPage() {
             </form>
           </section>
 
-          {/* Email Configuration: SMTP / Resend API / Brevo API */}
-          {mergedSmtp && (
-            <section className="rounded-xl border border-border bg-card p-6 space-y-5">
-              <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-4">
-                <div className="flex items-center gap-3">
-                  <div className="grid size-10 shrink-0 place-items-center rounded-xl border border-border bg-background text-primary">
-                    <Mail className="size-5" />
-                  </div>
-                  <div>
-                    <h2 className="font-display text-xl font-semibold text-foreground">
-                      Configuration Email (SMTP / Resend / Brevo)
-                    </h2>
-                    <p className="text-xs text-muted-foreground">
-                      Choisissez entre un serveur SMTP classique ou l’API directe Resend / Brevo pour les emails d’inscription, de confirmation et de réinitialisation.
-                    </p>
-                  </div>
-                </div>
-
-                <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-xs font-semibold text-foreground">
-                  <input
-                    type="checkbox"
-                    checked={mergedSmtp.enabled}
-                    onChange={(e) =>
-                      setSmtpEdit((prev) => ({ ...prev, enabled: e.target.checked }))
-                    }
-                    className="size-4 accent-primary"
-                  />
-                  <span>Activer l’envoi d’emails</span>
-                </label>
+          {/* Shortcut to Emails & Logs Tab */}
+          <section className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-border bg-card p-5">
+            <div className="flex items-center gap-3">
+              <div className="grid size-10 shrink-0 place-items-center rounded-xl border border-border bg-background text-primary">
+                <Mail className="size-5" />
               </div>
-
-              <div className="flex flex-wrap gap-2">
-                {(
-                  [
-                    { id: 'smtp', label: 'SMTP classique' },
-                    { id: 'resend', label: 'Resend API' },
-                    { id: 'brevo', label: 'Brevo API' },
-                  ] as { id: EmailProvider; label: string }[]
-                ).map((opt) => {
-                  const active = (mergedSmtp.provider || 'smtp') === opt.id;
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => setSmtpEdit((prev) => ({ ...prev, provider: opt.id }))}
-                      className={`inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-                        active
-                          ? 'border-primary bg-primary text-primary-foreground'
-                          : 'border-border bg-background text-muted-foreground hover:text-foreground'
-                      }`}
-                    >
-                      <span>{opt.label}</span>
-                    </button>
-                  );
-                })}
+              <div>
+                <h2 className="font-display text-lg font-semibold text-foreground">
+                  Passerelle Email, Templates & Journaux d’envoi
+                </h2>
+                <p className="text-xs text-muted-foreground">
+                  Configurez SMTP / Resend / Brevo, personnalisez les templates (inscription, changement d’email, offre) et consultez les logs détaillés.
+                </p>
               </div>
-
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  saveSmtpMutation.mutate({
-                    ...smtpEdit,
-                    provider: mergedSmtp.provider || 'smtp',
-                    enabled: mergedSmtp.enabled,
-                    host: mergedSmtp.host,
-                    port: Number(mergedSmtp.port) || 587,
-                    secure: mergedSmtp.secure,
-                    user: mergedSmtp.user,
-                    fromName: mergedSmtp.fromName,
-                    fromEmail: mergedSmtp.fromEmail,
-                    requireSignupConfirmation: mergedSmtp.requireSignupConfirmation,
-                    ...(smtpPassInput.trim() ? { pass: smtpPassInput.trim() } : {}),
-                    ...(resendKeyInput.trim() ? { resendApiKey: resendKeyInput.trim() } : {}),
-                    ...(brevoKeyInput.trim() ? { brevoApiKey: brevoKeyInput.trim() } : {}),
-                  });
-                }}
-                className="space-y-4"
-              >
-                {(mergedSmtp.provider || 'smtp') === 'smtp' && (
-                  <>
-                    <div className="grid gap-4 sm:grid-cols-3">
-                      <label className="block text-xs sm:col-span-2">
-                        <span className="mb-1 block font-medium text-foreground">Serveur SMTP (Host)</span>
-                        <input
-                          value={mergedSmtp.host}
-                          onChange={(e) => setSmtpEdit((prev) => ({ ...prev, host: e.target.value }))}
-                          placeholder="smtp.gmail.com ou smtp-relay.brevo.com"
-                          className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
-                        />
-                      </label>
-
-                      <label className="block text-xs">
-                        <span className="mb-1 block font-medium text-foreground">Port SMTP</span>
-                        <input
-                          type="number"
-                          min={1}
-                          max={65535}
-                          value={mergedSmtp.port}
-                          onChange={(e) =>
-                            setSmtpEdit((prev) => ({
-                              ...prev,
-                              port: Number(e.target.value) || 587,
-                              secure: Number(e.target.value) === 465 ? true : prev.secure,
-                            }))
-                          }
-                          className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground tabular-nums focus:border-primary focus:outline-none"
-                        />
-                      </label>
-                    </div>
-
-                    <div className="grid gap-4 sm:grid-cols-2">
-                      <label className="block text-xs">
-                        <span className="mb-1 block font-medium text-foreground">Utilisateur SMTP</span>
-                        <input
-                          value={mergedSmtp.user}
-                          onChange={(e) => setSmtpEdit((prev) => ({ ...prev, user: e.target.value }))}
-                          placeholder="contact@votredomaine.com"
-                          className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none"
-                        />
-                      </label>
-
-                      <label className="block text-xs">
-                        <span className="mb-1 flex items-center justify-between gap-2 font-medium text-foreground">
-                          <span>Mot de passe / Clé SMTP</span>
-                          {settingsQuery.data?.smtp?.passMask && (
-                            <span className="font-mono text-[11px] text-emerald-400">
-                              Actuel : {settingsQuery.data.smtp.passMask}
-                            </span>
-                          )}
-                        </span>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type={showSmtpPass ? 'text' : 'password'}
-                            value={smtpPassInput}
-                            onChange={(e) => setSmtpPassInput(e.target.value)}
-                            placeholder={
-                              settingsQuery.data?.smtp?.passConfigured
-                                ? 'Laisser vide pour conserver le mot de passe actuel'
-                                : 'Mot de passe ou clé d’application SMTP'
-                            }
-                            className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setShowSmtpPass((v) => !v)}
-                            aria-label={showSmtpPass ? 'Masquer' : 'Afficher'}
-                            className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-background text-muted-foreground hover:text-foreground"
-                          >
-                            {showSmtpPass ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                          </button>
-                        </div>
-                      </label>
-                    </div>
-                  </>
-                )}
-
-                {mergedSmtp.provider === 'resend' && (
-                  <div className="space-y-2 rounded-lg border border-border bg-background/50 p-4">
-                    <label className="block text-xs">
-                      <span className="mb-1 flex items-center justify-between gap-2 font-medium text-foreground">
-                        <span>Clé API Resend</span>
-                        {settingsQuery.data?.smtp?.resendApiKeyMask && (
-                          <span className="font-mono text-[11px] text-emerald-400">
-                            Actuelle : {settingsQuery.data.smtp.resendApiKeyMask}
-                          </span>
-                        )}
-                      </span>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type={showResendKey ? 'text' : 'password'}
-                          value={resendKeyInput}
-                          onChange={(e) => setResendKeyInput(e.target.value)}
-                          placeholder={
-                            settingsQuery.data?.smtp?.resendApiKeyConfigured
-                              ? 'Laisser vide pour conserver la clé Resend actuelle'
-                              : 're_xxxxxxxxxxxxxxxxxxxxxxxxx'
-                          }
-                          className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowResendKey((v) => !v)}
-                          aria-label={showResendKey ? 'Masquer' : 'Afficher'}
-                          className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-background text-muted-foreground hover:text-foreground"
-                        >
-                          {showResendKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                        </button>
-                      </div>
-                    </label>
-                    <p className="text-[11px] text-muted-foreground">
-                      Envoi via <code className="font-mono text-primary">api.resend.com</code>. Indiquez ci-dessous un email d’expéditeur vérifié sur Resend (ou <code className="font-mono text-primary">onboarding@resend.dev</code> pour tester).
-                    </p>
-                  </div>
-                )}
-
-                {mergedSmtp.provider === 'brevo' && (
-                  <div className="space-y-2 rounded-lg border border-border bg-background/50 p-4">
-                    <label className="block text-xs">
-                      <span className="mb-1 flex items-center justify-between gap-2 font-medium text-foreground">
-                        <span>Clé API Brevo (v3)</span>
-                        {settingsQuery.data?.smtp?.brevoApiKeyMask && (
-                          <span className="font-mono text-[11px] text-emerald-400">
-                            Actuelle : {settingsQuery.data.smtp.brevoApiKeyMask}
-                          </span>
-                        )}
-                      </span>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type={showBrevoKey ? 'text' : 'password'}
-                          value={brevoKeyInput}
-                          onChange={(e) => setBrevoKeyInput(e.target.value)}
-                          placeholder={
-                            settingsQuery.data?.smtp?.brevoApiKeyConfigured
-                              ? 'Laisser vide pour conserver la clé Brevo actuelle'
-                              : 'xkeysib-xxxxxxxxxxxxxxxxxxxxxxxxx'
-                          }
-                          className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowBrevoKey((v) => !v)}
-                          aria-label={showBrevoKey ? 'Masquer' : 'Afficher'}
-                          className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-background text-muted-foreground hover:text-foreground"
-                        >
-                          {showBrevoKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                        </button>
-                      </div>
-                    </label>
-                    <p className="text-[11px] text-muted-foreground">
-                      Envoi via <code className="font-mono text-primary">api.brevo.com/v3/smtp/email</code>. Indiquez ci-dessous une adresse d’expéditeur validée dans votre compte Brevo.
-                    </p>
-                  </div>
-                )}
-
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <label className="block text-xs">
-                    <span className="mb-1 block font-medium text-foreground">Nom d’expéditeur</span>
-                    <input
-                      value={mergedSmtp.fromName}
-                      onChange={(e) =>
-                        setSmtpEdit((prev) => ({ ...prev, fromName: e.target.value }))
-                      }
-                      placeholder={siteName}
-                      className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none"
-                    />
-                  </label>
-
-                  <label className="block text-xs">
-                    <span className="mb-1 block font-medium text-foreground">Email d’expéditeur</span>
-                    <input
-                      type="email"
-                      value={mergedSmtp.fromEmail}
-                      onChange={(e) =>
-                        setSmtpEdit((prev) => ({ ...prev, fromEmail: e.target.value }))
-                      }
-                      placeholder="noreply@votredomaine.com"
-                      className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none"
-                    />
-                  </label>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-6 pt-1">
-                  {(mergedSmtp.provider || 'smtp') === 'smtp' && (
-                    <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-foreground">
-                      <input
-                        type="checkbox"
-                        checked={mergedSmtp.secure}
-                        onChange={(e) =>
-                          setSmtpEdit((prev) => ({ ...prev, secure: e.target.checked }))
-                        }
-                        className="size-4 accent-primary"
-                      />
-                      <span>Connexion chiffrée SSL/TLS directe (port 465)</span>
-                    </label>
-                  )}
-
-                  <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-foreground">
-                    <input
-                      type="checkbox"
-                      checked={mergedSmtp.requireSignupConfirmation}
-                      onChange={(e) =>
-                        setSmtpEdit((prev) => ({
-                          ...prev,
-                          requireSignupConfirmation: e.target.checked,
-                        }))
-                      }
-                      className="size-4 accent-primary"
-                    />
-                    <span>Exiger la confirmation par email lors de l’inscription</span>
-                  </label>
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-4 border-t border-border pt-4">
-                  <button
-                    type="submit"
-                    disabled={saveSmtpMutation.isPending}
-                    className="rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap"
-                  >
-                    {saveSmtpMutation.isPending ? 'Enregistrement…' : 'Enregistrer la configuration email'}
-                  </button>
-
-                  <div className="flex flex-wrap items-center gap-2">
-                    <input
-                      type="email"
-                      value={testEmailTo}
-                      onChange={(e) => setTestEmailTo(e.target.value)}
-                      placeholder="Email de test…"
-                      className="w-56 rounded-lg border border-input bg-background px-3 py-2 text-xs text-foreground focus:border-primary focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      disabled={testSmtpMutation.isPending || !testEmailTo.includes('@')}
-                      onClick={() => testSmtpMutation.mutate(testEmailTo.trim())}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-background px-3.5 py-2 text-xs font-semibold text-foreground hover:bg-accent disabled:opacity-50 whitespace-nowrap shrink-0"
-                    >
-                      <Send className="size-3.5 text-primary" />
-                      <span>{testSmtpMutation.isPending ? 'Envoi…' : 'Tester l’envoi'}</span>
-                    </button>
-                  </div>
-                </div>
-              </form>
-            </section>
-          )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setTab('emails')}
+              className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 whitespace-nowrap shrink-0"
+            >
+              <Mail className="size-3.5" />
+              <span>Ouvrir Emails & Logs</span>
+            </button>
+          </section>
 
           <section className="rounded-xl border border-border bg-card p-6">
             <div className="mb-4 flex items-center justify-between gap-4">

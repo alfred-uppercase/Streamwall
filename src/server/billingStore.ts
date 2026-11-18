@@ -16,11 +16,31 @@ import {
   type UserSubscription,
   type UserThemePreference,
 } from '../shared/types.ts';
+import {
+  isSmtpReady,
+  sendSubscriptionActivatedEmail,
+  sendSubscriptionExpiredEmail,
+} from './mailer.ts';
 import { createNotification } from './notificationsStore.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', '..', '.data');
 const BILLING_FILE = path.join(DATA_DIR, 'tapenaka-billing.json');
+
+let knownAppUrl = (process.env.APP_URL || '').trim().replace(/\/+$/, '');
+
+export function setBillingAppUrl(url: string): void {
+  const clean = (url || '').trim().replace(/\/+$/, '');
+  if (clean && /^https?:\/\//i.test(clean)) {
+    knownAppUrl = clean;
+  }
+}
+
+export interface BanRecord {
+  bannedAt: string;
+  reason: string;
+  bannedBy: string;
+}
 
 interface BillingDatabase {
   plans: SubscriptionPlan[];
@@ -28,6 +48,8 @@ interface BillingDatabase {
   orders: PaymentOrder[];
   avatars: Record<string, string>; // userId -> "avatar:01".."avatar:12"
   themes: Record<string, UserThemePreference>;
+  userDirectory?: Record<string, { email: string; username: string }>;
+  bannedUsers?: Record<string, BanRecord>;
   cryptoGateApiKey?: string;
   cryptoGateWebhookSecret?: string;
   config: {
@@ -166,6 +188,8 @@ function loadBillingDb(): BillingDatabase {
           orders: Array.isArray(parsed.orders) ? parsed.orders : [],
           avatars: parsed.avatars ?? {},
           themes: parsed.themes ?? {},
+          userDirectory: parsed.userDirectory ?? {},
+          bannedUsers: parsed.bannedUsers ?? {},
         };
         if (migrated) saveBillingDb(loaded);
         return loaded;
@@ -189,6 +213,93 @@ function saveBillingDb(state: BillingDatabase): void {
 }
 
 const billingDb: BillingDatabase = loadBillingDb();
+
+export function registerUserDirectoryEntry(userId: string, email?: string, username?: string): void {
+  if (!userId || !email || !email.includes('@')) return;
+  const dir = billingDb.userDirectory ?? {};
+  const prev = dir[userId];
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanName = (username || prev?.username || cleanEmail.split('@')[0] || 'Membre').trim();
+  if (prev?.email === cleanEmail && prev?.username === cleanName) return;
+  dir[userId] = { email: cleanEmail, username: cleanName };
+  billingDb.userDirectory = dir;
+  saveBillingDb(billingDb);
+}
+
+function resolveUserContact(
+  userId: string,
+  fallbackEmail?: string,
+  fallbackUsername?: string
+): { email: string; username: string } | null {
+  if (fallbackEmail && fallbackEmail.includes('@')) {
+    registerUserDirectoryEntry(userId, fallbackEmail, fallbackUsername);
+    return {
+      email: fallbackEmail.trim().toLowerCase(),
+      username: (fallbackUsername || fallbackEmail.split('@')[0] || 'Membre').trim(),
+    };
+  }
+  const fromDir = billingDb.userDirectory?.[userId];
+  if (fromDir?.email && fromDir.email.includes('@')) {
+    return fromDir;
+  }
+  const fromOrder = billingDb.orders.find((o) => o.userId === userId && o.userEmail?.includes('@'));
+  if (fromOrder) {
+    return { email: fromOrder.userEmail, username: fromOrder.username || 'Membre' };
+  }
+  return null;
+}
+
+export function banUser(userId: string, bannedBy: string, reason?: string): BanRecord {
+  const bans = billingDb.bannedUsers ?? {};
+  const record: BanRecord = {
+    bannedAt: new Date().toISOString(),
+    reason: String(reason || '').trim().slice(0, 240),
+    bannedBy,
+  };
+  bans[userId] = record;
+  billingDb.bannedUsers = bans;
+  saveBillingDb(billingDb);
+  return record;
+}
+
+export function unbanUser(userId: string): void {
+  if (!billingDb.bannedUsers?.[userId]) return;
+  delete billingDb.bannedUsers[userId];
+  saveBillingDb(billingDb);
+}
+
+export function getUserBanInfo(userId: string): BanRecord | null {
+  return billingDb.bannedUsers?.[userId] ?? null;
+}
+
+export function isUserBanned(userId: string): boolean {
+  return Boolean(billingDb.bannedUsers?.[userId]);
+}
+
+export function cleanupUserBillingData(userId: string): void {
+  let dirty = false;
+  if (billingDb.subscriptions[userId]) {
+    delete billingDb.subscriptions[userId];
+    dirty = true;
+  }
+  if (billingDb.avatars[userId]) {
+    delete billingDb.avatars[userId];
+    dirty = true;
+  }
+  if (billingDb.themes[userId]) {
+    delete billingDb.themes[userId];
+    dirty = true;
+  }
+  if (billingDb.userDirectory?.[userId]) {
+    delete billingDb.userDirectory[userId];
+    dirty = true;
+  }
+  if (billingDb.bannedUsers?.[userId]) {
+    delete billingDb.bannedUsers[userId];
+    dirty = true;
+  }
+  if (dirty) saveBillingDb(billingDb);
+}
 
 export function getFreePlan(): SubscriptionPlan {
   return (
@@ -230,6 +341,16 @@ export function reconcileExpiredSubscriptions(): boolean {
           link: '/abonnement',
           dedupKey: `pro_expired:${sub.planId}:${sub.expiresAt}`,
         });
+        const contact = resolveUserContact(userId);
+        if (contact && isSmtpReady()) {
+          void sendSubscriptionExpiredEmail({
+            to: contact.email,
+            username: contact.username,
+            planName: sub.planName,
+            expiredAt: sub.expiresAt,
+            renewUrl: knownAppUrl ? `${knownAppUrl}/abonnement` : '',
+          });
+        }
         changed = true;
       } else if (Number.isFinite(expMs) && expMs - now <= 5 * 86_400_000) {
         const daysLeft = Math.max(1, Math.ceil((expMs - now) / 86_400_000));
@@ -303,13 +424,22 @@ export function assignUserPlan(params: {
   source: UserSubscription['source'];
   autoRenew?: boolean;
   stackDuration?: boolean;
+  userEmail?: string;
+  username?: string;
+  appUrl?: string;
 }): UserSubscription {
   reconcileExpiredSubscriptions();
-  const plan = billingDb.plans.find((p) => p.id === params.planId) ?? getFreePlan();
+  const plan =
+    params.planId === 'free'
+      ? getFreePlan()
+      : billingDb.plans.find((p) => p.id === params.planId) ?? getFreePlan();
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
 
-  if (plan.tier === 'free') {
+  if (params.appUrl) setBillingAppUrl(params.appUrl);
+  const contact = resolveUserContact(params.userId, params.userEmail, params.username);
+
+  if (params.planId === 'free' || plan.tier === 'free') {
     const sub: UserSubscription = {
       userId: params.userId,
       planId: plan.id,
@@ -372,6 +502,16 @@ export function assignUserPlan(params: {
     link: '/profil',
     dedupKey: `pro_activated:${nowIso}`,
   });
+
+  if (contact && isSmtpReady()) {
+    void sendSubscriptionActivatedEmail({
+      to: contact.email,
+      username: contact.username,
+      planName: plan.name,
+      expiresAt: resolvedExpiresAt,
+      appUrl: params.appUrl || knownAppUrl,
+    });
+  }
 
   ensureExpiryWarningNotification(params.userId);
   return sub;
@@ -866,6 +1006,8 @@ export function reviewOrder(
     durationDays: order.durationDays,
     source: order.method === 'crypto_gate' ? 'crypto_gate' : 'manual_payment',
     stackDuration: true,
+    userEmail: order.userEmail,
+    username: order.username,
   });
   saveBillingDb(billingDb);
   return { order, subscription: sub };

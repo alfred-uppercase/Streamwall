@@ -21,6 +21,7 @@ import type {
   CastMember,
   CommentRecord,
   DetailItem,
+  EmailTemplateKey,
   EndpointCheck,
   Episode,
   Item,
@@ -57,15 +58,23 @@ import {
 } from './src/server/supabaseAdapter.ts';
 import { clearTmdbCache, enrichDetailWithTmdb } from './src/server/tmdbService.ts';
 import {
+  EMAIL_TEMPLATE_KEYS,
+  clearMailLogs,
   getAdminSmtpStatus,
   isSmtpReady,
+  listEmailTemplates,
+  listMailLogs,
+  resetEmailTemplate,
   sendEmailChangeNotice,
   sendPasswordResetEmail,
   sendSignupVerificationEmail,
+  sendTemplateTestEmail,
   sendTestEmail,
   sendWelcomeEmail,
+  setMailSiteNameResolver,
   shouldRequireSignupConfirmation,
   updateAdminSmtpConfig,
+  updateEmailTemplate,
 } from './src/server/mailer.ts';
 import type { AnalyticsPeriodKey } from './src/shared/analyticsTypes.ts';
 import {
@@ -76,6 +85,8 @@ import {
 } from './src/server/analyticsStore.ts';
 import {
   assignUserPlan,
+  banUser,
+  cleanupUserBillingData,
   createCryptoGateOrder,
   createManualOrder,
   deletePlan,
@@ -83,24 +94,30 @@ import {
   getAdminPaymentSecretsStatus,
   getAllPlanTemplates,
   getBillingConfig,
+  getUserBanInfo,
   getUserSubscription,
   getUserTheme,
+  isUserBanned,
   isUserPro,
   listAllOrders,
   listPlans,
   listUserOrders,
+  registerUserDirectoryEntry,
   resolvePlanTemplateForUser,
   resolveUserAvatar,
   reviewOrder,
+  setBillingAppUrl,
   setUserAvatarChoice,
   setUserTheme,
   syncPendingCryptoGateOrdersForUser,
+  unbanUser,
   updateAdminPaymentSecrets,
   updateBillingConfig,
   upsertPlan,
   verifyAndProcessCryptoGateWebhook,
 } from './src/server/billingStore.ts';
 import {
+  cleanupUserNotifications,
   clearUserNotifications,
   createNotification,
   listAdminBroadcasts,
@@ -477,12 +494,20 @@ async function getEmbedProvider(): Promise<string> {
 
 function resolveAppOrigin(req: express.Request): string {
   const headerOrigin = String(req.headers.origin || '').trim().replace(/\/+$/, '');
-  if (headerOrigin) return headerOrigin;
+  if (headerOrigin) {
+    setBillingAppUrl(headerOrigin);
+    return headerOrigin;
+  }
   const envUrl = String(process.env.APP_URL || '').trim().replace(/\/+$/, '');
-  if (envUrl) return envUrl;
+  if (envUrl) {
+    setBillingAppUrl(envUrl);
+    return envUrl;
+  }
   const host = req.get('x-forwarded-host') || req.get('host');
   const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
-  return host ? `${proto}://${host}`.replace(/\/+$/, '') : '';
+  const built = host ? `${proto}://${host}`.replace(/\/+$/, '') : '';
+  if (built) setBillingAppUrl(built);
+  return built;
 }
 
 function dedupTop5History(events: WatchEventRecord[]): WatchEventRecord[] {
@@ -531,6 +556,8 @@ async function getSiteConfig(): Promise<SiteConfig> {
   }
   return local;
 }
+
+setMailSiteNameResolver(async () => (await getSiteConfig()).siteName);
 
 const FAVICON_MIME_BY_EXT: Record<string, string> = {
   ico: 'image/x-icon',
@@ -590,13 +617,17 @@ interface AuthResolution {
 }
 
 function enrichUserProfile(user: UserProfile): UserProfile {
+  registerUserDirectoryEntry(user.id, user.email, user.username);
   const subscription = getUserSubscription(user.id);
+  const ban = getUserBanInfo(user.id);
   return {
     ...user,
     avatar: resolveUserAvatar(user.id, user.avatar),
     isPro: subscription.tier === 'pro',
     subscription,
     theme: getUserTheme(user.id),
+    banned: Boolean(ban),
+    banReason: ban?.reason || null,
   };
 }
 
@@ -607,6 +638,7 @@ async function resolveAuth(req: express.Request): Promise<AuthResolution | null>
   if (isSupabaseEnabled()) {
     const resolved = await sbResolveUser(token);
     if (!resolved) return null;
+    if (isUserBanned(resolved.user.id)) return null;
     return { user: enrichUserProfile(resolved.user), token, sbClient: resolved.client };
   }
 
@@ -614,6 +646,7 @@ async function resolveAuth(req: express.Request): Promise<AuthResolution | null>
   if (!session) return null;
   const user = db.users.find((u) => u.id === session.userId);
   if (!user) return null;
+  if (isUserBanned(user.id)) return null;
   return {
     token,
     sbClient: null,
@@ -1004,6 +1037,16 @@ async function startServer() {
         res.status(401).json({ error: 'Impossible de charger votre profil Supabase.' });
         return;
       }
+      const ban = getUserBanInfo(resolved.user.id);
+      if (ban) {
+        res.clearCookie('tapenaka_session', { path: '/' });
+        res.status(403).json({
+          error: ban.reason
+            ? `Votre compte a été suspendu par un administrateur (${ban.reason}).`
+            : 'Votre compte a été suspendu par un administrateur.',
+        });
+        return;
+      }
       res.cookie('tapenaka_session', token, {
         httpOnly: true,
         sameSite: 'lax',
@@ -1017,6 +1060,15 @@ async function startServer() {
     const user = db.users.find((u) => u.email.toLowerCase() === email);
     if (!user || user.passwordHash !== hashPassword(password)) {
       res.status(401).json({ error: 'Identifiants incorrects. Vérifiez votre email et mot de passe.' });
+      return;
+    }
+    const ban = getUserBanInfo(user.id);
+    if (ban) {
+      res.status(403).json({
+        error: ban.reason
+          ? `Votre compte a été suspendu par un administrateur (${ban.reason}).`
+          : 'Votre compte a été suspendu par un administrateur.',
+      });
       return;
     }
     if (user.emailVerified === false) {
@@ -1102,44 +1154,45 @@ async function startServer() {
       const adminSb = createAdminClient();
       const sb = createAnonClient();
 
-      // When Admin configured custom SMTP + Service Role key, generate confirmation link & deliver reliably via Nodemailer
-      if (isSmtpReady() && adminSb) {
-        if (shouldRequireSignupConfirmation()) {
-          const { data: linkData, error: linkErr } = await adminSb.auth.admin.generateLink({
-            type: 'signup',
-            email,
-            password,
-            options: {
-              data: { username },
-              ...(appOrigin ? { redirectTo: `${appOrigin}/auth` } : {}),
-            },
-          });
-          if (linkErr) {
-            res.status(400).json({ error: linkErr.message });
-            return;
-          }
-          const actionLink = linkData?.properties?.action_link;
-          if (actionLink) {
-            const mailRes = await sendSignupVerificationEmail({
-              to: email,
-              username,
-              verifyUrl: actionLink,
-            });
-            if (!mailRes.ok) {
-              res.status(502).json({
-                error: `Compte créé mais échec d'envoi SMTP : ${mailRes.error || 'vérifiez la configuration SMTP en administration.'}`,
-              });
-              return;
-            }
-          }
-          res.json({
-            token: '',
-            user: null,
-            requiresConfirmation: true,
-            message: `Un email de confirmation vient d’être envoyé à ${email}.`,
-          });
+      // When Admin configured email gateway + Service Role key, generate confirmation link & deliver directly
+      if (isSmtpReady() && adminSb && shouldRequireSignupConfirmation()) {
+        const { data: linkData, error: linkErr } = await adminSb.auth.admin.generateLink({
+          type: 'signup',
+          email,
+          password,
+          options: {
+            data: { username },
+            ...(appOrigin ? { redirectTo: `${appOrigin}/auth` } : {}),
+          },
+        });
+        if (linkErr) {
+          res.status(400).json({ error: linkErr.message });
           return;
         }
+        if (linkData?.user?.id) {
+          registerUserDirectoryEntry(linkData.user.id, email, username);
+        }
+        const actionLink = linkData?.properties?.action_link;
+        if (actionLink) {
+          const mailRes = await sendSignupVerificationEmail({
+            to: email,
+            username,
+            verifyUrl: actionLink,
+          });
+          if (!mailRes.ok) {
+            res.status(502).json({
+              error: `Compte créé mais échec d'envoi email : ${mailRes.error || 'vérifiez la configuration email en administration.'}`,
+            });
+            return;
+          }
+        }
+        res.json({
+          token: '',
+          user: null,
+          requiresConfirmation: true,
+          message: `Un email de confirmation vient d’être envoyé à ${email}.`,
+        });
+        return;
       }
 
       const { data, error } = await sb.auth.signUp({
@@ -1154,7 +1207,31 @@ async function startServer() {
         res.status(400).json({ error: error.message });
         return;
       }
+      if (data.user?.id) {
+        registerUserDirectoryEntry(data.user.id, email, username);
+      }
       if (!data.session) {
+        if (isSmtpReady()) {
+          if (adminSb) {
+            const { data: magicData } = await adminSb.auth.admin.generateLink({
+              type: 'magiclink',
+              email,
+              options: { ...(appOrigin ? { redirectTo: `${appOrigin}/auth` } : {}) },
+            });
+            const magicLink = magicData?.properties?.action_link;
+            if (magicLink) {
+              await sendSignupVerificationEmail({
+                to: email,
+                username,
+                verifyUrl: magicLink,
+              });
+            } else {
+              await sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
+            }
+          } else {
+            await sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
+          }
+        }
         res.json({
           token: '',
           user: null,
@@ -1164,7 +1241,7 @@ async function startServer() {
         return;
       }
       if (isSmtpReady()) {
-        void sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
+        await sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
       }
       const token = data.session.access_token;
       const resolved = await sbResolveUser(token);
@@ -1196,6 +1273,7 @@ async function startServer() {
       createdAt: new Date().toISOString(),
     };
     db.users.push(newUser);
+    registerUserDirectoryEntry(newUserId, email, username);
 
     if (needVerify) {
       const verifyToken = crypto.randomBytes(24).toString('hex');
@@ -1214,7 +1292,7 @@ async function startServer() {
       });
       if (!mailRes.ok) {
         res.status(502).json({
-          error: `Échec de l’envoi de l’email de confirmation : ${mailRes.error || 'vérifiez la configuration SMTP en administration.'}`,
+          error: `Échec de l’envoi de l’email de confirmation : ${mailRes.error || 'vérifiez la configuration email en administration.'}`,
         });
         return;
       }
@@ -1231,7 +1309,7 @@ async function startServer() {
     db.sessions.push({ token, userId: newUser.id, createdAt: new Date().toISOString() });
     saveDb(db);
     if (isSmtpReady()) {
-      void sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
+      await sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
     }
     res.cookie('tapenaka_session', token, {
       httpOnly: true,
@@ -1252,7 +1330,7 @@ async function startServer() {
     });
   });
 
-  app.post('/api/auth/verify-email', (req, res) => {
+  app.post('/api/auth/verify-email', async (req, res) => {
     const token = String(req.body?.token ?? '').trim();
     if (!token) {
       res.status(400).json({ error: 'Jeton de confirmation manquant.' });
@@ -1274,6 +1352,13 @@ async function startServer() {
     const sessionToken = crypto.randomBytes(24).toString('hex');
     db.sessions.push({ token: sessionToken, userId: user.id, createdAt: new Date().toISOString() });
     saveDb(db);
+    if (isSmtpReady()) {
+      await sendWelcomeEmail({
+        to: user.email,
+        username: user.username,
+        appUrl: resolveAppOrigin(req),
+      });
+    }
     res.cookie('tapenaka_session', sessionToken, {
       httpOnly: true,
       sameSite: 'lax',
@@ -2148,10 +2233,13 @@ async function startServer() {
       res.status(400).json({ error: 'Veuillez indiquer une adresse email valide.' });
       return;
     }
-    if (newEmail === auth.user.email.toLowerCase()) {
+    const previousEmail = auth.user.email;
+    if (newEmail === previousEmail.toLowerCase()) {
       res.json({ profile: auth.user, message: 'Cette adresse email est déjà associée à votre compte.' });
       return;
     }
+
+    const appOrigin = resolveAppOrigin(req);
 
     if (isSupabaseEnabled() && auth.sbClient) {
       const adminSb = createAdminClient();
@@ -2165,8 +2253,14 @@ async function startServer() {
           return;
         }
         await adminSb.from('profiles').update({ email: newEmail }).eq('id', auth.user.id);
+        registerUserDirectoryEntry(auth.user.id, newEmail, auth.user.username);
         if (isSmtpReady()) {
-          void sendEmailChangeNotice({ to: newEmail, username: auth.user.username });
+          await sendEmailChangeNotice({
+            to: newEmail,
+            oldEmail: previousEmail,
+            username: auth.user.username,
+            appUrl: appOrigin,
+          });
         }
         res.json({
           profile: { ...auth.user, email: newEmail },
@@ -2180,6 +2274,15 @@ async function startServer() {
       if (error) {
         res.status(400).json({ error: error.message });
         return;
+      }
+      registerUserDirectoryEntry(auth.user.id, newEmail, auth.user.username);
+      if (isSmtpReady()) {
+        await sendEmailChangeNotice({
+          to: newEmail,
+          oldEmail: previousEmail,
+          username: auth.user.username,
+          appUrl: appOrigin,
+        });
       }
       res.json({
         profile: auth.user,
@@ -2200,8 +2303,14 @@ async function startServer() {
     }
     user.email = newEmail;
     saveDb(db);
+    registerUserDirectoryEntry(user.id, newEmail, user.username);
     if (isSmtpReady()) {
-      void sendEmailChangeNotice({ to: newEmail, username: user.username });
+      await sendEmailChangeNotice({
+        to: newEmail,
+        oldEmail: previousEmail,
+        username: user.username,
+        appUrl: appOrigin,
+      });
     }
     res.json({
       profile: enrichUserProfile({
@@ -2612,12 +2721,17 @@ async function startServer() {
           .limit(25);
 
         const enrichedUsers = sbOverview.users.map((u) => {
+          registerUserDirectoryEntry(u.id, u.email, u.username);
           const subscription = getUserSubscription(u.id);
+          const ban = getUserBanInfo(u.id);
           return {
             ...u,
             avatar: resolveUserAvatar(u.id, u.avatar),
             isPro: subscription.tier === 'pro',
             subscription,
+            banned: Boolean(ban),
+            bannedAt: ban?.bannedAt ?? null,
+            banReason: ban?.reason ?? null,
           };
         });
 
@@ -2657,10 +2771,12 @@ async function startServer() {
 
     const now = Date.now();
     const users = db.users.map((u) => {
+      registerUserDirectoryEntry(u.id, u.email, u.username);
       const pres = db.presence[u.id];
       const online = Boolean(pres && now - new Date(pres.lastSeen).getTime() < ONLINE_WINDOW_MS);
       const plays = db.watchEvents.filter((w) => w.userId === u.id).length;
       const subscription = getUserSubscription(u.id);
+      const ban = getUserBanInfo(u.id);
       return {
         id: u.id,
         email: u.email,
@@ -2675,6 +2791,9 @@ async function startServer() {
         currentItem: online ? (pres?.currentItem ?? null) : null,
         currentPage: online ? (pres?.page ?? null) : null,
         plays,
+        banned: Boolean(ban),
+        bannedAt: ban?.bannedAt ?? null,
+        banReason: ban?.reason ?? null,
       };
     });
 
@@ -2780,6 +2899,138 @@ async function startServer() {
     res.json({ ok: true, role: target.role });
   });
 
+  app.post('/api/admin/users/:userId/ban', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+
+    const targetId = String(req.params.userId || '').trim();
+    if (!targetId) {
+      res.status(400).json({ error: 'Identifiant utilisateur invalide.' });
+      return;
+    }
+    if (targetId === auth.user.id) {
+      res.status(400).json({ error: 'Impossible de bannir votre propre compte administrateur.' });
+      return;
+    }
+
+    const shouldBan = Boolean(req.body?.banned);
+    const reason = String(req.body?.reason ?? '').trim().slice(0, 240);
+
+    if (isSupabaseEnabled()) {
+      const adminSb = createAdminClient();
+      if (adminSb) {
+        const { error: sbErr } = await adminSb.auth.admin.updateUserById(targetId, {
+          ban_duration: shouldBan ? '876000h' : 'none',
+        });
+        if (sbErr) {
+          res.status(400).json({ error: sbErr.message });
+          return;
+        }
+      }
+    } else {
+      const target = db.users.find((u) => u.id === targetId);
+      if (!target) {
+        res.status(404).json({ error: 'Utilisateur introuvable' });
+        return;
+      }
+      if (shouldBan) {
+        db.sessions = db.sessions.filter((s) => s.userId !== targetId);
+        delete db.presence[targetId];
+        saveDb(db);
+      }
+    }
+
+    if (shouldBan) {
+      const record = banUser(targetId, auth.user.id, reason);
+      res.json({ ok: true, banned: true, bannedAt: record.bannedAt, banReason: record.reason });
+    } else {
+      unbanUser(targetId);
+      res.json({ ok: true, banned: false, bannedAt: null, banReason: null });
+    }
+  });
+
+  app.post('/api/admin/users/:userId/revoke-pro', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+
+    const targetId = String(req.params.userId || '').trim();
+    if (!targetId) {
+      res.status(400).json({ error: 'Identifiant utilisateur invalide.' });
+      return;
+    }
+    const subscription = assignUserPlan({
+      userId: targetId,
+      planId: 'free',
+      durationDays: 0,
+      source: 'admin_manual',
+      autoRenew: false,
+      appUrl: resolveAppOrigin(req),
+    });
+    res.json({ ok: true, subscription });
+  });
+
+  app.delete('/api/admin/users/:userId', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+
+    const targetId = String(req.params.userId || '').trim();
+    if (!targetId) {
+      res.status(400).json({ error: 'Identifiant utilisateur invalide.' });
+      return;
+    }
+    if (targetId === auth.user.id) {
+      res.status(400).json({ error: 'Vous ne pouvez pas supprimer votre propre compte administrateur.' });
+      return;
+    }
+
+    if (isSupabaseEnabled()) {
+      const adminSb = createAdminClient();
+      if (!adminSb) {
+        res.status(400).json({
+          error:
+            'Ajoutez la clé secrète SUPABASE_SERVICE_ROLE_KEY dans vos secrets pour supprimer définitivement un compte Supabase Auth.',
+        });
+        return;
+      }
+      const { error: delErr } = await adminSb.auth.admin.deleteUser(targetId);
+      if (delErr) {
+        res.status(400).json({ error: delErr.message });
+        return;
+      }
+      await Promise.allSettled([
+        adminSb.from('user_roles').delete().eq('user_id', targetId),
+        adminSb.from('user_presence').delete().eq('user_id', targetId),
+        adminSb.from('favorites').delete().eq('user_id', targetId),
+        adminSb.from('watch_events').delete().eq('user_id', targetId),
+        adminSb.from('comments').delete().eq('user_id', targetId),
+        adminSb.from('friendships').delete().or(`user_id.eq.${targetId},friend_id.eq.${targetId}`),
+        adminSb.from('profiles').delete().eq('id', targetId),
+      ]);
+    } else {
+      const before = db.users.length;
+      db.users = db.users.filter((u) => u.id !== targetId);
+      if (db.users.length === before) {
+        res.status(404).json({ error: 'Utilisateur introuvable' });
+        return;
+      }
+      db.sessions = db.sessions.filter((s) => s.userId !== targetId);
+      db.resetTokens = db.resetTokens.filter((t) => t.userId !== targetId);
+      db.verifyTokens = (db.verifyTokens ?? []).filter((t) => t.userId !== targetId);
+      delete db.favorites[targetId];
+      delete db.watchProgress[targetId];
+      db.watchEvents = db.watchEvents.filter((w) => w.userId !== targetId);
+      db.comments = db.comments.filter((c) => c.userId !== targetId);
+      db.friendships = db.friendships.filter((f) => f.userId !== targetId && f.friendId !== targetId);
+      delete db.presence[targetId];
+      db.ratings = db.ratings.filter((r) => r.userId !== targetId);
+      saveDb(db);
+    }
+
+    cleanupUserBillingData(targetId);
+    cleanupUserNotifications(targetId);
+    res.json({ ok: true });
+  });
+
   app.get('/api/site/config', async (_req, res) => {
     res.json(await getSiteConfig());
   });
@@ -2812,6 +3063,7 @@ async function startServer() {
       tmdbApiKey: await getTmdbApiKey(),
       smtp: getAdminSmtpStatus(),
       site: await getSiteConfig(),
+      supabaseServiceRoleConfigured: Boolean(createAdminClient()),
     });
   });
 
@@ -3028,10 +3280,90 @@ async function startServer() {
     }
     const result = await sendTestEmail(to);
     if (!result.ok) {
-      res.status(400).json({ error: result.error || 'Échec de l’envoi SMTP.' });
+      res.status(400).json({ error: result.error || 'Échec de l’envoi email.' });
       return;
     }
     res.json({ ok: true, message: `Email de test envoyé à ${to}.` });
+  });
+
+  app.get('/api/admin/mail/templates', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    res.json({ templates: listEmailTemplates() });
+  });
+
+  app.put('/api/admin/mail/templates/:key', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const key = String(req.params.key || '') as EmailTemplateKey;
+    if (!EMAIL_TEMPLATE_KEYS.includes(key)) {
+      res.status(404).json({ error: 'Template email introuvable.' });
+      return;
+    }
+    const updated = updateEmailTemplate(key, {
+      subject: typeof req.body?.subject === 'string' ? req.body.subject : undefined,
+      heading: typeof req.body?.heading === 'string' ? req.body.heading : undefined,
+      body: typeof req.body?.body === 'string' ? req.body.body : undefined,
+      ctaLabel: typeof req.body?.ctaLabel === 'string' ? req.body.ctaLabel : undefined,
+      enabled: typeof req.body?.enabled === 'boolean' ? req.body.enabled : undefined,
+    });
+    if (!updated) {
+      res.status(404).json({ error: 'Template email introuvable.' });
+      return;
+    }
+    res.json({ template: updated });
+  });
+
+  app.post('/api/admin/mail/templates/:key/reset', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const key = String(req.params.key || '') as EmailTemplateKey;
+    if (!EMAIL_TEMPLATE_KEYS.includes(key)) {
+      res.status(404).json({ error: 'Template email introuvable.' });
+      return;
+    }
+    const template = resetEmailTemplate(key);
+    res.json({ template });
+  });
+
+  app.post('/api/admin/mail/templates/:key/test', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const key = String(req.params.key || '') as EmailTemplateKey;
+    if (!EMAIL_TEMPLATE_KEYS.includes(key)) {
+      res.status(404).json({ error: 'Template email introuvable.' });
+      return;
+    }
+    const to = String(req.body?.to ?? auth.user.email ?? '').trim();
+    if (!to.includes('@')) {
+      res.status(400).json({ error: 'Indiquez une adresse email de destination valide.' });
+      return;
+    }
+    const result = await sendTemplateTestEmail({
+      to,
+      templateKey: key,
+      appUrl: resolveAppOrigin(req),
+    });
+    if (!result.ok) {
+      res.status(400).json({ error: result.error || 'Échec de l’envoi du test.' });
+      return;
+    }
+    res.json({ ok: true, message: `Aperçu du template envoyé à ${to}.` });
+  });
+
+  app.get('/api/admin/mail/logs', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const status = req.query.status ? String(req.query.status) : 'all';
+    const q = req.query.q ? String(req.query.q) : '';
+    res.json({ logs: listMailLogs({ status, q }) });
+  });
+
+  app.delete('/api/admin/mail/logs', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    clearMailLogs();
+    res.json({ ok: true });
   });
 
   app.put('/api/admin/settings/embed-provider', async (req, res) => {
@@ -3502,6 +3834,7 @@ async function startServer() {
   app.post('/api/admin/users/:userId/subscription', async (req, res) => {
     const auth = await requireAdmin(req, res);
     if (!auth) return;
+    const targetId = String(req.params.userId || '').trim();
     const planId = String(req.body?.planId ?? 'pro');
     const durationDays =
       req.body?.durationDays !== undefined && req.body?.durationDays !== ''
@@ -3513,13 +3846,39 @@ async function startServer() {
           ? String(req.body.expiresAt)
           : null
         : undefined;
+
+    let targetEmail: string | undefined;
+    let targetUsername: string | undefined;
+    if (isSupabaseEnabled()) {
+      const adminSb = createAdminClient();
+      if (adminSb) {
+        const { data: uRes } = await adminSb.auth.admin.getUserById(targetId).catch(() => ({ data: null }));
+        if (uRes?.user) {
+          targetEmail = uRes.user.email ?? undefined;
+          const meta = (uRes.user.user_metadata ?? {}) as Record<string, unknown>;
+          targetUsername =
+            (typeof meta.username === 'string' && meta.username) ||
+            targetEmail?.split('@')[0];
+        }
+      }
+    } else {
+      const localUser = db.users.find((u) => u.id === targetId);
+      if (localUser) {
+        targetEmail = localUser.email;
+        targetUsername = localUser.username;
+      }
+    }
+
     const subscription = assignUserPlan({
-      userId: req.params.userId,
+      userId: targetId,
       planId,
       durationDays,
       expiresAt,
       source: 'admin_manual',
       autoRenew: Boolean(req.body?.autoRenew),
+      userEmail: targetEmail,
+      username: targetUsername,
+      appUrl: resolveAppOrigin(req),
     });
     res.json({ subscription });
   });

@@ -198,6 +198,41 @@ export interface AdminPaymentSecretsStatus {
 
 export type EmailProvider = 'smtp' | 'resend' | 'brevo';
 
+export type EmailTemplateKey =
+  | 'signup_welcome'
+  | 'signup_verify'
+  | 'email_change'
+  | 'subscription_activated'
+  | 'subscription_expired'
+  | 'password_reset';
+
+export interface EmailTemplateConfig {
+  key: EmailTemplateKey;
+  label: string;
+  description: string;
+  subject: string;
+  heading: string;
+  body: string;
+  ctaLabel: string;
+  enabled: boolean;
+  variables: string[];
+  updatedAt: string;
+}
+
+export interface MailLogEntry {
+  id: string;
+  createdAt: string;
+  to: string;
+  from: string;
+  provider: EmailProvider;
+  templateKey: EmailTemplateKey | 'test' | 'custom';
+  subject: string;
+  status: 'sent' | 'failed';
+  error: string | null;
+  providerMessageId: string | null;
+  latencyMs: number;
+}
+
 export interface AdminSmtpSettings {
   provider: EmailProvider;
   enabled: boolean;
@@ -289,6 +324,8 @@ export interface UserProfile {
   isPro?: boolean;
   subscription?: UserSubscription;
   theme?: UserThemePreference | null;
+  banned?: boolean;
+  banReason?: string | null;
 }
 
 export interface CommentRecord {
@@ -351,6 +388,9 @@ export interface AdminUserSummary {
   currentItem: Item | null;
   currentPage: string | null;
   plays: number;
+  banned?: boolean;
+  bannedAt?: string | null;
+  banReason?: string | null;
 }
 
 export interface AdminOverview {

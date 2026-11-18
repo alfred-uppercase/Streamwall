@@ -1,12 +1,22 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import nodemailer from 'nodemailer';
-import type { AdminSmtpSettings, AdminSmtpStatus, EmailProvider } from '../shared/types.ts';
+import type {
+  AdminSmtpSettings,
+  AdminSmtpStatus,
+  EmailProvider,
+  EmailTemplateConfig,
+  EmailTemplateKey,
+  MailLogEntry,
+} from '../shared/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', '..', '.data');
 const MAIL_FILE = path.join(DATA_DIR, 'tapenaka-mail.json');
+const TEMPLATES_FILE = path.join(DATA_DIR, 'tapenaka-mail-templates.json');
+const LOGS_FILE = path.join(DATA_DIR, 'tapenaka-mail-logs.json');
 
 interface StoredMailConfig {
   provider: EmailProvider;
@@ -21,6 +31,21 @@ interface StoredMailConfig {
   fromName: string;
   fromEmail: string;
   requireSignupConfirmation: boolean;
+}
+
+let resolveSiteNameFn: () => Promise<string> = async () => 'StreamWall';
+
+export function setMailSiteNameResolver(fn: () => Promise<string>): void {
+  resolveSiteNameFn = fn;
+}
+
+async function getActiveSiteName(): Promise<string> {
+  try {
+    const name = (await resolveSiteNameFn()).trim();
+    return name || 'StreamWall';
+  } catch {
+    return 'StreamWall';
+  }
 }
 
 function defaultMailConfig(): StoredMailConfig {
@@ -89,6 +114,265 @@ function saveMailConfig(cfg: StoredMailConfig): void {
 
 let mailConfig: StoredMailConfig = loadMailConfig();
 
+// ───────────────────────────────────────────────────────────────────────────
+// EDITABLE EMAIL TEMPLATES
+// ───────────────────────────────────────────────────────────────────────────
+export const EMAIL_TEMPLATE_KEYS: EmailTemplateKey[] = [
+  'signup_welcome',
+  'signup_verify',
+  'email_change',
+  'subscription_activated',
+  'subscription_expired',
+  'password_reset',
+];
+
+function buildDefaultTemplates(): Record<EmailTemplateKey, EmailTemplateConfig> {
+  const now = new Date().toISOString();
+  return {
+    signup_welcome: {
+      key: 'signup_welcome',
+      label: 'Mail d’inscription (Bienvenue)',
+      description: 'Envoyé automatiquement après l’inscription (ou après confirmation du compte).',
+      subject: 'Bienvenue sur {{site_name}}, {{username}} !',
+      heading: 'Bienvenue sur {{site_name}} !',
+      body: `Bonjour {{username}},
+
+Votre compte membre ({{email}}) est maintenant actif sur {{site_name}}.
+Vous pouvez dès maintenant enregistrer vos favoris, reprendre vos lectures et participer aux commentaires.`,
+      ctaLabel: 'Accéder à {{site_name}}',
+      enabled: true,
+      variables: ['username', 'email', 'site_name', 'app_url'],
+      updatedAt: now,
+    },
+    signup_verify: {
+      key: 'signup_verify',
+      label: 'Mail d’inscription (Confirmation)',
+      description: 'Envoyé avec le lien de validation lorsque la confirmation email est activée.',
+      subject: 'Confirmez votre inscription sur {{site_name}}',
+      heading: 'Confirmez votre adresse email',
+      body: `Bonjour {{username}},
+
+Merci pour votre inscription sur {{site_name}} avec l’adresse {{email}}.
+Cliquez sur le bouton ci-dessous pour activer définitivement votre compte :`,
+      ctaLabel: 'Confirmer mon adresse email',
+      enabled: true,
+      variables: ['username', 'email', 'site_name', 'verify_url'],
+      updatedAt: now,
+    },
+    email_change: {
+      key: 'email_change',
+      label: 'Changement d’adresse email',
+      description: 'Envoyé lorsqu’un membre modifie son adresse email depuis son profil.',
+      subject: 'Adresse email mise à jour — {{site_name}}',
+      heading: 'Adresse email mise à jour',
+      body: `Bonjour {{username}},
+
+Votre nouvelle adresse email ({{email}}) est désormais associée à votre compte {{site_name}}.
+Si vous n’êtes pas à l’origine de ce changement, contactez immédiatement un administrateur.`,
+      ctaLabel: 'Ouvrir mon profil',
+      enabled: true,
+      variables: ['username', 'email', 'old_email', 'site_name', 'app_url'],
+      updatedAt: now,
+    },
+    subscription_activated: {
+      key: 'subscription_activated',
+      label: 'Souscription à une offre',
+      description: 'Envoyé lorsqu’une offre Pro est activée (paiement auto, manuel ou attribution admin).',
+      subject: 'Votre offre {{plan_name}} est activée — {{site_name}}',
+      heading: 'Offre {{plan_name}} activée !',
+      body: `Bonjour {{username}},
+
+Félicitations ! Votre abonnement {{plan_name}} est maintenant actif sur {{site_name}}.
+Validité : {{expires_at}}.
+
+Profitez dès maintenant du lecteur Pro, de votre couronne dorée et de tous les avantages de votre offre.`,
+      ctaLabel: 'Profiter de mon accès Pro',
+      enabled: true,
+      variables: ['username', 'email', 'plan_name', 'expires_at', 'site_name', 'app_url'],
+      updatedAt: now,
+    },
+    subscription_expired: {
+      key: 'subscription_expired',
+      label: 'Offre expirée',
+      description: 'Envoyé automatiquement lorsque la durée de l’offre Pro arrive à expiration.',
+      subject: 'Votre offre {{plan_name}} a expiré — {{site_name}}',
+      heading: 'Votre offre {{plan_name}} est arrivée à expiration',
+      body: `Bonjour {{username}},
+
+Votre abonnement {{plan_name}} a expiré le {{expired_at}}. Votre compte est repassé automatiquement sur l’offre Basic (Gratuit).
+Vous pouvez renouveler votre accès Pro à tout moment en un clic.`,
+      ctaLabel: 'Renouveler mon offre Pro',
+      enabled: true,
+      variables: ['username', 'email', 'plan_name', 'expired_at', 'renew_url', 'site_name'],
+      updatedAt: now,
+    },
+    password_reset: {
+      key: 'password_reset',
+      label: 'Mot de passe oublié',
+      description: 'Envoyé lors d’une demande de réinitialisation de mot de passe.',
+      subject: 'Réinitialisez votre mot de passe — {{site_name}}',
+      heading: 'Réinitialisation du mot de passe',
+      body: `Bonjour {{username}},
+
+Vous avez demandé à réinitialiser votre mot de passe sur {{site_name}}.
+Cliquez sur le bouton ci-dessous pour choisir un nouveau mot de passe (lien valable 30 minutes) :`,
+      ctaLabel: 'Choisir un nouveau mot de passe',
+      enabled: true,
+      variables: ['username', 'email', 'reset_url', 'site_name'],
+      updatedAt: now,
+    },
+  };
+}
+
+function loadTemplates(): Record<EmailTemplateKey, EmailTemplateConfig> {
+  const defaults = buildDefaultTemplates();
+  try {
+    if (fs.existsSync(TEMPLATES_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(TEMPLATES_FILE, 'utf-8')) as Partial<
+        Record<EmailTemplateKey, Partial<EmailTemplateConfig>>
+      >;
+      for (const key of EMAIL_TEMPLATE_KEYS) {
+        const custom = parsed?.[key];
+        if (custom) {
+          defaults[key] = {
+            ...defaults[key],
+            subject: typeof custom.subject === 'string' && custom.subject.trim() ? custom.subject : defaults[key].subject,
+            heading: typeof custom.heading === 'string' && custom.heading.trim() ? custom.heading : defaults[key].heading,
+            body: typeof custom.body === 'string' && custom.body.trim() ? custom.body : defaults[key].body,
+            ctaLabel: typeof custom.ctaLabel === 'string' ? custom.ctaLabel : defaults[key].ctaLabel,
+            enabled: typeof custom.enabled === 'boolean' ? custom.enabled : defaults[key].enabled,
+            updatedAt: typeof custom.updatedAt === 'string' ? custom.updatedAt : defaults[key].updatedAt,
+          };
+        }
+      }
+    }
+  } catch {
+    // Use defaults
+  }
+  return defaults;
+}
+
+function saveTemplates(map: Record<EmailTemplateKey, EmailTemplateConfig>): void {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(TEMPLATES_FILE, JSON.stringify(map, null, 2), 'utf-8');
+  } catch {
+    // Ignore write failures
+  }
+}
+
+let emailTemplates: Record<EmailTemplateKey, EmailTemplateConfig> = loadTemplates();
+
+export function listEmailTemplates(): EmailTemplateConfig[] {
+  return EMAIL_TEMPLATE_KEYS.map((k) => emailTemplates[k]);
+}
+
+export function getEmailTemplate(key: EmailTemplateKey): EmailTemplateConfig {
+  return emailTemplates[key];
+}
+
+export function updateEmailTemplate(
+  key: EmailTemplateKey,
+  patch: Partial<Pick<EmailTemplateConfig, 'subject' | 'heading' | 'body' | 'ctaLabel' | 'enabled'>>
+): EmailTemplateConfig | null {
+  const current = emailTemplates[key];
+  if (!current) return null;
+  const updated: EmailTemplateConfig = {
+    ...current,
+    subject:
+      typeof patch.subject === 'string' && patch.subject.trim()
+        ? patch.subject.trim().slice(0, 180)
+        : current.subject,
+    heading:
+      typeof patch.heading === 'string' && patch.heading.trim()
+        ? patch.heading.trim().slice(0, 180)
+        : current.heading,
+    body:
+      typeof patch.body === 'string' && patch.body.trim()
+        ? patch.body.trim().slice(0, 4000)
+        : current.body,
+    ctaLabel:
+      typeof patch.ctaLabel === 'string'
+        ? patch.ctaLabel.trim().slice(0, 80)
+        : current.ctaLabel,
+    enabled: typeof patch.enabled === 'boolean' ? patch.enabled : current.enabled,
+    updatedAt: new Date().toISOString(),
+  };
+  emailTemplates[key] = updated;
+  saveTemplates(emailTemplates);
+  return updated;
+}
+
+export function resetEmailTemplate(key: EmailTemplateKey): EmailTemplateConfig | null {
+  const defaults = buildDefaultTemplates();
+  if (!defaults[key]) return null;
+  emailTemplates[key] = defaults[key];
+  saveTemplates(emailTemplates);
+  return emailTemplates[key];
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// MAIL SEND LOGS
+// ───────────────────────────────────────────────────────────────────────────
+function loadMailLogs(): MailLogEntry[] {
+  try {
+    if (fs.existsSync(LOGS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(LOGS_FILE, 'utf-8')) as MailLogEntry[];
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {
+    // Ignore corrupted logs
+  }
+  return [];
+}
+
+function saveMailLogs(logs: MailLogEntry[]): void {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(LOGS_FILE, JSON.stringify(logs, null, 2), 'utf-8');
+  } catch {
+    // Ignore write failures
+  }
+}
+
+let mailLogs: MailLogEntry[] = loadMailLogs();
+
+function recordMailLog(entry: Omit<MailLogEntry, 'id' | 'createdAt'>): MailLogEntry {
+  const record: MailLogEntry = {
+    id: `mlog_${crypto.randomBytes(6).toString('hex')}`,
+    createdAt: new Date().toISOString(),
+    ...entry,
+  };
+  mailLogs.unshift(record);
+  if (mailLogs.length > 500) {
+    mailLogs = mailLogs.slice(0, 500);
+  }
+  saveMailLogs(mailLogs);
+  return record;
+}
+
+export function listMailLogs(filters?: { status?: string; q?: string }): MailLogEntry[] {
+  const q = (filters?.q || '').trim().toLowerCase();
+  const st = filters?.status || 'all';
+  return mailLogs.filter((log) => {
+    if (st === 'sent' && log.status !== 'sent') return false;
+    if (st === 'failed' && log.status !== 'failed') return false;
+    if (q) {
+      const hay = `${log.to} ${log.subject} ${log.provider} ${log.templateKey} ${log.error || ''}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+export function clearMailLogs(): void {
+  mailLogs = [];
+  saveMailLogs(mailLogs);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// SMTP / RESEND / BREVO CONFIG & SENDING
+// ───────────────────────────────────────────────────────────────────────────
 function maskSecret(val: string): string {
   const s = val.trim();
   if (!s) return '';
@@ -96,15 +380,26 @@ function maskSecret(val: string): string {
   return `${s.slice(0, 3)}••••••${s.slice(-3)}`;
 }
 
+function resolveSenderEmail(): string {
+  const explicit = mailConfig.fromEmail.trim();
+  if (explicit) return explicit;
+  if (mailConfig.provider === 'smtp' && mailConfig.user.includes('@')) {
+    return mailConfig.user.trim();
+  }
+  return '';
+}
+
 export function isSmtpReady(): boolean {
   if (!mailConfig.enabled) return false;
+  const sender = resolveSenderEmail();
+  if (!sender || !sender.includes('@')) return false;
   if (mailConfig.provider === 'resend') {
-    return Boolean(mailConfig.resendApiKey.trim() && mailConfig.fromEmail.trim());
+    return Boolean(mailConfig.resendApiKey.trim());
   }
   if (mailConfig.provider === 'brevo') {
-    return Boolean(mailConfig.brevoApiKey.trim() && mailConfig.fromEmail.trim());
+    return Boolean(mailConfig.brevoApiKey.trim());
   }
-  return Boolean(mailConfig.host.trim() && (mailConfig.fromEmail.trim() || mailConfig.user.trim()));
+  return Boolean(mailConfig.host.trim());
 }
 
 export function shouldRequireSignupConfirmation(): boolean {
@@ -145,10 +440,16 @@ export function updateAdminSmtpConfig(patch: Partial<AdminSmtpSettings>): AdminS
     const p = Number(patch.port);
     if (Number.isFinite(p) && p >= 1 && p <= 65535) {
       mailConfig.port = Math.round(p);
+      if (mailConfig.port === 465) mailConfig.secure = true;
+      else if (mailConfig.port === 587 || mailConfig.port === 25 || mailConfig.port === 2525) {
+        mailConfig.secure = false;
+      }
     }
   }
   if (typeof patch.secure === 'boolean') {
-    mailConfig.secure = patch.secure;
+    if (mailConfig.port === 465) mailConfig.secure = true;
+    else if (mailConfig.port === 587) mailConfig.secure = false;
+    else mailConfig.secure = patch.secure;
   }
   if (typeof patch.user === 'string') {
     mailConfig.user = patch.user.trim().slice(0, 200);
@@ -187,35 +488,43 @@ async function sendViaResend(params: {
   subject: string;
   html: string;
   text: string;
-}): Promise<{ ok: boolean; error?: string }> {
-  const fromAddr = mailConfig.fromEmail.trim();
-  const senderName = (mailConfig.fromName || 'StreamWall').replace(/[<>"]/g, '');
-  if (!mailConfig.resendApiKey.trim() || !fromAddr) {
+  fromAddr: string;
+  senderName: string;
+}): Promise<{ ok: boolean; error?: string; messageId?: string | null }> {
+  const apiKey = mailConfig.resendApiKey.trim();
+  if (!apiKey || !params.fromAddr) {
     return { ok: false, error: 'Clé API Resend ou email d’expéditeur manquant.' };
   }
+  const cleanName = params.senderName.replace(/[<>"]/g, '');
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${mailConfig.resendApiKey.trim()}`,
+      Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      from: `${senderName} <${fromAddr}>`,
+      from: `${cleanName} <${params.fromAddr}>`,
       to: [params.to],
       subject: params.subject,
       html: params.html,
-      text: params.text,
+      text: params.text || params.subject,
     }),
     signal: AbortSignal.timeout(12_000),
   });
-  const json = (await res.json().catch(() => ({}))) as { message?: string; error?: string };
+  const rawText = await res.text().catch(() => '');
+  let json: { id?: string; message?: string; error?: string } = {};
+  try {
+    json = JSON.parse(rawText) as typeof json;
+  } catch {
+    // Non-JSON response
+  }
   if (!res.ok) {
     return {
       ok: false,
-      error: json.message || json.error || `Resend HTTP ${res.status}`,
+      error: json.message || json.error || rawText.slice(0, 240) || `Resend HTTP ${res.status}`,
     };
   }
-  return { ok: true };
+  return { ok: true, messageId: json.id ?? null };
 }
 
 async function sendViaBrevo(params: {
@@ -223,36 +532,103 @@ async function sendViaBrevo(params: {
   subject: string;
   html: string;
   text: string;
-}): Promise<{ ok: boolean; error?: string }> {
-  const fromAddr = mailConfig.fromEmail.trim();
-  const senderName = (mailConfig.fromName || 'StreamWall').trim();
-  if (!mailConfig.brevoApiKey.trim() || !fromAddr) {
+  fromAddr: string;
+  senderName: string;
+}): Promise<{ ok: boolean; error?: string; messageId?: string | null }> {
+  const apiKey = mailConfig.brevoApiKey.trim();
+  if (!apiKey || !params.fromAddr) {
     return { ok: false, error: 'Clé API Brevo ou email d’expéditeur manquant.' };
+  }
+  if (apiKey.startsWith('xsmtpsib-')) {
+    return {
+      ok: false,
+      error:
+        'Vous avez saisi une clé SMTP Brevo (xsmtpsib-…). Pour Brevo API v3, utilisez une clé API v3 (xkeysib-…), ou utilisez cette clé dans « SMTP classique » avec smtp-relay.brevo.com (port 587).',
+    };
   }
   const res = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: {
-      'api-key': mailConfig.brevoApiKey.trim(),
+      'api-key': apiKey,
       'Content-Type': 'application/json',
       Accept: 'application/json',
     },
     body: JSON.stringify({
-      sender: { name: senderName, email: fromAddr },
+      sender: { name: params.senderName || 'StreamWall', email: params.fromAddr },
       to: [{ email: params.to }],
       subject: params.subject,
       htmlContent: params.html,
-      textContent: params.text,
+      textContent: params.text || params.subject,
     }),
     signal: AbortSignal.timeout(12_000),
   });
-  const json = (await res.json().catch(() => ({}))) as { message?: string; code?: string };
+  const rawText = await res.text().catch(() => '');
+  let json: { messageId?: string; message?: string; code?: string } = {};
+  try {
+    json = JSON.parse(rawText) as typeof json;
+  } catch {
+    // Non-JSON response
+  }
   if (!res.ok) {
+    const msg = [json.code, json.message].filter(Boolean).join(' : ') || rawText.slice(0, 240);
     return {
       ok: false,
-      error: json.message || json.code || `Brevo HTTP ${res.status}`,
+      error: msg || `Brevo HTTP ${res.status}`,
     };
   }
-  return { ok: true };
+  return { ok: true, messageId: json.messageId ?? null };
+}
+
+async function sendViaSmtp(params: {
+  to: string;
+  subject: string;
+  html: string;
+  text: string;
+  fromAddr: string;
+  senderName: string;
+}): Promise<{ ok: boolean; error?: string; messageId?: string | null }> {
+  if (!mailConfig.host.trim()) {
+    return { ok: false, error: 'Serveur SMTP (host) manquant.' };
+  }
+  if (!params.fromAddr || !params.fromAddr.includes('@')) {
+    return { ok: false, error: 'Adresse email d’expéditeur invalide ou manquante.' };
+  }
+
+  const port = mailConfig.port || 587;
+  const useSecure = port === 465 ? true : port === 587 || port === 25 || port === 2525 ? false : mailConfig.secure;
+
+  const transporter = nodemailer.createTransport({
+    host: mailConfig.host.trim(),
+    port,
+    secure: useSecure,
+    requireTLS: !useSecure && port === 587,
+    ...(mailConfig.user
+      ? {
+          auth: {
+            user: mailConfig.user.trim(),
+            pass: mailConfig.pass,
+          },
+        }
+      : {}),
+    tls: {
+      minVersion: 'TLSv1.2',
+      rejectUnauthorized: false,
+    },
+    connectionTimeout: 12_000,
+    greetingTimeout: 12_000,
+    socketTimeout: 15_000,
+  });
+
+  const cleanName = params.senderName.replace(/"/g, '');
+  const info = await transporter.sendMail({
+    from: `"${cleanName}" <${params.fromAddr}>`,
+    to: params.to,
+    subject: params.subject,
+    text: params.text || params.subject,
+    html: params.html,
+  });
+
+  return { ok: true, messageId: info.messageId ?? null };
 }
 
 export async function sendMail(params: {
@@ -260,72 +636,162 @@ export async function sendMail(params: {
   subject: string;
   html: string;
   text: string;
+  templateKey?: EmailTemplateKey | 'test' | 'custom';
 }): Promise<{ ok: boolean; error?: string }> {
+  const started = Date.now();
+  const templateKey = params.templateKey ?? 'custom';
+  const fromAddr = resolveSenderEmail();
+  const senderName = mailConfig.fromName || (await getActiveSiteName());
+
   if (!isSmtpReady()) {
-    return {
-      ok: false,
-      error: 'Service email (SMTP / Resend / Brevo) non configuré ou désactivé dans l’administration.',
-    };
+    const errMsg = !mailConfig.enabled
+      ? 'L’envoi d’emails est désactivé dans la configuration.'
+      : !fromAddr || !fromAddr.includes('@')
+        ? 'Adresse email d’expéditeur manquante ou invalide.'
+        : 'Service email (SMTP / Resend / Brevo) incomplet dans l’administration.';
+
+    if (mailConfig.enabled || templateKey === 'test') {
+      recordMailLog({
+        to: params.to,
+        from: fromAddr || 'non configuré',
+        provider: mailConfig.provider,
+        templateKey,
+        subject: params.subject,
+        status: 'failed',
+        error: errMsg,
+        providerMessageId: null,
+        latencyMs: Date.now() - started,
+      });
+    }
+    return { ok: false, error: errMsg };
   }
 
+  let outcome: { ok: boolean; error?: string; messageId?: string | null };
   try {
     if (mailConfig.provider === 'resend') {
-      return await sendViaResend(params);
+      outcome = await sendViaResend({ ...params, fromAddr, senderName });
+    } else if (mailConfig.provider === 'brevo') {
+      outcome = await sendViaBrevo({ ...params, fromAddr, senderName });
+    } else {
+      outcome = await sendViaSmtp({ ...params, fromAddr, senderName });
     }
-    if (mailConfig.provider === 'brevo') {
-      return await sendViaBrevo(params);
-    }
-
-    const transporter = nodemailer.createTransport({
-      host: mailConfig.host,
-      port: mailConfig.port,
-      secure: mailConfig.secure,
-      ...(mailConfig.user
-        ? {
-            auth: {
-              user: mailConfig.user,
-              pass: mailConfig.pass,
-            },
-          }
-        : {}),
-      connectionTimeout: 12_000,
-      greetingTimeout: 12_000,
-      socketTimeout: 15_000,
-    });
-
-    const fromAddr = mailConfig.fromEmail || mailConfig.user;
-    const senderName = (mailConfig.fromName || 'StreamWall').replace(/"/g, '');
-    await transporter.sendMail({
-      from: `"${senderName}" <${fromAddr}>`,
-      to: params.to,
-      subject: params.subject,
-      text: params.text,
-      html: params.html,
-    });
-
-    return { ok: true };
   } catch (err) {
-    return {
+    const e = err as Error & { code?: string; responseCode?: number; response?: string };
+    const extra = [e.code, e.responseCode ? `SMTP ${e.responseCode}` : '', e.response]
+      .filter(Boolean)
+      .join(' · ');
+    outcome = {
       ok: false,
-      error: err instanceof Error ? err.message : 'Erreur lors de l’envoi de l’email.',
+      error: extra ? `${e.message} (${extra})` : e.message || 'Erreur lors de l’envoi de l’email.',
     };
   }
+
+  recordMailLog({
+    to: params.to,
+    from: fromAddr,
+    provider: mailConfig.provider,
+    templateKey,
+    subject: params.subject,
+    status: outcome.ok ? 'sent' : 'failed',
+    error: outcome.ok ? null : outcome.error || 'Erreur inconnue',
+    providerMessageId: outcome.messageId ?? null,
+    latencyMs: Date.now() - started,
+  });
+
+  return { ok: outcome.ok, error: outcome.error };
 }
 
-function wrapEmailHtml(title: string, bodyHtml: string): string {
+// ───────────────────────────────────────────────────────────────────────────
+// TEMPLATE RENDERING & TRANSACTIONAL HELPERS
+// ───────────────────────────────────────────────────────────────────────────
+function escapeHtml(raw: string): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function interpolateTemplate(
+  raw: string,
+  vars: Record<string, string>,
+  options?: { htmlEscapeValues?: boolean }
+): string {
+  return raw.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, key: string) => {
+    const val = vars[key] ?? '';
+    return options?.htmlEscapeValues ? escapeHtml(val) : val;
+  });
+}
+
+function formatBodyParagraphs(interpolatedText: string): string {
+  const blocks = interpolatedText
+    .split(/\n{2,}/)
+    .map((b) => b.trim())
+    .filter(Boolean);
+  return blocks
+    .map(
+      (b) =>
+        `<p style="margin:0 0 14px;font-size:14px;line-height:1.65;color:#d1d5db;">${escapeHtml(b).replace(/\n/g, '<br/>')}</p>`
+    )
+    .join('');
+}
+
+function wrapEmailHtml(siteName: string, title: string, bodyHtml: string): string {
+  const safeSite = escapeHtml(siteName || 'StreamWall');
   return `<!doctype html>
 <html lang="fr">
 <head><meta charset="utf-8" /></head>
 <body style="margin:0;padding:24px;background:#0f121a;color:#f3f4f6;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;">
   <div style="max-width:540px;margin:0 auto;background:#171c28;border:1px solid #283044;border-radius:12px;padding:28px;">
-    <p style="margin:0 0 18px;font-size:20px;font-weight:700;color:#ffffff;">Stream<span style="color:#e6a82e;">Wall</span></p>
-    <h1 style="margin:0 0 14px;font-size:18px;color:#ffffff;">${title}</h1>
+    <p style="margin:0 0 18px;font-size:20px;font-weight:700;color:#ffffff;">${safeSite}</p>
+    <h1 style="margin:0 0 14px;font-size:18px;color:#ffffff;">${escapeHtml(title)}</h1>
     ${bodyHtml}
     <hr style="border:none;border-top:1px solid #283044;margin:24px 0 16px;" />
-    <p style="margin:0;font-size:12px;color:#9ca3af;">Cet email a été envoyé automatiquement par StreamWall.</p>
+    <p style="margin:0;font-size:12px;color:#9ca3af;">Cet email a été envoyé automatiquement par ${safeSite}.</p>
   </div>
 </body>
 </html>`;
+}
+
+async function renderTemplateContent(
+  key: EmailTemplateKey,
+  vars: Record<string, string>,
+  ctaUrl?: string,
+  extraFooterHtml?: string
+): Promise<{ enabled: boolean; subject: string; html: string; text: string }> {
+  const tpl = getEmailTemplate(key);
+  const siteName = vars.site_name || (await getActiveSiteName());
+  const allVars: Record<string, string> = {
+    ...vars,
+    site_name: siteName,
+  };
+
+  const subject = interpolateTemplate(tpl.subject, allVars);
+  const heading = interpolateTemplate(tpl.heading, allVars);
+  const bodyPlain = interpolateTemplate(tpl.body, allVars);
+  const ctaLabel = interpolateTemplate(tpl.ctaLabel, allVars);
+
+  let bodyHtml = formatBodyParagraphs(bodyPlain);
+  let text = `${heading}\n\n${bodyPlain}`;
+
+  if (ctaUrl && ctaLabel) {
+    const safeUrl = escapeHtml(ctaUrl);
+    bodyHtml += `<p style="margin:22px 0;">
+      <a href="${safeUrl}" style="display:inline-block;background:#e6a82e;color:#0f172a;text-decoration:none;font-weight:700;font-size:14px;padding:12px 22px;border-radius:8px;">${escapeHtml(ctaLabel)}</a>
+    </p>`;
+    text += `\n\n${ctaLabel} : ${ctaUrl}`;
+  }
+
+  if (extraFooterHtml) {
+    bodyHtml += extraFooterHtml;
+  }
+
+  return {
+    enabled: tpl.enabled,
+    subject,
+    html: wrapEmailHtml(siteName, heading, bodyHtml),
+    text,
+  };
 }
 
 export async function sendSignupVerificationEmail(params: {
@@ -333,21 +799,23 @@ export async function sendSignupVerificationEmail(params: {
   username: string;
   verifyUrl: string;
 }): Promise<{ ok: boolean; error?: string }> {
-  const safeName = params.username.replace(/[<>&"]/g, '');
-  const html = wrapEmailHtml(
-    'Confirmez votre inscription',
-    `<p style="font-size:14px;line-height:1.6;color:#d1d5db;">Bonjour <strong>${safeName}</strong>,</p>
-     <p style="font-size:14px;line-height:1.6;color:#d1d5db;">Cliquez sur le bouton ci-dessous pour activer votre compte StreamWall :</p>
-     <p style="margin:22px 0;">
-       <a href="${params.verifyUrl}" style="display:inline-block;background:#e6a82e;color:#0f172a;text-decoration:none;font-weight:700;font-size:14px;padding:12px 22px;border-radius:8px;">Confirmer mon adresse email</a>
-     </p>
-     <p style="font-size:12px;color:#9ca3af;word-break:break-all;">Si le bouton ne s’ouvre pas, copiez ce lien :<br/>${params.verifyUrl}</p>`
+  const rendered = await renderTemplateContent(
+    'signup_verify',
+    {
+      username: params.username,
+      email: params.to,
+      verify_url: params.verifyUrl,
+    },
+    params.verifyUrl,
+    `<p style="font-size:12px;color:#9ca3af;word-break:break-all;">Si le bouton ne s’ouvre pas, copiez ce lien :<br/>${escapeHtml(params.verifyUrl)}</p>`
   );
+  if (!rendered.enabled) return { ok: true };
   return sendMail({
     to: params.to,
-    subject: 'Confirmez votre inscription sur StreamWall',
-    text: `Bonjour ${params.username}, confirmez votre compte StreamWall ici : ${params.verifyUrl}`,
-    html,
+    subject: rendered.subject,
+    text: rendered.text,
+    html: rendered.html,
+    templateKey: 'signup_verify',
   });
 }
 
@@ -356,64 +824,167 @@ export async function sendWelcomeEmail(params: {
   username: string;
   appUrl: string;
 }): Promise<{ ok: boolean; error?: string }> {
-  const safeName = params.username.replace(/[<>&"]/g, '');
-  const html = wrapEmailHtml(
-    'Bienvenue sur StreamWall !',
-    `<p style="font-size:14px;line-height:1.6;color:#d1d5db;">Bonjour <strong>${safeName}</strong>,</p>
-     <p style="font-size:14px;line-height:1.6;color:#d1d5db;">Votre compte membre est maintenant actif. Retrouvez vos favoris, votre historique des 5 dernières lectures et vos commentaires en ligne.</p>
-     ${
-       params.appUrl
-         ? `<p style="margin:20px 0;"><a href="${params.appUrl}" style="display:inline-block;background:#e6a82e;color:#0f172a;text-decoration:none;font-weight:700;font-size:14px;padding:12px 22px;border-radius:8px;">Accéder à StreamWall</a></p>`
-         : ''
-     }`
+  const rendered = await renderTemplateContent(
+    'signup_welcome',
+    {
+      username: params.username,
+      email: params.to,
+      app_url: params.appUrl,
+    },
+    params.appUrl || undefined
   );
+  if (!rendered.enabled) return { ok: true };
   return sendMail({
     to: params.to,
-    subject: 'Bienvenue sur StreamWall',
-    text: `Bienvenue ${params.username} sur StreamWall ! ${params.appUrl}`,
-    html,
-  });
-}
-
-export async function sendPasswordResetEmail(params: {
-  to: string;
-  resetUrl: string;
-}): Promise<{ ok: boolean; error?: string }> {
-  const html = wrapEmailHtml(
-    'Réinitialisation du mot de passe',
-    `<p style="font-size:14px;line-height:1.6;color:#d1d5db;">Vous avez demandé à réinitialiser votre mot de passe StreamWall.</p>
-     <p style="margin:22px 0;">
-       <a href="${params.resetUrl}" style="display:inline-block;background:#e6a82e;color:#0f172a;text-decoration:none;font-weight:700;font-size:14px;padding:12px 22px;border-radius:8px;">Choisir un nouveau mot de passe</a>
-     </p>
-     <p style="font-size:12px;color:#9ca3af;word-break:break-all;">Lien valide 30 minutes : ${params.resetUrl}</p>`
-  );
-  return sendMail({
-    to: params.to,
-    subject: 'Réinitialisez votre mot de passe StreamWall',
-    text: `Réinitialisez votre mot de passe StreamWall via ce lien (valide 30 min) : ${params.resetUrl}`,
-    html,
+    subject: rendered.subject,
+    text: rendered.text,
+    html: rendered.html,
+    templateKey: 'signup_welcome',
   });
 }
 
 export async function sendEmailChangeNotice(params: {
   to: string;
   username: string;
+  oldEmail?: string;
+  appUrl?: string;
 }): Promise<{ ok: boolean; error?: string }> {
-  const safeName = params.username.replace(/[<>&"]/g, '');
-  const html = wrapEmailHtml(
-    'Adresse email mise à jour',
-    `<p style="font-size:14px;line-height:1.6;color:#d1d5db;">Bonjour <strong>${safeName}</strong>,</p>
-     <p style="font-size:14px;line-height:1.6;color:#d1d5db;">Votre nouvelle adresse email (<strong>${params.to}</strong>) est maintenant associée à votre compte StreamWall.</p>`
+  const profileUrl = params.appUrl ? `${params.appUrl.replace(/\/+$/, '')}/profil` : '';
+  const rendered = await renderTemplateContent(
+    'email_change',
+    {
+      username: params.username,
+      email: params.to,
+      old_email: params.oldEmail || '',
+      app_url: params.appUrl || '',
+    },
+    profileUrl || undefined
   );
+  if (!rendered.enabled) return { ok: true };
   return sendMail({
     to: params.to,
-    subject: 'Adresse email mise à jour — StreamWall',
-    text: `Bonjour ${params.username}, votre adresse email StreamWall a été mise à jour vers ${params.to}.`,
-    html,
+    subject: rendered.subject,
+    text: rendered.text,
+    html: rendered.html,
+    templateKey: 'email_change',
+  });
+}
+
+export async function sendSubscriptionActivatedEmail(params: {
+  to: string;
+  username: string;
+  planName: string;
+  expiresAt: string | null;
+  appUrl?: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const expiresLabel = params.expiresAt
+    ? `jusqu’au ${new Date(params.expiresAt).toLocaleDateString('fr-FR')}`
+    : 'Durée illimitée';
+  const rendered = await renderTemplateContent(
+    'subscription_activated',
+    {
+      username: params.username,
+      email: params.to,
+      plan_name: params.planName,
+      expires_at: expiresLabel,
+      app_url: params.appUrl || '',
+    },
+    params.appUrl || undefined
+  );
+  if (!rendered.enabled) return { ok: true };
+  return sendMail({
+    to: params.to,
+    subject: rendered.subject,
+    text: rendered.text,
+    html: rendered.html,
+    templateKey: 'subscription_activated',
+  });
+}
+
+export async function sendSubscriptionExpiredEmail(params: {
+  to: string;
+  username: string;
+  planName: string;
+  expiredAt: string;
+  renewUrl?: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const expiredLabel = new Date(params.expiredAt).toLocaleDateString('fr-FR');
+  const rendered = await renderTemplateContent(
+    'subscription_expired',
+    {
+      username: params.username,
+      email: params.to,
+      plan_name: params.planName,
+      expired_at: expiredLabel,
+      renew_url: params.renewUrl || '',
+    },
+    params.renewUrl || undefined
+  );
+  if (!rendered.enabled) return { ok: true };
+  return sendMail({
+    to: params.to,
+    subject: rendered.subject,
+    text: rendered.text,
+    html: rendered.html,
+    templateKey: 'subscription_expired',
+  });
+}
+
+export async function sendPasswordResetEmail(params: {
+  to: string;
+  username?: string;
+  resetUrl: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const rendered = await renderTemplateContent(
+    'password_reset',
+    {
+      username: params.username || params.to.split('@')[0] || 'Membre',
+      email: params.to,
+      reset_url: params.resetUrl,
+    },
+    params.resetUrl,
+    `<p style="font-size:12px;color:#9ca3af;word-break:break-all;">Lien valide 30 minutes : ${escapeHtml(params.resetUrl)}</p>`
+  );
+  if (!rendered.enabled) return { ok: true };
+  return sendMail({
+    to: params.to,
+    subject: rendered.subject,
+    text: rendered.text,
+    html: rendered.html,
+    templateKey: 'password_reset',
+  });
+}
+
+export async function sendTemplateTestEmail(params: {
+  to: string;
+  templateKey: EmailTemplateKey;
+  appUrl?: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const baseUrl = (params.appUrl || 'https://exemple.com').replace(/\/+$/, '');
+  const sampleVars: Record<string, string> = {
+    username: 'TestMembre',
+    email: params.to,
+    old_email: 'ancien@exemple.com',
+    app_url: baseUrl,
+    verify_url: `${baseUrl}/auth?verify=exemple-jeton`,
+    reset_url: `${baseUrl}/reset-password?token=exemple-jeton`,
+    plan_name: 'Pro Mensuel',
+    expires_at: `jusqu’au ${new Date(Date.now() + 30 * 86_400_000).toLocaleDateString('fr-FR')}`,
+    expired_at: new Date().toLocaleDateString('fr-FR'),
+    renew_url: `${baseUrl}/abonnement`,
+  };
+  const rendered = await renderTemplateContent(params.templateKey, sampleVars, baseUrl);
+  return sendMail({
+    to: params.to,
+    subject: `[TEST] ${rendered.subject}`,
+    text: rendered.text,
+    html: rendered.html,
+    templateKey: params.templateKey,
   });
 }
 
 export async function sendTestEmail(to: string): Promise<{ ok: boolean; error?: string }> {
+  const siteName = await getActiveSiteName();
   const providerLabel =
     mailConfig.provider === 'resend'
       ? 'Resend API'
@@ -421,13 +992,15 @@ export async function sendTestEmail(to: string): Promise<{ ok: boolean; error?: 
         ? 'Brevo API'
         : 'SMTP';
   const html = wrapEmailHtml(
+    siteName,
     `Test ${providerLabel} réussi`,
-    `<p style="font-size:14px;line-height:1.6;color:#d1d5db;">Cet email confirme que la passerelle <strong>${providerLabel}</strong> configurée dans l’administration StreamWall fonctionne correctement.</p>`
+    `<p style="font-size:14px;line-height:1.6;color:#d1d5db;">Cet email confirme que la passerelle <strong>${providerLabel}</strong> configurée dans l’administration ${escapeHtml(siteName)} fonctionne correctement.</p>`
   );
   return sendMail({
     to,
-    subject: `Test ${providerLabel} — StreamWall`,
-    text: `Test de configuration ${providerLabel} StreamWall réussi.`,
+    subject: `Test ${providerLabel} — ${siteName}`,
+    text: `Test de configuration ${providerLabel} ${siteName} réussi.`,
     html,
+    templateKey: 'test',
   });
 }

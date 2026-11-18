@@ -15,9 +15,12 @@ import type {
   CataloguePage,
   CommentRecord,
   DetailResponse,
+  EmailTemplateConfig,
+  EmailTemplateKey,
   FriendRecord,
   HomePayload,
   Item,
+  MailLogEntry,
   NotificationRecord,
   PaymentOrder,
   PlanTier,
@@ -266,6 +269,23 @@ export const api = {
         body: JSON.stringify({ role }),
       }
     ),
+  adminBanUser: (userId: string, banned: boolean, reason?: string) =>
+    apiRequest<{ ok: boolean; banned: boolean; bannedAt: string | null; banReason: string | null }>(
+      `/api/admin/users/${encodeURIComponent(userId)}/ban`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ banned, reason }),
+      }
+    ),
+  adminRevokeUserPro: (userId: string) =>
+    apiRequest<{ ok: boolean; subscription: UserSubscription }>(
+      `/api/admin/users/${encodeURIComponent(userId)}/revoke-pro`,
+      { method: 'POST' }
+    ),
+  adminDeleteUser: (userId: string) =>
+    apiRequest<{ ok: boolean }>(`/api/admin/users/${encodeURIComponent(userId)}`, {
+      method: 'DELETE',
+    }),
   siteConfig: () => apiRequest<SiteConfig>('/api/site/config'),
   adminSettings: () =>
     apiRequest<{
@@ -275,6 +295,7 @@ export const api = {
       tmdbApiKey: string;
       smtp: AdminSmtpStatus;
       site: SiteConfig;
+      supabaseServiceRoleConfigured?: boolean;
     }>('/api/admin/settings'),
   adminSaveSiteConfig: (payload: {
     siteName: string;
@@ -321,6 +342,41 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ to }),
     }),
+  adminEmailTemplates: () =>
+    apiRequest<{ templates: EmailTemplateConfig[] }>('/api/admin/mail/templates'),
+  adminSaveEmailTemplate: (
+    key: EmailTemplateKey,
+    patch: Partial<Pick<EmailTemplateConfig, 'subject' | 'heading' | 'body' | 'ctaLabel' | 'enabled'>>
+  ) =>
+    apiRequest<{ template: EmailTemplateConfig }>(
+      `/api/admin/mail/templates/${encodeURIComponent(key)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(patch),
+      }
+    ),
+  adminResetEmailTemplate: (key: EmailTemplateKey) =>
+    apiRequest<{ template: EmailTemplateConfig }>(
+      `/api/admin/mail/templates/${encodeURIComponent(key)}/reset`,
+      { method: 'POST' }
+    ),
+  adminTestEmailTemplate: (key: EmailTemplateKey, to: string) =>
+    apiRequest<{ ok: boolean; message: string }>(
+      `/api/admin/mail/templates/${encodeURIComponent(key)}/test`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ to }),
+      }
+    ),
+  adminMailLogs: (params?: { status?: string; q?: string }) => {
+    const p = new URLSearchParams();
+    if (params?.status) p.set('status', params.status);
+    if (params?.q) p.set('q', params.q);
+    const qs = p.toString();
+    return apiRequest<{ logs: MailLogEntry[] }>(`/api/admin/mail/logs${qs ? `?${qs}` : ''}`);
+  },
+  adminClearMailLogs: () =>
+    apiRequest<{ ok: boolean }>('/api/admin/mail/logs', { method: 'DELETE' }),
   adminSaveTmdbKey: (tmdbApiKey: string) =>
     apiRequest<{ tmdbApiKey: string }>('/api/admin/settings/tmdb', {
       method: 'PUT',

@@ -6,13 +6,18 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  Ban,
   Bell,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Crown,
   RotateCcw,
   Search,
   Shield,
+  Trash2,
+  UserX,
+  X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { TYPE_LABELS } from '../shared/types';
@@ -90,7 +95,7 @@ export function AdminUsersTab({
 
   const [search, setSearch] = useState('');
   const [tierFilter, setTierFilter] = useState<'all' | 'pro' | 'free'>('all');
-  const [presenceFilter, setPresenceFilter] = useState<'all' | 'online' | 'offline'>('all');
+  const [presenceFilter, setPresenceFilter] = useState<'all' | 'online' | 'offline' | 'banned'>('all');
   const [roleFilter, setRoleFilter] = useState<'all' | 'admin' | 'member'>('all');
   const [sortKey, setSortKey] = useState<SortKey>('default');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
@@ -100,6 +105,9 @@ export function AdminUsersTab({
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [assignPlanId, setAssignPlanId] = useState('pro');
   const [assignDays, setAssignDays] = useState('30');
+  const [banModalUser, setBanModalUser] = useState<AdminUserSummary | null>(null);
+  const [banReasonInput, setBanReasonInput] = useState('');
+  const [deleteModalUser, setDeleteModalUser] = useState<AdminUserSummary | null>(null);
 
   const users = useMemo(() => data?.users ?? [], [data?.users]);
 
@@ -117,6 +125,7 @@ export function AdminUsersTab({
       if (tierFilter === 'free' && u.isPro) return false;
       if (presenceFilter === 'online' && !u.online) return false;
       if (presenceFilter === 'offline' && u.online) return false;
+      if (presenceFilter === 'banned' && !u.banned) return false;
       if (roleFilter === 'admin' && !u.isAdmin) return false;
       if (roleFilter === 'member' && u.isAdmin) return false;
       return true;
@@ -204,6 +213,50 @@ export function AdminUsersTab({
       );
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : 'Attribution impossible'),
+  });
+
+  const revokeProMutation = useMutation({
+    mutationFn: (userId: string) => api.adminRevokeUserPro(userId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-overview'] });
+      void onRefreshUser();
+      toast.success('Statut Pro retiré — compte repassé en Basic');
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : 'Révocation impossible'),
+  });
+
+  const banMutation = useMutation({
+    mutationFn: ({
+      userId,
+      banned,
+      reason,
+    }: {
+      userId: string;
+      banned: boolean;
+      reason?: string;
+    }) => api.adminBanUser(userId, banned, reason),
+    onSuccess: (_res, vars) => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-overview'] });
+      void onRefreshUser();
+      setBanModalUser(null);
+      setBanReasonInput('');
+      toast.success(vars.banned ? 'Utilisateur banni' : 'Utilisateur débanni');
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : 'Modération impossible'),
+  });
+
+  const deleteUserMutation = useMutation({
+    mutationFn: (userId: string) => api.adminDeleteUser(userId),
+    onSuccess: (_res, deletedId) => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-overview'] });
+      void onRefreshUser();
+      if (selectedUserId === deletedId) {
+        setSelectedUserId(null);
+      }
+      setDeleteModalUser(null);
+      toast.success('Utilisateur supprimé définitivement');
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : 'Suppression impossible'),
   });
 
   const toggleSort = (key: Exclude<SortKey, 'default'>) => {
@@ -309,14 +362,17 @@ export function AdminUsersTab({
           </select>
 
           <select
-            aria-label="Filtrer par présence"
+            aria-label="Filtrer par statut"
             value={presenceFilter}
-            onChange={(e) => setPresenceFilter(e.target.value as 'all' | 'online' | 'offline')}
+            onChange={(e) =>
+              setPresenceFilter(e.target.value as 'all' | 'online' | 'offline' | 'banned')
+            }
             className="h-9 rounded-lg border border-input bg-background px-3 text-xs text-foreground focus:border-primary focus:outline-none"
           >
             <option value="all">Tous les statuts</option>
             <option value="online">En ligne uniquement</option>
             <option value="offline">Hors ligne</option>
+            <option value="banned">Bannis uniquement</option>
           </select>
 
           <select
@@ -453,6 +509,9 @@ export function AdminUsersTab({
                               {u.isAdmin && (
                                 <span className="text-[11px] font-semibold text-primary">· Admin</span>
                               )}
+                              {u.banned && (
+                                <span className="text-[11px] font-semibold text-destructive">· Banni</span>
+                              )}
                             </div>
                             <p className="truncate text-xs text-muted-foreground">{u.email}</p>
                           </div>
@@ -460,7 +519,15 @@ export function AdminUsersTab({
                       </td>
 
                       <td className="py-3 px-3 text-xs tabular-nums">
-                        {u.online ? (
+                        {u.banned ? (
+                          <span
+                            title={u.banReason || 'Compte suspendu'}
+                            className="inline-flex items-center gap-1 font-semibold text-destructive"
+                          >
+                            <Ban className="size-3.5" />
+                            <span>Banni</span>
+                          </span>
+                        ) : u.online ? (
                           <span className="font-semibold text-emerald-400">
                             {u.currentItem ? `En lecture : ${u.currentItem.titre}` : 'En ligne'}
                           </span>
@@ -523,6 +590,61 @@ export function AdminUsersTab({
                           >
                             <Bell className="size-3.5" />
                           </button>
+                          {u.isPro && (
+                            <button
+                              type="button"
+                              title="Retirer le statut Pro (passer Basic)"
+                              aria-label={`Retirer le statut Pro de ${u.username || u.email}`}
+                              disabled={revokeProMutation.isPending}
+                              onClick={() => revokeProMutation.mutate(u.id)}
+                              className="inline-flex size-7 items-center justify-center rounded-md border border-border bg-background text-amber-400 hover:border-destructive/40 hover:text-destructive disabled:opacity-50"
+                            >
+                              <UserX className="size-3.5" />
+                            </button>
+                          )}
+                          {u.id !== currentUser?.id && (
+                            <>
+                              <button
+                                type="button"
+                                title={u.banned ? 'Débannir ce membre' : 'Bannir ce membre'}
+                                aria-label={
+                                  u.banned
+                                    ? `Débannir ${u.username || u.email}`
+                                    : `Bannir ${u.username || u.email}`
+                                }
+                                disabled={banMutation.isPending}
+                                onClick={() => {
+                                  if (u.banned) {
+                                    banMutation.mutate({ userId: u.id, banned: false });
+                                  } else {
+                                    setBanReasonInput('');
+                                    setBanModalUser(u);
+                                  }
+                                }}
+                                className={`inline-flex size-7 items-center justify-center rounded-md border bg-background transition-colors disabled:opacity-50 ${
+                                  u.banned
+                                    ? 'border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10'
+                                    : 'border-border text-muted-foreground hover:border-amber-500/40 hover:text-amber-400'
+                                }`}
+                              >
+                                {u.banned ? (
+                                  <CheckCircle2 className="size-3.5" />
+                                ) : (
+                                  <Ban className="size-3.5" />
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                title="Supprimer définitivement cet utilisateur"
+                                aria-label={`Supprimer ${u.username || u.email}`}
+                                disabled={deleteUserMutation.isPending}
+                                onClick={() => setDeleteModalUser(u)}
+                                className="inline-flex size-7 items-center justify-center rounded-md border border-border bg-background text-muted-foreground hover:border-destructive/50 hover:text-destructive disabled:opacity-50"
+                              >
+                                <Trash2 className="size-3.5" />
+                              </button>
+                            </>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -618,7 +740,7 @@ export function AdminUsersTab({
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={() => onNotifyUser(selectedUser.id)}
@@ -628,25 +750,108 @@ export function AdminUsersTab({
                   <span>Notifier ce membre</span>
                 </button>
 
-                {selectedUser.id !== currentUser?.id && (
+                {selectedUser.isPro && (
                   <button
                     type="button"
-                    onClick={() =>
-                      roleMutation.mutate({
-                        userId: selectedUser.id,
-                        role: selectedUser.isAdmin ? 'member' : 'admin',
-                      })
-                    }
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent whitespace-nowrap shrink-0"
+                    disabled={revokeProMutation.isPending}
+                    onClick={() => revokeProMutation.mutate(selectedUser.id)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium text-amber-400 hover:border-destructive/40 hover:text-destructive disabled:opacity-50 whitespace-nowrap shrink-0"
                   >
-                    <Shield className="size-3.5 text-primary" />
-                    <span>
-                      {selectedUser.isAdmin ? 'Rétrograder Membre' : 'Promouvoir Admin'}
-                    </span>
+                    <UserX className="size-3.5" />
+                    <span>Retirer Pro</span>
                   </button>
+                )}
+
+                {selectedUser.id !== currentUser?.id && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        roleMutation.mutate({
+                          userId: selectedUser.id,
+                          role: selectedUser.isAdmin ? 'member' : 'admin',
+                        })
+                      }
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent whitespace-nowrap shrink-0"
+                    >
+                      <Shield className="size-3.5 text-primary" />
+                      <span>
+                        {selectedUser.isAdmin ? 'Rétrograder Membre' : 'Promouvoir Admin'}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={banMutation.isPending}
+                      onClick={() => {
+                        if (selectedUser.banned) {
+                          banMutation.mutate({ userId: selectedUser.id, banned: false });
+                        } else {
+                          setBanReasonInput('');
+                          setBanModalUser(selectedUser);
+                        }
+                      }}
+                      className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium whitespace-nowrap shrink-0 disabled:opacity-50 ${
+                        selectedUser.banned
+                          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
+                          : 'border-border bg-background text-amber-400 hover:border-amber-500/40'
+                      }`}
+                    >
+                      {selectedUser.banned ? (
+                        <>
+                          <CheckCircle2 className="size-3.5" />
+                          <span>Débannir</span>
+                        </>
+                      ) : (
+                        <>
+                          <Ban className="size-3.5" />
+                          <span>Bannir</span>
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={deleteUserMutation.isPending}
+                      onClick={() => setDeleteModalUser(selectedUser)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-destructive/40 bg-background px-3 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50 whitespace-nowrap shrink-0"
+                    >
+                      <Trash2 className="size-3.5" />
+                      <span>Supprimer</span>
+                    </button>
+                  </>
                 )}
               </div>
             </div>
+
+            {selectedUser.banned && (
+              <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/40 bg-destructive/10 p-3.5 text-xs">
+                <div className="flex items-start gap-2.5">
+                  <Ban className="mt-0.5 size-4 shrink-0 text-destructive" />
+                  <div>
+                    <p className="font-semibold text-foreground">
+                      Ce compte est actuellement banni
+                      {selectedUser.bannedAt
+                        ? ` (depuis le ${new Date(selectedUser.bannedAt).toLocaleDateString('fr-FR')})`
+                        : ''}
+                    </p>
+                    {selectedUser.banReason && (
+                      <p className="mt-0.5 text-muted-foreground">
+                        Motif : {selectedUser.banReason}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={banMutation.isPending}
+                  onClick={() => banMutation.mutate({ userId: selectedUser.id, banned: false })}
+                  className="rounded-lg border border-emerald-500/40 bg-background px-3 py-1.5 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/10"
+                >
+                  Débannir maintenant
+                </button>
+              </div>
+            )}
 
             {/* Manual Pro / Basic Assignment Block */}
             <div className="mb-6 border-b border-border pb-5 space-y-3">
@@ -735,17 +940,11 @@ export function AdminUsersTab({
                   {selectedUser.isPro && (
                     <button
                       type="button"
-                      disabled={assignSubMutation.isPending}
-                      onClick={() =>
-                        assignSubMutation.mutate({
-                          userId: selectedUser.id,
-                          planId: 'free',
-                          durationDays: 0,
-                        })
-                      }
-                      className="rounded-lg border border-border bg-background px-2.5 py-2 text-xs font-medium text-muted-foreground hover:text-destructive whitespace-nowrap"
+                      disabled={revokeProMutation.isPending}
+                      onClick={() => revokeProMutation.mutate(selectedUser.id)}
+                      className="rounded-lg border border-border bg-background px-2.5 py-2 text-xs font-medium text-muted-foreground hover:border-destructive/40 hover:text-destructive whitespace-nowrap disabled:opacity-50"
                     >
-                      Passer Basic
+                      Retirer Pro
                     </button>
                   )}
                 </div>
@@ -791,6 +990,154 @@ export function AdminUsersTab({
           </div>
         )}
       </section>
+
+      {/* In-app Modal: Ban User */}
+      {banModalUser && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+          onClick={() => {
+            if (!banMutation.isPending) setBanModalUser(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 place-items-center rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-400">
+                  <Ban className="size-4" />
+                </div>
+                <div>
+                  <h3 className="font-display text-lg font-semibold text-foreground">
+                    Bannir cet utilisateur
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    {banModalUser.username || banModalUser.email}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-label="Fermer"
+                onClick={() => setBanModalUser(null)}
+                className="rounded-lg p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-muted-foreground">
+              L’utilisateur ne pourra plus se connecter ni accéder à son compte tant qu’il restera banni.
+            </p>
+
+            <label className="block text-xs">
+              <span className="mb-1.5 block font-medium text-foreground">
+                Motif du bannissement (optionnel)
+              </span>
+              <input
+                value={banReasonInput}
+                onChange={(e) => setBanReasonInput(e.target.value)}
+                maxLength={200}
+                placeholder="Ex : Non-respect des conditions d’utilisation"
+                className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none"
+              />
+            </label>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={banMutation.isPending}
+                onClick={() => setBanModalUser(null)}
+                className="rounded-lg border border-border bg-background px-4 py-2 text-xs font-medium text-foreground hover:bg-accent"
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                disabled={banMutation.isPending}
+                onClick={() =>
+                  banMutation.mutate({
+                    userId: banModalUser.id,
+                    banned: true,
+                    reason: banReasonInput.trim(),
+                  })
+                }
+                className="inline-flex items-center gap-1.5 rounded-lg bg-destructive px-4 py-2 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-50"
+              >
+                <Ban className="size-3.5" />
+                <span>{banMutation.isPending ? 'Bannissement…' : 'Confirmer le bannissement'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* In-app Modal: Delete User */}
+      {deleteModalUser && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+          onClick={() => {
+            if (!deleteUserMutation.isPending) setDeleteModalUser(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-destructive/40 bg-card p-6 shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 place-items-center rounded-lg border border-destructive/40 bg-destructive/10 text-destructive">
+                  <Trash2 className="size-4" />
+                </div>
+                <div>
+                  <h3 className="font-display text-lg font-semibold text-foreground">
+                    Supprimer définitivement
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    {deleteModalUser.username || deleteModalUser.email}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-label="Fermer"
+                onClick={() => setDeleteModalUser(null)}
+                className="rounded-lg p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Cette action est irréversible : le compte, les favoris, l’historique, les notifications et l’abonnement associé à{' '}
+              <strong className="text-foreground">{deleteModalUser.email}</strong> seront supprimés.
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={deleteUserMutation.isPending}
+                onClick={() => setDeleteModalUser(null)}
+                className="rounded-lg border border-border bg-background px-4 py-2 text-xs font-medium text-foreground hover:bg-accent"
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                disabled={deleteUserMutation.isPending}
+                onClick={() => deleteUserMutation.mutate(deleteModalUser.id)}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-destructive px-4 py-2 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-50"
+              >
+                <Trash2 className="size-3.5" />
+                <span>
+                  {deleteUserMutation.isPending ? 'Suppression…' : 'Supprimer définitivement'}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

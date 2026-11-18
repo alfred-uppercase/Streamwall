@@ -156,3 +156,8 @@ export function clearUserNotifications(userId: string, onlyRead = false): void {
     saveNotificationsDb(notificationsDb);
   }
 }
+
+export function cleanupUserNotifications(userId: string): void {
+  clearUserNotifications(userId, false);
+}
+
