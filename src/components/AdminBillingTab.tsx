@@ -466,7 +466,7 @@ export function AdminBillingTab() {
                       placeholder={
                         draft.tier === 'pro'
                           ? '/film/{id} ou https://serveur.com/film/{id}'
-                          : '/movie/{tmdb} ou https://serveur.com/movie/{tmdb}'
+                          : '/film/{id} ou /movie/{tmdb}'
                       }
                       className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
                     />
@@ -490,8 +490,8 @@ export function AdminBillingTab() {
                       onChange={(e) => setDraft({ ...draft, seriePlayer: e.target.value })}
                       placeholder={
                         draft.tier === 'pro'
-                          ? '/tvs/{id}/{s}/{e} ou https://serveur.com/tv/{id}/{s}/{e}'
-                          : '/tv/{tmdb}/{s}/{e} ou https://serveur.com/tv/{tmdb}/{s}/{e}'
+                          ? '/tvs/{id}/{s}/{e} ou https://serveur.com/tvs/{id}/{s}/{e}'
+                          : '/tvs/{id}/{s}/{e} ou /tv/{tmdb}/{s}/{e}'
                       }
                       className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
                     />

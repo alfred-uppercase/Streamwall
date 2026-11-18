@@ -29,6 +29,7 @@ import {
 import type {
   AdminSmtpSettings,
   ApiHealthReport,
+  EmailProvider,
   Item,
   PlayerKey,
   PlayerTemplates,
@@ -40,24 +41,14 @@ import { ProCrownBadge, UserAvatar } from '../components/UserAvatar';
 
 const PLAYER_FIELDS: { key: PlayerKey; label: string; hint: string }[] = [
   {
-    key: 'player_member_film',
-    label: 'Film — Membres (sans publicité)',
+    key: 'player_guest_film',
+    label: 'Film — Visiteurs non connectés (invités)',
     hint: '/film/{id} ou https://serveur.com/film/{id}',
   },
   {
-    key: 'player_member_serie',
-    label: 'Série / Anime — Membres',
-    hint: '/tvs/{id}/{s}/{e} ou https://serveur.com/tv/{id}/{s}/{e}',
-  },
-  {
-    key: 'player_guest_film',
-    label: 'Film — Invités (avec publicité)',
-    hint: '/movie/{tmdb} ou https://serveur.com/embed/{tmdb}',
-  },
-  {
     key: 'player_guest_serie',
-    label: 'Série / Anime — Invités (avec publicité)',
-    hint: '/tv/{tmdb}/{s}/{e} ou https://serveur.com/embed/tv/{tmdb}/{s}/{e}',
+    label: 'Série / Anime — Visiteurs non connectés (invités)',
+    hint: '/tvs/{id}/{s}/{e} ou https://serveur.com/tvs/{id}/{s}/{e}',
   },
 ];
 
@@ -147,6 +138,10 @@ export function AdminPage() {
   const [smtpEdit, setSmtpEdit] = useState<Partial<AdminSmtpSettings>>({});
   const [smtpPassInput, setSmtpPassInput] = useState('');
   const [showSmtpPass, setShowSmtpPass] = useState(false);
+  const [resendKeyInput, setResendKeyInput] = useState('');
+  const [showResendKey, setShowResendKey] = useState(false);
+  const [brevoKeyInput, setBrevoKeyInput] = useState('');
+  const [showBrevoKey, setShowBrevoKey] = useState(false);
   const [testEmailTo, setTestEmailTo] = useState('');
 
   useEffect(() => {
@@ -236,16 +231,18 @@ export function AdminPage() {
     onSuccess: () => {
       setSmtpEdit({});
       setSmtpPassInput('');
+      setResendKeyInput('');
+      setBrevoKeyInput('');
       void queryClient.invalidateQueries({ queryKey: ['admin-settings'] });
-      toast.success('Configuration SMTP enregistrée');
+      toast.success('Configuration email enregistrée');
     },
-    onError: (err) => toast.error(err instanceof Error ? err.message : 'Enregistrement SMTP impossible'),
+    onError: (err) => toast.error(err instanceof Error ? err.message : 'Enregistrement impossible'),
   });
 
   const testSmtpMutation = useMutation({
     mutationFn: (to: string) => api.adminTestSmtp(to),
     onSuccess: (res) => toast.success(res.message),
-    onError: (err) => toast.error(err instanceof Error ? err.message : 'Échec du test SMTP'),
+    onError: (err) => toast.error(err instanceof Error ? err.message : 'Échec du test email'),
   });
 
   const saveTmdbMutation = useMutation({
@@ -270,6 +267,7 @@ export function AdminPage() {
     onSuccess: () => {
       setPlayerEdits({});
       void queryClient.invalidateQueries({ queryKey: ['admin-settings'] });
+      void queryClient.invalidateQueries({ queryKey: ['admin-billing'] });
       toast.success('Modèles des lecteurs enregistrés');
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : 'Modèle invalide'),
@@ -852,7 +850,7 @@ export function AdminPage() {
             </form>
           </section>
 
-          {/* SMTP / Email Configuration */}
+          {/* Email Configuration: SMTP / Resend API / Brevo API */}
           {mergedSmtp && (
             <section className="rounded-xl border border-border bg-card p-6 space-y-5">
               <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-4">
@@ -862,10 +860,10 @@ export function AdminPage() {
                   </div>
                   <div>
                     <h2 className="font-display text-xl font-semibold text-foreground">
-                      Configuration Email (SMTP)
+                      Configuration Email (SMTP / Resend / Brevo)
                     </h2>
                     <p className="text-xs text-muted-foreground">
-                      Permet d’envoyer réellement les emails d’inscription, de confirmation, de bienvenue et de réinitialisation de mot de passe.
+                      Choisissez entre un serveur SMTP classique ou l’API directe Resend / Brevo pour les emails d’inscription, de confirmation et de réinitialisation.
                     </p>
                   </div>
                 </div>
@@ -879,8 +877,35 @@ export function AdminPage() {
                     }
                     className="size-4 accent-primary"
                   />
-                  <span>Activer l’envoi d’emails SMTP</span>
+                  <span>Activer l’envoi d’emails</span>
                 </label>
+              </div>
+
+              {/* Email provider selector */}
+              <div className="flex flex-wrap gap-2">
+                {(
+                  [
+                    { id: 'smtp', label: 'SMTP classique' },
+                    { id: 'resend', label: 'Resend API' },
+                    { id: 'brevo', label: 'Brevo API' },
+                  ] as { id: EmailProvider; label: string }[]
+                ).map((opt) => {
+                  const active = (mergedSmtp.provider || 'smtp') === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setSmtpEdit((prev) => ({ ...prev, provider: opt.id }))}
+                      className={`inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                        active
+                          ? 'border-primary bg-primary text-primary-foreground'
+                          : 'border-border bg-background text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      <span>{opt.label}</span>
+                    </button>
+                  );
+                })}
               </div>
 
               <form
@@ -888,6 +913,7 @@ export function AdminPage() {
                   e.preventDefault();
                   saveSmtpMutation.mutate({
                     ...smtpEdit,
+                    provider: mergedSmtp.provider || 'smtp',
                     enabled: mergedSmtp.enabled,
                     host: mergedSmtp.host,
                     port: Number(mergedSmtp.port) || 587,
@@ -897,83 +923,167 @@ export function AdminPage() {
                     fromEmail: mergedSmtp.fromEmail,
                     requireSignupConfirmation: mergedSmtp.requireSignupConfirmation,
                     ...(smtpPassInput.trim() ? { pass: smtpPassInput.trim() } : {}),
+                    ...(resendKeyInput.trim() ? { resendApiKey: resendKeyInput.trim() } : {}),
+                    ...(brevoKeyInput.trim() ? { brevoApiKey: brevoKeyInput.trim() } : {}),
                   });
                 }}
                 className="space-y-4"
               >
-                <div className="grid gap-4 sm:grid-cols-3">
-                  <label className="block text-xs sm:col-span-2">
-                    <span className="mb-1 block font-medium text-foreground">Serveur SMTP (Host)</span>
-                    <input
-                      value={mergedSmtp.host}
-                      onChange={(e) => setSmtpEdit((prev) => ({ ...prev, host: e.target.value }))}
-                      placeholder="smtp.gmail.com ou smtp-relay.brevo.com"
-                      className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
-                    />
-                  </label>
+                {(mergedSmtp.provider || 'smtp') === 'smtp' && (
+                  <>
+                    <div className="grid gap-4 sm:grid-cols-3">
+                      <label className="block text-xs sm:col-span-2">
+                        <span className="mb-1 block font-medium text-foreground">Serveur SMTP (Host)</span>
+                        <input
+                          value={mergedSmtp.host}
+                          onChange={(e) => setSmtpEdit((prev) => ({ ...prev, host: e.target.value }))}
+                          placeholder="smtp.gmail.com ou smtp-relay.brevo.com"
+                          className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
+                        />
+                      </label>
 
-                  <label className="block text-xs">
-                    <span className="mb-1 block font-medium text-foreground">Port SMTP</span>
-                    <input
-                      type="number"
-                      min={1}
-                      max={65535}
-                      value={mergedSmtp.port}
-                      onChange={(e) =>
-                        setSmtpEdit((prev) => ({
-                          ...prev,
-                          port: Number(e.target.value) || 587,
-                          secure: Number(e.target.value) === 465 ? true : prev.secure,
-                        }))
-                      }
-                      className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground tabular-nums focus:border-primary focus:outline-none"
-                    />
-                  </label>
-                </div>
-
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <label className="block text-xs">
-                    <span className="mb-1 block font-medium text-foreground">Utilisateur SMTP</span>
-                    <input
-                      value={mergedSmtp.user}
-                      onChange={(e) => setSmtpEdit((prev) => ({ ...prev, user: e.target.value }))}
-                      placeholder="contact@votredomaine.com"
-                      className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none"
-                    />
-                  </label>
-
-                  <label className="block text-xs">
-                    <span className="mb-1 flex items-center justify-between gap-2 font-medium text-foreground">
-                      <span>Mot de passe / Clé SMTP</span>
-                      {settingsQuery.data?.smtp?.passMask && (
-                        <span className="font-mono text-[11px] text-emerald-400">
-                          Actuel : {settingsQuery.data.smtp.passMask}
-                        </span>
-                      )}
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type={showSmtpPass ? 'text' : 'password'}
-                        value={smtpPassInput}
-                        onChange={(e) => setSmtpPassInput(e.target.value)}
-                        placeholder={
-                          settingsQuery.data?.smtp?.passConfigured
-                            ? 'Laisser vide pour conserver le mot de passe actuel'
-                            : 'Mot de passe ou clé d’application SMTP'
-                        }
-                        className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowSmtpPass((v) => !v)}
-                        aria-label={showSmtpPass ? 'Masquer' : 'Afficher'}
-                        className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-background text-muted-foreground hover:text-foreground"
-                      >
-                        {showSmtpPass ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                      </button>
+                      <label className="block text-xs">
+                        <span className="mb-1 block font-medium text-foreground">Port SMTP</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={65535}
+                          value={mergedSmtp.port}
+                          onChange={(e) =>
+                            setSmtpEdit((prev) => ({
+                              ...prev,
+                              port: Number(e.target.value) || 587,
+                              secure: Number(e.target.value) === 465 ? true : prev.secure,
+                            }))
+                          }
+                          className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground tabular-nums focus:border-primary focus:outline-none"
+                        />
+                      </label>
                     </div>
-                  </label>
-                </div>
+
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <label className="block text-xs">
+                        <span className="mb-1 block font-medium text-foreground">Utilisateur SMTP</span>
+                        <input
+                          value={mergedSmtp.user}
+                          onChange={(e) => setSmtpEdit((prev) => ({ ...prev, user: e.target.value }))}
+                          placeholder="contact@votredomaine.com"
+                          className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none"
+                        />
+                      </label>
+
+                      <label className="block text-xs">
+                        <span className="mb-1 flex items-center justify-between gap-2 font-medium text-foreground">
+                          <span>Mot de passe / Clé SMTP</span>
+                          {settingsQuery.data?.smtp?.passMask && (
+                            <span className="font-mono text-[11px] text-emerald-400">
+                              Actuel : {settingsQuery.data.smtp.passMask}
+                            </span>
+                          )}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type={showSmtpPass ? 'text' : 'password'}
+                            value={smtpPassInput}
+                            onChange={(e) => setSmtpPassInput(e.target.value)}
+                            placeholder={
+                              settingsQuery.data?.smtp?.passConfigured
+                                ? 'Laisser vide pour conserver le mot de passe actuel'
+                                : 'Mot de passe ou clé d’application SMTP'
+                            }
+                            className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowSmtpPass((v) => !v)}
+                            aria-label={showSmtpPass ? 'Masquer' : 'Afficher'}
+                            className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-background text-muted-foreground hover:text-foreground"
+                          >
+                            {showSmtpPass ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                          </button>
+                        </div>
+                      </label>
+                    </div>
+                  </>
+                )}
+
+                {mergedSmtp.provider === 'resend' && (
+                  <div className="space-y-2 rounded-lg border border-border bg-background/50 p-4">
+                    <label className="block text-xs">
+                      <span className="mb-1 flex items-center justify-between gap-2 font-medium text-foreground">
+                        <span>Clé API Resend</span>
+                        {settingsQuery.data?.smtp?.resendApiKeyMask && (
+                          <span className="font-mono text-[11px] text-emerald-400">
+                            Actuelle : {settingsQuery.data.smtp.resendApiKeyMask}
+                          </span>
+                        )}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type={showResendKey ? 'text' : 'password'}
+                          value={resendKeyInput}
+                          onChange={(e) => setResendKeyInput(e.target.value)}
+                          placeholder={
+                            settingsQuery.data?.smtp?.resendApiKeyConfigured
+                              ? 'Laisser vide pour conserver la clé Resend actuelle'
+                              : 're_xxxxxxxxxxxxxxxxxxxxxxxxx'
+                          }
+                          className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowResendKey((v) => !v)}
+                          aria-label={showResendKey ? 'Masquer' : 'Afficher'}
+                          className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-background text-muted-foreground hover:text-foreground"
+                        >
+                          {showResendKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                        </button>
+                      </div>
+                    </label>
+                    <p className="text-[11px] text-muted-foreground">
+                      Envoi via <code className="font-mono text-primary">api.resend.com</code>. Indiquez ci-dessous un email d’expéditeur vérifié sur Resend (ou <code className="font-mono text-primary">onboarding@resend.dev</code> pour tester).
+                    </p>
+                  </div>
+                )}
+
+                {mergedSmtp.provider === 'brevo' && (
+                  <div className="space-y-2 rounded-lg border border-border bg-background/50 p-4">
+                    <label className="block text-xs">
+                      <span className="mb-1 flex items-center justify-between gap-2 font-medium text-foreground">
+                        <span>Clé API Brevo (v3)</span>
+                        {settingsQuery.data?.smtp?.brevoApiKeyMask && (
+                          <span className="font-mono text-[11px] text-emerald-400">
+                            Actuelle : {settingsQuery.data.smtp.brevoApiKeyMask}
+                          </span>
+                        )}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type={showBrevoKey ? 'text' : 'password'}
+                          value={brevoKeyInput}
+                          onChange={(e) => setBrevoKeyInput(e.target.value)}
+                          placeholder={
+                            settingsQuery.data?.smtp?.brevoApiKeyConfigured
+                              ? 'Laisser vide pour conserver la clé Brevo actuelle'
+                              : 'xkeysib-xxxxxxxxxxxxxxxxxxxxxxxxx'
+                          }
+                          className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowBrevoKey((v) => !v)}
+                          aria-label={showBrevoKey ? 'Masquer' : 'Afficher'}
+                          className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-background text-muted-foreground hover:text-foreground"
+                        >
+                          {showBrevoKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                        </button>
+                      </div>
+                    </label>
+                    <p className="text-[11px] text-muted-foreground">
+                      Envoi via <code className="font-mono text-primary">api.brevo.com/v3/smtp/email</code>. Indiquez ci-dessous une adresse d’expéditeur validée dans votre compte Brevo.
+                    </p>
+                  </div>
+                )}
 
                 <div className="grid gap-4 sm:grid-cols-2">
                   <label className="block text-xs">
@@ -1003,17 +1113,19 @@ export function AdminPage() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-6 pt-1">
-                  <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-foreground">
-                    <input
-                      type="checkbox"
-                      checked={mergedSmtp.secure}
-                      onChange={(e) =>
-                        setSmtpEdit((prev) => ({ ...prev, secure: e.target.checked }))
-                      }
-                      className="size-4 accent-primary"
-                    />
-                    <span>Connexion chiffrée SSL/TLS directe (port 465)</span>
-                  </label>
+                  {(mergedSmtp.provider || 'smtp') === 'smtp' && (
+                    <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-foreground">
+                      <input
+                        type="checkbox"
+                        checked={mergedSmtp.secure}
+                        onChange={(e) =>
+                          setSmtpEdit((prev) => ({ ...prev, secure: e.target.checked }))
+                        }
+                        className="size-4 accent-primary"
+                      />
+                      <span>Connexion chiffrée SSL/TLS directe (port 465)</span>
+                    </label>
+                  )}
 
                   <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-foreground">
                     <input
@@ -1037,7 +1149,7 @@ export function AdminPage() {
                     disabled={saveSmtpMutation.isPending}
                     className="rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap"
                   >
-                    {saveSmtpMutation.isPending ? 'Enregistrement…' : 'Enregistrer la configuration SMTP'}
+                    {saveSmtpMutation.isPending ? 'Enregistrement…' : 'Enregistrer la configuration email'}
                   </button>
 
                   <div className="flex flex-wrap items-center gap-2">
@@ -1126,14 +1238,22 @@ export function AdminPage() {
         </div>
       )}
 
-      {/* TAB 4: PLAYER TEMPLATES */}
+      {/* TAB 4: GUEST PLAYER TEMPLATES */}
       {tab === 'players' && mergedPlayers && (
         <section className="rounded-xl border border-border bg-card p-6">
           <h2 className="mb-1 font-display text-xl font-semibold text-foreground">
-            Modèles d’URL des lecteurs par défaut
+            Lecteur par défaut (Visiteurs invités)
           </h2>
           <p className="mb-5 text-sm text-muted-foreground">
-            Accepte un chemin relatif (ex. <code className="font-mono text-primary">/film/{'{id}'}</code>) ou un lien complet si vous changez de serveur (ex. <code className="font-mono text-primary">https://autre-serveur.com/embed/{'{tmdb}'}</code>). Variables :{' '}
+            Configurez ici uniquement les lecteurs utilisés pour les visiteurs non connectés. Les lecteurs des membres connectés (offres Gratuit et Pro) se configurent directement dans{' '}
+            <button
+              type="button"
+              onClick={() => setTab('offers')}
+              className="font-medium text-primary hover:underline"
+            >
+              Offres & Paiements
+            </button>
+            . Variables :{' '}
             <code className="font-mono text-primary">{'{id}'}</code>,{' '}
             <code className="font-mono text-primary">{'{tmdb}'}</code>,{' '}
             <code className="font-mono text-primary">{'{s}'}</code>,{' '}

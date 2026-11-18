@@ -88,6 +88,10 @@ export function PricingPage() {
     queryKey: ['billing-me', user?.id ?? 'guest'],
     queryFn: () => api.billingMe(),
     enabled: isMember,
+    refetchInterval: (query) => {
+      const list = query.state.data?.orders ?? [];
+      return list.some((o) => o.status === 'pending' && o.method === 'crypto_gate') ? 4000 : false;
+    },
   });
 
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
@@ -121,12 +125,34 @@ export function PricingPage() {
     }
   }, [plans, selectedPlanId]);
 
+  useEffect(() => {
+    if (subscription?.tier === 'pro' && !isPro) {
+      void refreshUser();
+      toast.success('Paiement confirmé ! Votre compte est maintenant Pro.');
+    }
+  }, [subscription?.tier, isPro, refreshUser]);
+
+  const openInNewTab = (url: string) => {
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  };
+
   const cryptoMutation = useMutation({
     mutationFn: (planId: string) => api.checkoutCryptoGate(planId),
     onSuccess: (res) => {
       setCryptoOrder(res.order);
       void queryClient.invalidateQueries({ queryKey: ['billing-me'] });
-      toast.success('Lien de paiement Par Carte ou Crypto prêt.');
+      if (res.order.checkoutUrl) {
+        openInNewTab(res.order.checkoutUrl);
+        toast.success('Page de paiement ouverte dans un nouvel onglet. Activation Pro automatique dès validation.');
+      } else {
+        toast.success('Lien de paiement Par Carte ou Crypto prêt.');
+      }
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : 'Échec de création du paiement.');
@@ -416,7 +442,7 @@ export function PricingPage() {
                     Paiement automatisé Par Carte ou Crypto
                   </p>
                   <p className="text-muted-foreground">
-                    Un lien de paiement sécurisé est généré pour votre compte. Dès confirmation, votre couronne Pro et le lecteur dédié s’activent instantanément.
+                    Dès génération, la page sécurisée s’ouvre dans un nouvel onglet. Dès confirmation du paiement, votre statut Pro et votre lecteur dédié sont activés automatiquement sans intervention d’un administrateur.
                   </p>
                 </div>
               </div>

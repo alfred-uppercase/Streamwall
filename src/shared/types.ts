@@ -169,6 +169,7 @@ export interface PaymentOrder {
   durationDays: number;
   method: PaymentMethod;
   status: PaymentOrderStatus;
+  externalPaymentId?: string | null;
   checkoutUrl?: string | null;
   manualReference?: string | null;
   manualChannel?: string | null;
@@ -195,7 +196,10 @@ export interface AdminPaymentSecretsStatus {
   webhookMask: string;
 }
 
+export type EmailProvider = 'smtp' | 'resend' | 'brevo';
+
 export interface AdminSmtpSettings {
+  provider: EmailProvider;
   enabled: boolean;
   host: string;
   port: number;
@@ -203,12 +207,17 @@ export interface AdminSmtpSettings {
   user: string;
   pass?: string;
   clearPass?: boolean;
+  resendApiKey?: string;
+  clearResendApiKey?: boolean;
+  brevoApiKey?: string;
+  clearBrevoApiKey?: boolean;
   fromName: string;
   fromEmail: string;
   requireSignupConfirmation: boolean;
 }
 
 export interface AdminSmtpStatus {
+  provider: EmailProvider;
   enabled: boolean;
   host: string;
   port: number;
@@ -216,6 +225,10 @@ export interface AdminSmtpStatus {
   user: string;
   passConfigured: boolean;
   passMask: string;
+  resendApiKeyConfigured: boolean;
+  resendApiKeyMask: string;
+  brevoApiKeyConfigured: boolean;
+  brevoApiKeyMask: string;
   fromName: string;
   fromEmail: string;
   requireSignupConfirmation: boolean;
@@ -359,8 +372,8 @@ export type PlayerTemplates = Record<PlayerKey, string>;
 export const DEFAULT_PLAYERS: PlayerTemplates = {
   player_member_film: '/film/{id}',
   player_member_serie: '/tvs/{id}/{s}/{e}',
-  player_guest_film: '/movie/{tmdb}',
-  player_guest_serie: '/tv/{tmdb}/{s}/{e}',
+  player_guest_film: '/film/{id}',
+  player_guest_serie: '/tvs/{id}/{s}/{e}',
 };
 
 export const TEMPLATE_RE =
@@ -368,6 +381,16 @@ export const TEMPLATE_RE =
 
 export function isFullUrlTemplate(template: string): boolean {
   return /^https?:\/\//i.test(template.trim());
+}
+
+export function stripOriginFromTemplate(template: string, origin?: string): string {
+  const trimmed = template.trim();
+  if (!origin || !isFullUrlTemplate(trimmed)) return trimmed;
+  const cleanOrigin = origin.trim().replace(/\/+$/, '');
+  if (cleanOrigin && trimmed.toLowerCase().startsWith(`${cleanOrigin.toLowerCase()}/`)) {
+    return trimmed.slice(cleanOrigin.length);
+  }
+  return trimmed;
 }
 
 export function fillTemplate(
@@ -392,10 +415,10 @@ export function fillTemplate(
   return isFullUrlTemplate(trimmed) ? out : out.replace(/^\/+/, '');
 }
 
-export function matchesTemplate(template: string, pathStr: string): boolean {
-  const trimmed = template.trim();
-  if (!TEMPLATE_RE.test(trimmed) || isFullUrlTemplate(trimmed)) return false;
-  const pattern = trimmed
+export function matchesTemplate(template: string, pathStr: string, embedOrigin?: string): boolean {
+  const normalized = stripOriginFromTemplate(template, embedOrigin);
+  if (!TEMPLATE_RE.test(normalized) || isFullUrlTemplate(normalized)) return false;
+  const pattern = normalized
     .replace(/^\/+/, '')
     .split(/(\{(?:id|tmdb|s|e)\})/)
     .map((part) => (/^\{/.test(part) ? '\\d+' : part.replace(/[.*+?^$()|[\]\\]/g, '\\$&')))

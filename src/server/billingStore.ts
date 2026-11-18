@@ -137,14 +137,38 @@ function loadBillingDb(): BillingDatabase {
     if (fs.existsSync(BILLING_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(BILLING_FILE, 'utf-8')) as BillingDatabase;
       if (parsed && Array.isArray(parsed.plans) && parsed.config) {
-        return {
+        let migrated = false;
+        const plans = parsed.plans.map((p) => {
+          if (
+            p.id === 'free' &&
+            p.players &&
+            (p.players.film === '/movie/{tmdb}' || p.players.serie === '/tv/{tmdb}/{s}/{e}')
+          ) {
+            migrated = true;
+            return {
+              ...p,
+              players: {
+                film: p.players.film === '/movie/{tmdb}' ? DEFAULT_PLAYERS.player_guest_film : p.players.film,
+                serie:
+                  p.players.serie === '/tv/{tmdb}/{s}/{e}'
+                    ? DEFAULT_PLAYERS.player_guest_serie
+                    : p.players.serie,
+              },
+            };
+          }
+          return p;
+        });
+        const loaded: BillingDatabase = {
           ...createSeedBillingDb(),
           ...parsed,
+          plans,
           subscriptions: parsed.subscriptions ?? {},
           orders: Array.isArray(parsed.orders) ? parsed.orders : [],
           avatars: parsed.avatars ?? {},
           themes: parsed.themes ?? {},
         };
+        if (migrated) saveBillingDb(loaded);
+        return loaded;
       }
     }
   } catch {
@@ -545,8 +569,8 @@ export function resolvePlanTemplateForUser(
     return {
       template:
         itemType === 'film'
-          ? freePlan.players.film || fallbackTemplates.player_guest_film
-          : freePlan.players.serie || fallbackTemplates.player_guest_serie,
+          ? fallbackTemplates.player_guest_film || freePlan.players.film
+          : fallbackTemplates.player_guest_serie || freePlan.players.serie,
       plan: freePlan,
     };
   }
@@ -563,6 +587,20 @@ export function resolvePlanTemplateForUser(
           ? fallbackTemplates.player_member_serie
           : fallbackTemplates.player_guest_serie);
   return { template: tpl, plan };
+}
+
+export function syncFreePlanPlayers(players: { film: string; serie: string }): void {
+  const idx = billingDb.plans.findIndex((p) => p.id === 'free' || p.tier === 'free');
+  if (idx < 0) return;
+  const film = players.film.trim();
+  const serie = players.serie.trim();
+  if (!TEMPLATE_RE.test(film) || !TEMPLATE_RE.test(serie)) return;
+  billingDb.plans[idx] = {
+    ...billingDb.plans[idx],
+    players: { film, serie },
+    updatedAt: new Date().toISOString(),
+  };
+  saveBillingDb(billingDb);
 }
 
 export function getAllPlanTemplates(): string[] {
@@ -609,20 +647,24 @@ export async function createCryptoGateOrder(params: {
 
   const orderId = `tpk_${crypto.randomBytes(6).toString('hex')}`;
   const nowIso = new Date().toISOString();
-  const baseOrigin = params.originUrl.replace(/\/+$/, '');
+  const rawEmail = String(params.userEmail || '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail)) {
+    return {
+      error:
+        'Votre compte ne possède pas encore une adresse email valide pour le paiement. Modifiez votre email dans Mon compte.',
+    };
+  }
+
+  const amount = Math.round(Number(plan.price) * 100) / 100;
+  const currency = (plan.currency || billingDb.config.defaultCurrency || 'EUR').trim().toUpperCase();
 
   const payload = {
-    amount: plan.price,
-    currency: plan.currency || billingDb.config.defaultCurrency || 'EUR',
+    amount,
+    currency,
+    email: rawEmail,
     orderId,
-    description: `${plan.name} — StreamWall`,
-    ...(baseOrigin
-      ? {
-          successUrl: `${baseOrigin}/abonnement?status=success&order=${orderId}`,
-          cancelUrl: `${baseOrigin}/abonnement?status=cancel&order=${orderId}`,
-          webhookUrl: `${baseOrigin}/api/webhooks/crypto-gate`,
-        }
-      : {}),
+    label: plan.name.slice(0, 100),
+    description: `${plan.name} — StreamWall`.slice(0, 200),
   };
 
   try {
@@ -637,17 +679,43 @@ export async function createCryptoGateOrder(params: {
     });
 
     const json = (await res.json().catch(() => ({}))) as {
+      paymentId?: string;
+      id?: string;
       checkoutUrl?: string;
       url?: string;
       error?: string;
       message?: string;
+      details?: unknown;
+      errors?: unknown;
+      issues?: unknown;
     };
     const checkoutUrl = json.checkoutUrl || json.url;
     if (!res.ok || !checkoutUrl) {
+      const detailText =
+        typeof json.details === 'string'
+          ? json.details
+          : Array.isArray(json.issues)
+            ? json.issues
+                .map((i: unknown) =>
+                  typeof i === 'object' && i !== null && 'message' in i
+                    ? String((i as { message: unknown }).message)
+                    : String(i)
+                )
+                .join(', ')
+            : json.details || json.errors
+              ? JSON.stringify(json.details || json.errors)
+              : '';
+      const baseMsg = json.error || json.message || `Erreur du prestataire de paiement (HTTP ${res.status})`;
       return {
-        error: json.error || json.message || `Erreur du prestataire de paiement (HTTP ${res.status})`,
+        error: detailText ? `${baseMsg} (${detailText})` : baseMsg,
       };
     }
+
+    const externalPaymentId =
+      json.paymentId ||
+      json.id ||
+      checkoutUrl.match(/\/checkout\/([a-zA-Z0-9_-]+)/)?.[1] ||
+      null;
 
     const order: PaymentOrder = {
       id: orderId,
@@ -661,6 +729,7 @@ export async function createCryptoGateOrder(params: {
       durationDays: plan.durationDays,
       method: 'crypto_gate',
       status: 'pending',
+      externalPaymentId,
       checkoutUrl,
       createdAt: nowIso,
       updatedAt: nowIso,
@@ -675,6 +744,54 @@ export async function createCryptoGateOrder(params: {
           ? `Connexion au service de paiement impossible : ${err.message}`
           : 'Connexion au service de paiement impossible.',
     };
+  }
+}
+
+export async function syncPendingCryptoGateOrdersForUser(userId: string): Promise<void> {
+  const apiKey = resolveCryptoGateApiKey();
+  if (!apiKey || !userId) return;
+
+  const cutoffMs = Date.now() - 48 * 3600_000;
+  const pendingOrders = billingDb.orders.filter(
+    (o) =>
+      o.userId === userId &&
+      o.method === 'crypto_gate' &&
+      o.status === 'pending' &&
+      new Date(o.createdAt).getTime() >= cutoffMs
+  );
+  if (pendingOrders.length === 0) return;
+
+  for (const order of pendingOrders) {
+    const extId =
+      order.externalPaymentId ||
+      order.checkoutUrl?.match(/\/checkout\/([a-zA-Z0-9_-]+)/)?.[1] ||
+      '';
+    if (!extId) continue;
+
+    try {
+      const res = await fetch(`https://crypto-gate.cc/api/payment-links/${encodeURIComponent(extId)}`, {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Accept: 'application/json',
+        },
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!res.ok) continue;
+      const data = (await res.json().catch(() => ({}))) as {
+        status?: string;
+        payment?: { status?: string };
+      };
+      const st = String(data.status || data.payment?.status || '').toLowerCase();
+      if (['paid', 'completed', 'confirmed', 'succeeded'].includes(st)) {
+        reviewOrder(order.id, 'approve');
+      } else if (['expired', 'failed', 'cancelled', 'canceled'].includes(st)) {
+        order.status = 'expired';
+        order.updatedAt = new Date().toISOString();
+        saveBillingDb(billingDb);
+      }
+    } catch {
+      // Non-fatal network check
+    }
   }
 }
 
@@ -779,13 +896,20 @@ export function verifyAndProcessCryptoGateWebhook(params: {
     return { ok: false, status: 400, message: 'Invalid JSON payload' };
   }
 
+  const paymentObj =
+    (payload.payment as Record<string, unknown> | undefined) ||
+    (payload.data as Record<string, unknown> | undefined);
   const orderId = String(
     payload.orderId ||
       payload.order_id ||
+      paymentObj?.orderId ||
+      paymentObj?.order_id ||
       (payload.metadata as Record<string, unknown> | undefined)?.orderId ||
       ''
   ).trim();
-  const paymentStatus = String(payload.status || payload.event || '').toLowerCase();
+  const paymentStatus = String(
+    payload.status || paymentObj?.status || payload.event || ''
+  ).toLowerCase();
 
   if (!orderId) {
     return { ok: false, status: 400, message: 'Missing orderId' };
@@ -796,14 +920,18 @@ export function verifyAndProcessCryptoGateWebhook(params: {
     return { ok: false, status: 404, message: 'Order not found' };
   }
 
-  if (['paid', 'completed', 'confirmed', 'succeeded', 'payment.completed'].includes(paymentStatus)) {
+  if (
+    ['paid', 'completed', 'confirmed', 'succeeded', 'payment.paid', 'payment.completed'].includes(
+      paymentStatus
+    )
+  ) {
     if (order.status !== 'paid') {
       reviewOrder(order.id, 'approve');
     }
     return { ok: true, status: 200, message: 'Order activated' };
   }
 
-  if (['expired', 'failed', 'cancelled', 'canceled'].includes(paymentStatus)) {
+  if (['expired', 'failed', 'cancelled', 'canceled', 'payment.expired', 'payment.failed'].includes(paymentStatus)) {
     order.status = 'expired';
     order.updatedAt = new Date().toISOString();
     saveBillingDb(billingDb);

@@ -12,6 +12,7 @@ import {
   fillTemplate,
   isFullUrlTemplate,
   matchesTemplate,
+  stripOriginFromTemplate,
 } from './src/shared/types.ts';
 import type {
   CatalogueFilters,
@@ -90,6 +91,7 @@ import {
   reviewOrder,
   setUserAvatarChoice,
   setUserTheme,
+  syncPendingCryptoGateOrdersForUser,
   updateAdminPaymentSecrets,
   updateBillingConfig,
   upsertPlan,
@@ -912,7 +914,8 @@ async function startServer() {
           ? req.body
           : JSON.stringify(req.body ?? {});
       const sigHeader = String(
-        req.headers['x-cryptogate-signature'] ||
+        req.headers['x-webhook-signature'] ||
+          req.headers['x-cryptogate-signature'] ||
           req.headers['x-signature'] ||
           req.headers['x-hub-signature-256'] ||
           ''
@@ -1749,9 +1752,11 @@ async function startServer() {
       });
     }
 
-    const finalUrl = isFullUrlTemplate(resolvedPath)
-      ? resolvedPath
-      : `/api/public/watch/${resolvedPath}`;
+    const embedProvider = await getEmbedProvider();
+    const normalizedForProxy = stripOriginFromTemplate(resolvedPath, embedProvider);
+    const finalUrl = isFullUrlTemplate(normalizedForProxy)
+      ? normalizedForProxy
+      : `/api/public/watch/${normalizedForProxy.replace(/^\/+/, '')}`;
 
     res.json({
       url: finalUrl,
@@ -1818,19 +1823,21 @@ async function startServer() {
   app.get('/api/public/watch/*', async (req, res) => {
     const splat = String((req.params as Record<string, string>)[0] ?? '').replace(/^\/+/, '');
     const t = await getPlayerTemplates();
+    const embedProvider = await getEmbedProvider();
     const planTemplates = getAllPlanTemplates();
     const isGuestPath =
-      matchesTemplate(t.player_guest_film, splat) || matchesTemplate(t.player_guest_serie, splat);
+      matchesTemplate(t.player_guest_film, splat, embedProvider) ||
+      matchesTemplate(t.player_guest_serie, splat, embedProvider);
     const isMemberPath =
-      matchesTemplate(t.player_member_film, splat) || matchesTemplate(t.player_member_serie, splat);
-    const isPlanPath = planTemplates.some((tpl) => matchesTemplate(tpl, splat));
+      matchesTemplate(t.player_member_film, splat, embedProvider) ||
+      matchesTemplate(t.player_member_serie, splat, embedProvider);
+    const isPlanPath = planTemplates.some((tpl) => matchesTemplate(tpl, splat, embedProvider));
 
     if (!isGuestPath && !isMemberPath && !isPlanPath) {
       res.status(404).send('Lecteur introuvable');
       return;
     }
 
-    const embedProvider = await getEmbedProvider();
     try {
       const upstream = await fetch(`${embedProvider}/${splat}`, {
         headers: {
@@ -2740,6 +2747,7 @@ async function startServer() {
     const auth = await requireAdmin(req, res);
     if (!auth) return;
     const status = updateAdminSmtpConfig({
+      provider: req.body?.provider,
       enabled: req.body?.enabled,
       host: req.body?.host,
       port: req.body?.port,
@@ -2747,6 +2755,10 @@ async function startServer() {
       user: req.body?.user,
       pass: req.body?.pass,
       clearPass: req.body?.clearPass,
+      resendApiKey: req.body?.resendApiKey,
+      clearResendApiKey: req.body?.clearResendApiKey,
+      brevoApiKey: req.body?.brevoApiKey,
+      clearBrevoApiKey: req.body?.clearBrevoApiKey,
       fromName: req.body?.fromName,
       fromEmail: req.body?.fromEmail,
       requireSignupConfirmation: req.body?.requireSignupConfirmation,
@@ -2852,7 +2864,8 @@ async function startServer() {
     if (!auth) return;
     const nextPlayers = { ...(await getPlayerTemplates()) };
     for (const key of PLAYER_KEYS as readonly PlayerKey[]) {
-      const val = String(req.body?.[key] ?? '').trim();
+      if (req.body?.[key] === undefined) continue;
+      const val = String(req.body[key] ?? '').trim();
       if (!TEMPLATE_RE.test(val)) {
         res.status(400).json({ error: `Modèle invalide pour ${key} (ex: /film/{id})` });
         return;
@@ -3026,6 +3039,7 @@ async function startServer() {
       res.status(401).json({ error: 'Connexion requise' });
       return;
     }
+    await syncPendingCryptoGateOrdersForUser(auth.user.id);
     res.json({
       subscription: getUserSubscription(auth.user.id),
       orders: listUserOrders(auth.user.id),
