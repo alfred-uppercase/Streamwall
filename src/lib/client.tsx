@@ -112,11 +112,28 @@ export const api = {
     apiRequest<{
       token: string;
       user: UserProfile | null;
+      requiresCode?: boolean;
       requiresConfirmation?: boolean;
+      email?: string;
+      expiresInMinutes?: number;
       message?: string;
     }>('/api/auth/signup', {
       method: 'POST',
       body: JSON.stringify({ username, email, password }),
+    }),
+  checkUsername: (username: string) =>
+    apiRequest<{ available: boolean; error?: string }>(
+      `/api/auth/check-username?username=${encodeURIComponent(username)}`
+    ),
+  verifySignupCode: (email: string, code: string) =>
+    apiRequest<{ token: string; user: UserProfile }>('/api/auth/signup/verify-code', {
+      method: 'POST',
+      body: JSON.stringify({ email, code }),
+    }),
+  resendSignupCode: (email: string) =>
+    apiRequest<{ ok: boolean; message: string }>('/api/auth/signup/resend-code', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
     }),
   verifyEmail: (token: string) =>
     apiRequest<{ token: string; user: UserProfile }>('/api/auth/verify-email', {

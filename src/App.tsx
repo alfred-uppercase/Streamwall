@@ -23,6 +23,7 @@ import { AdminPage } from './pages/AdminPage';
 import { PricingPage } from './pages/PricingPage';
 import { AuthPage, ResetPasswordPage } from './pages/AuthPage';
 import { AnalyticsTracker } from './components/AnalyticsTracker';
+import { OfflineIndicator } from './components/PWAInstallButton';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -73,6 +74,7 @@ function AppShell() {
     <div className="flex min-h-dvh flex-col bg-background text-foreground pb-24 md:pb-0">
       <ScrollToTop />
       <AnalyticsTracker />
+      <OfflineIndicator />
       <Navbar />
       <div className="flex-1">
         <Routes>

@@ -146,17 +146,17 @@ Vous pouvez dès maintenant enregistrer vos favoris, reprendre vos lectures et p
     },
     signup_verify: {
       key: 'signup_verify',
-      label: 'Mail d’inscription (Confirmation)',
-      description: 'Envoyé avec le lien de validation lorsque la confirmation email est activée.',
-      subject: 'Confirmez votre inscription sur {{site_name}}',
+      label: 'Mail d’inscription (Code à 6 chiffres)',
+      description: 'Envoyé avec le code à 6 chiffres pour confirmer l’inscription.',
+      subject: 'Votre code de confirmation {{site_name}} : {{code}}',
       heading: 'Confirmez votre adresse email',
       body: `Bonjour {{username}},
 
 Merci pour votre inscription sur {{site_name}} avec l’adresse {{email}}.
-Cliquez sur le bouton ci-dessous pour activer définitivement votre compte :`,
-      ctaLabel: 'Confirmer mon adresse email',
+Saisissez ce code de vérification à 6 chiffres (valable 15 minutes) pour activer votre compte :`,
+      ctaLabel: '',
       enabled: true,
-      variables: ['username', 'email', 'site_name', 'verify_url'],
+      variables: ['code', 'username', 'email', 'site_name', 'verify_url'],
       updatedAt: now,
     },
     email_change: {
@@ -797,23 +797,48 @@ async function renderTemplateContent(
 export async function sendSignupVerificationEmail(params: {
   to: string;
   username: string;
-  verifyUrl: string;
+  code?: string;
+  verifyUrl?: string;
 }): Promise<{ ok: boolean; error?: string }> {
+  const code = params.code ? String(params.code).trim() : '';
+  const tpl = getEmailTemplate('signup_verify');
+  const codeBlockHtml = code
+    ? `<div style="margin:20px 0;padding:18px;border-radius:10px;background:#090b10;border:1px solid #374151;text-align:center;">
+        <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:#9ca3af;margin-bottom:8px;">Code de vérification</div>
+        <div style="font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;font-size:32px;font-weight:700;letter-spacing:10px;color:#e6a82e;">${escapeHtml(code)}</div>
+        <div style="font-size:11px;color:#9ca3af;margin-top:8px;">Valable pendant 15 minutes</div>
+      </div>`
+    : '';
+  const linkFallbackHtml = params.verifyUrl
+    ? `<p style="font-size:12px;color:#9ca3af;word-break:break-all;">Lien direct : ${escapeHtml(params.verifyUrl)}</p>`
+    : '';
+  const extraHtml = [
+    code && !tpl.body.includes('{{code}}') ? codeBlockHtml : '',
+    !code && linkFallbackHtml ? linkFallbackHtml : '',
+  ]
+    .filter(Boolean)
+    .join('');
+
   const rendered = await renderTemplateContent(
     'signup_verify',
     {
+      code,
       username: params.username,
       email: params.to,
-      verify_url: params.verifyUrl,
+      verify_url: params.verifyUrl || '',
     },
-    params.verifyUrl,
-    `<p style="font-size:12px;color:#9ca3af;word-break:break-all;">Si le bouton ne s’ouvre pas, copiez ce lien :<br/>${escapeHtml(params.verifyUrl)}</p>`
+    code ? undefined : params.verifyUrl || undefined,
+    extraHtml || undefined
   );
   if (!rendered.enabled) return { ok: true };
+  const textWithCode =
+    code && !rendered.text.includes(code)
+      ? `${rendered.text}\n\nCode de vérification : ${code} (valable 15 minutes)`
+      : rendered.text;
   return sendMail({
     to: params.to,
     subject: rendered.subject,
-    text: rendered.text,
+    text: textWithCode,
     html: rendered.html,
     templateKey: 'signup_verify',
   });
@@ -962,6 +987,7 @@ export async function sendTemplateTestEmail(params: {
 }): Promise<{ ok: boolean; error?: string }> {
   const baseUrl = (params.appUrl || 'https://exemple.com').replace(/\/+$/, '');
   const sampleVars: Record<string, string> = {
+    code: '482915',
     username: 'TestMembre',
     email: params.to,
     old_email: 'ancien@exemple.com',

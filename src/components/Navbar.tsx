@@ -22,6 +22,7 @@ import type { NotificationRecord } from '../shared/types';
 import { api, useAuth } from '../lib/client';
 import { useSiteConfig } from '../lib/siteConfig';
 import { UserAvatar } from './UserAvatar';
+import { PWAInstallButton } from './PWAInstallButton';
 
 function renderNotificationIcon(kind: NotificationRecord['kind']) {
   switch (kind) {
@@ -182,8 +183,9 @@ export function Navbar() {
             })}
           </nav>
 
-          {/* Zone 3: Right Icons — Notifications (members), Loupe (Catalogue) & User Icon */}
+          {/* Zone 3: Right Icons — PWA Install, Notifications (members), Loupe (Catalogue) & User Icon */}
           <div className="flex items-center gap-2 shrink-0">
+            <PWAInstallButton compact />
             {isMember && (
               <div ref={notifContainerRef} className="relative">
                 <button

@@ -226,6 +226,32 @@ export function registerUserDirectoryEntry(userId: string, email?: string, usern
   saveBillingDb(billingDb);
 }
 
+export function isUsernameInDirectory(username: string, excludeUserId?: string): boolean {
+  const target = username.trim().toLowerCase();
+  if (!target) return false;
+  const dir = billingDb.userDirectory ?? {};
+  for (const [uid, entry] of Object.entries(dir)) {
+    if (excludeUserId && uid === excludeUserId) continue;
+    if (entry?.username && entry.username.trim().toLowerCase() === target) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isEmailInDirectory(email: string, excludeUserId?: string): boolean {
+  const target = email.trim().toLowerCase();
+  if (!target) return false;
+  const dir = billingDb.userDirectory ?? {};
+  for (const [uid, entry] of Object.entries(dir)) {
+    if (excludeUserId && uid === excludeUserId) continue;
+    if (entry?.email && entry.email.trim().toLowerCase() === target) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function resolveUserContact(
   userId: string,
   fallbackEmail?: string,

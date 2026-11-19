@@ -97,7 +97,9 @@ import {
   getUserBanInfo,
   getUserSubscription,
   getUserTheme,
+  isEmailInDirectory,
   isUserBanned,
+  isUsernameInDirectory,
   isUserPro,
   listAllOrders,
   listPlans,
@@ -209,6 +211,182 @@ function hashPassword(pw: string): string {
 
 const DATA_DIR = path.join(__dirname, '.data');
 const DB_FILE = path.join(DATA_DIR, 'tapenaka-store.json');
+const PENDING_SIGNUPS_FILE = path.join(DATA_DIR, 'tapenaka-pending-signups.json');
+
+interface PendingSignupEntry {
+  email: string;
+  username: string;
+  password: string;
+  code: string;
+  createdAt: number;
+  expiresAt: number;
+  lastSentAt: number;
+  attempts: number;
+}
+
+function loadPendingSignups(): Record<string, PendingSignupEntry> {
+  try {
+    if (fs.existsSync(PENDING_SIGNUPS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(PENDING_SIGNUPS_FILE, 'utf-8')) as Record<
+        string,
+        PendingSignupEntry
+      >;
+      const now = Date.now();
+      const cleaned: Record<string, PendingSignupEntry> = {};
+      for (const [k, v] of Object.entries(parsed || {})) {
+        if (v && v.expiresAt > now) {
+          cleaned[k] = v;
+        }
+      }
+      return cleaned;
+    }
+  } catch {
+    // Ignore read error
+  }
+  return {};
+}
+
+const pendingSignups: Record<string, PendingSignupEntry> = loadPendingSignups();
+
+function savePendingSignups(): void {
+  try {
+    const now = Date.now();
+    for (const k of Object.keys(pendingSignups)) {
+      if (pendingSignups[k].expiresAt <= now) {
+        delete pendingSignups[k];
+      }
+    }
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(PENDING_SIGNUPS_FILE, JSON.stringify(pendingSignups, null, 2), 'utf-8');
+  } catch {
+    // Non-fatal
+  }
+}
+
+function validateUsernameFormat(raw: string): { valid: boolean; clean: string; error?: string } {
+  const clean = raw.trim();
+  if (clean.length < 3) {
+    return { valid: false, clean, error: 'Le pseudo doit contenir au moins 3 caractères.' };
+  }
+  if (clean.length > 30) {
+    return { valid: false, clean, error: 'Le pseudo ne doit pas dépasser 30 caractères.' };
+  }
+  if (clean.includes('@')) {
+    return { valid: false, clean, error: 'Le pseudo ne doit pas contenir le caractère @.' };
+  }
+  if (!/^[a-zA-Z0-9_.\-\s]+$/.test(clean)) {
+    return {
+      valid: false,
+      clean,
+      error: 'Le pseudo ne peut contenir que des lettres, chiffres, espaces, _, - ou .',
+    };
+  }
+  return { valid: true, clean };
+}
+
+async function isUsernameTaken(username: string, excludeUserId?: string): Promise<boolean> {
+  const target = username.trim().toLowerCase();
+  if (!target) return false;
+
+  if (!isSupabaseEnabled()) {
+    return db.users.some(
+      (u) => u.id !== excludeUserId && u.username.trim().toLowerCase() === target
+    );
+  }
+
+  if (isUsernameInDirectory(target, excludeUserId)) return true;
+
+  const adminSb = createAdminClient();
+  const reader = adminSb ?? createAnonClient();
+  try {
+    const { data: rows } = await reader
+      .from('profiles')
+      .select('id,username')
+      .ilike('username', target)
+      .limit(10);
+    if (
+      Array.isArray(rows) &&
+      rows.some(
+        (r: { id?: string; username?: string }) =>
+          String(r.id || '') !== (excludeUserId || '') &&
+          String(r.username || '').trim().toLowerCase() === target
+      )
+    ) {
+      return true;
+    }
+  } catch {
+    // Continue to auth check
+  }
+
+  if (adminSb) {
+    try {
+      const { data: listData } = await adminSb.auth.admin.listUsers({ page: 1, perPage: 1000 });
+      const users = listData?.users ?? [];
+      for (const au of users) {
+        if (excludeUserId && au.id === excludeUserId) continue;
+        const meta = (au.user_metadata ?? {}) as Record<string, unknown>;
+        const uName =
+          (typeof meta.username === 'string' && meta.username) ||
+          (typeof meta.full_name === 'string' && meta.full_name) ||
+          '';
+        if (uName.trim().toLowerCase() === target) {
+          return true;
+        }
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  return false;
+}
+
+async function isEmailTaken(email: string): Promise<boolean> {
+  const target = email.trim().toLowerCase();
+  if (!target) return false;
+
+  if (!isSupabaseEnabled()) {
+    return db.users.some((u) => u.email.trim().toLowerCase() === target);
+  }
+
+  if (isEmailInDirectory(target)) return true;
+
+  const adminSb = createAdminClient();
+  if (adminSb) {
+    try {
+      const { data: listData } = await adminSb.auth.admin.listUsers({ page: 1, perPage: 1000 });
+      if ((listData?.users ?? []).some((u) => (u.email || '').trim().toLowerCase() === target)) {
+        return true;
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  return false;
+}
+
+function mapSupabaseSignupError(rawMessage: string): { status: number; message: string } {
+  const lower = rawMessage.toLowerCase();
+  if (
+    lower.includes('already registered') ||
+    lower.includes('already exists') ||
+    lower.includes('email_exists')
+  ) {
+    return { status: 409, message: 'Un compte utilise déjà cette adresse email.' };
+  }
+  if (lower.includes('duplicate') || lower.includes('unique') || lower.includes('profiles_username')) {
+    return { status: 409, message: 'Ce pseudo est déjà utilisé. Veuillez en choisir un autre.' };
+  }
+  if (lower.includes('database error saving new user')) {
+    return {
+      status: 400,
+      message:
+        'Impossible d’enregistrer le profil dans la base Supabase (vérifiez que ce pseudo est unique et que la table profiles / trigger handle_new_user accepte la création du membre).',
+    };
+  }
+  return { status: 400, message: rawMessage };
+}
 
 function createSeedDb(): DatabaseShape {
   const now = Date.now();
@@ -1137,111 +1315,129 @@ async function startServer() {
     });
   });
 
-  app.post('/api/auth/signup', async (req, res) => {
-    const email = String(req.body?.email ?? '').trim().toLowerCase();
-    const password = String(req.body?.password ?? '');
-    const username = String(req.body?.username ?? '').trim().slice(0, 60);
-    if (!email.includes('@') || password.length < 8 || !username) {
-      res
-        .status(400)
-        .json({ error: 'Veuillez renseigner un pseudo, un email valide et un mot de passe (8 caractères min.).' });
+  app.get('/api/auth/check-username', async (req, res) => {
+    const raw = String(req.query?.username ?? '');
+    const check = validateUsernameFormat(raw);
+    if (!check.valid) {
+      res.json({ available: false, error: check.error });
       return;
     }
+    const taken = await isUsernameTaken(check.clean);
+    res.json({
+      available: !taken,
+      ...(taken ? { error: 'Ce pseudo est déjà utilisé.' } : {}),
+    });
+  });
 
-    const appOrigin = resolveAppOrigin(req);
+  async function finalizeAccountCreation(params: {
+    email: string;
+    password: string;
+    username: string;
+    appOrigin: string;
+    req: express.Request;
+    res: express.Response;
+  }): Promise<boolean> {
+    const { email, password, username, appOrigin, res } = params;
 
     if (isSupabaseEnabled()) {
       const adminSb = createAdminClient();
       const sb = createAnonClient();
 
-      // When Admin configured email gateway + Service Role key, generate confirmation link & deliver directly
-      if (isSmtpReady() && adminSb && shouldRequireSignupConfirmation()) {
-        const { data: linkData, error: linkErr } = await adminSb.auth.admin.generateLink({
-          type: 'signup',
+      if (adminSb) {
+        const { data: created, error: createErr } = await adminSb.auth.admin.createUser({
           email,
           password,
-          options: {
-            data: { username },
-            ...(appOrigin ? { redirectTo: `${appOrigin}/auth` } : {}),
+          email_confirm: true,
+          user_metadata: {
+            username,
+            full_name: username,
+            display_name: username,
           },
         });
-        if (linkErr) {
-          res.status(400).json({ error: linkErr.message });
-          return;
+        if (createErr) {
+          const mapped = mapSupabaseSignupError(createErr.message);
+          res.status(mapped.status).json({ error: mapped.message });
+          return false;
         }
-        if (linkData?.user?.id) {
-          registerUserDirectoryEntry(linkData.user.id, email, username);
-        }
-        const actionLink = linkData?.properties?.action_link;
-        if (actionLink) {
-          const mailRes = await sendSignupVerificationEmail({
-            to: email,
-            username,
-            verifyUrl: actionLink,
-          });
-          if (!mailRes.ok) {
-            res.status(502).json({
-              error: `Compte créé mais échec d'envoi email : ${mailRes.error || 'vérifiez la configuration email en administration.'}`,
-            });
-            return;
+        const createdId = created.user?.id;
+        if (createdId) {
+          registerUserDirectoryEntry(createdId, email, username);
+          // Ensure profile row has username & email cleanly synced
+          try {
+            await adminSb
+              .from('profiles')
+              .upsert({ id: createdId, username, email }, { onConflict: 'id' });
+          } catch {
+            // Non-fatal if trigger already handled or schema differs
           }
         }
-        res.json({
-          token: '',
-          user: null,
-          requiresConfirmation: true,
-          message: `Un email de confirmation vient d’être envoyé à ${email}.`,
+
+        const { data: signInData, error: signInErr } = await sb.auth.signInWithPassword({
+          email,
+          password,
         });
-        return;
+        if (signInErr || !signInData.session) {
+          res.status(400).json({
+            error:
+              signInErr?.message ||
+              'Compte créé mais connexion automatique impossible. Essayez de vous connecter.',
+          });
+          return false;
+        }
+
+        if (isSmtpReady()) {
+          void sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
+        }
+
+        const token = signInData.session.access_token;
+        const resolved = await sbResolveUser(token);
+        res.cookie('tapenaka_session', token, {
+          httpOnly: true,
+          sameSite: 'lax',
+          path: '/',
+          maxAge: 30 * 86_400_000,
+        });
+        res.json({
+          token,
+          user: resolved?.user ? enrichUserProfile(resolved.user) : null,
+        });
+        return true;
       }
 
       const { data, error } = await sb.auth.signUp({
         email,
         password,
         options: {
-          data: { username },
+          data: {
+            username,
+            full_name: username,
+            display_name: username,
+          },
           ...(appOrigin ? { emailRedirectTo: `${appOrigin}/auth` } : {}),
         },
       });
       if (error) {
-        res.status(400).json({ error: error.message });
-        return;
+        const mapped = mapSupabaseSignupError(error.message);
+        res.status(mapped.status).json({ error: mapped.message });
+        return false;
       }
       if (data.user?.id) {
         registerUserDirectoryEntry(data.user.id, email, username);
       }
       if (!data.session) {
         if (isSmtpReady()) {
-          if (adminSb) {
-            const { data: magicData } = await adminSb.auth.admin.generateLink({
-              type: 'magiclink',
-              email,
-              options: { ...(appOrigin ? { redirectTo: `${appOrigin}/auth` } : {}) },
-            });
-            const magicLink = magicData?.properties?.action_link;
-            if (magicLink) {
-              await sendSignupVerificationEmail({
-                to: email,
-                username,
-                verifyUrl: magicLink,
-              });
-            } else {
-              await sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
-            }
-          } else {
-            await sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
-          }
+          void sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
         }
         res.json({
           token: '',
           user: null,
           requiresConfirmation: true,
-          message: 'Consultez votre boîte mail (et vos spams) pour confirmer votre inscription.',
+          message: 'Compte créé. Consultez votre boîte mail pour confirmer votre session.',
         });
-        return;
+        return true;
       }
       if (isSmtpReady()) {
-        await sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
+        void sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
       }
       const token = data.session.access_token;
       const resolved = await sbResolveUser(token);
@@ -1252,16 +1448,12 @@ async function startServer() {
         maxAge: 30 * 86_400_000,
       });
       res.json({ token, user: resolved?.user ? enrichUserProfile(resolved.user) : null });
-      return;
+      return true;
     }
 
-    if (db.users.some((u) => u.email.toLowerCase() === email)) {
-      res.status(409).json({ error: 'Un compte utilise déjà cette adresse email.' });
-      return;
-    }
+    // Local store mode
     const newUserId = crypto.randomUUID();
     const assignedAvatar = resolveUserAvatar(newUserId);
-    const needVerify = shouldRequireSignupConfirmation();
     const newUser: StoredUser = {
       id: newUserId,
       email,
@@ -1269,47 +1461,17 @@ async function startServer() {
       username,
       avatar: assignedAvatar,
       role: db.users.length === 0 ? 'admin' : 'member',
-      emailVerified: !needVerify,
+      emailVerified: true,
       createdAt: new Date().toISOString(),
     };
     db.users.push(newUser);
     registerUserDirectoryEntry(newUserId, email, username);
 
-    if (needVerify) {
-      const verifyToken = crypto.randomBytes(24).toString('hex');
-      db.verifyTokens = (db.verifyTokens ?? []).filter((t) => t.userId !== newUser.id);
-      db.verifyTokens.push({
-        token: verifyToken,
-        userId: newUser.id,
-        expiresAt: Date.now() + 24 * 3600_000,
-      });
-      saveDb(db);
-      const verifyUrl = `${appOrigin || ''}/auth?verify=${verifyToken}`;
-      const mailRes = await sendSignupVerificationEmail({
-        to: email,
-        username,
-        verifyUrl,
-      });
-      if (!mailRes.ok) {
-        res.status(502).json({
-          error: `Échec de l’envoi de l’email de confirmation : ${mailRes.error || 'vérifiez la configuration email en administration.'}`,
-        });
-        return;
-      }
-      res.json({
-        token: '',
-        user: null,
-        requiresConfirmation: true,
-        message: `Un email de confirmation a été envoyé à ${email}.`,
-      });
-      return;
-    }
-
     const token = crypto.randomBytes(24).toString('hex');
     db.sessions.push({ token, userId: newUser.id, createdAt: new Date().toISOString() });
     saveDb(db);
     if (isSmtpReady()) {
-      await sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
+      void sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
     }
     res.cookie('tapenaka_session', token, {
       httpOnly: true,
@@ -1327,6 +1489,210 @@ async function startServer() {
         role: newUser.role,
         createdAt: newUser.createdAt,
       }),
+    });
+    return true;
+  }
+
+  app.post('/api/auth/signup', async (req, res) => {
+    const email = String(req.body?.email ?? '').trim().toLowerCase();
+    const password = String(req.body?.password ?? '');
+    const usernameCheck = validateUsernameFormat(String(req.body?.username ?? ''));
+    if (!usernameCheck.valid) {
+      res.status(400).json({ error: usernameCheck.error || 'Pseudo invalide.' });
+      return;
+    }
+    const username = usernameCheck.clean;
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 8) {
+      res.status(400).json({
+        error: 'Veuillez renseigner un email valide et un mot de passe (8 caractères min.).',
+      });
+      return;
+    }
+
+    if (await isUsernameTaken(username)) {
+      res.status(409).json({ error: 'Ce pseudo est déjà utilisé. Veuillez en choisir un autre.' });
+      return;
+    }
+
+    if (await isEmailTaken(email)) {
+      res.status(409).json({ error: 'Un compte utilise déjà cette adresse email.' });
+      return;
+    }
+
+    const appOrigin = resolveAppOrigin(req);
+
+    // 6-digit verification code flow when email gateway is active
+    if (isSmtpReady()) {
+      const code = String(crypto.randomInt(100000, 1000000));
+      const now = Date.now();
+      pendingSignups[email] = {
+        email,
+        username,
+        password,
+        code,
+        createdAt: now,
+        expiresAt: now + 15 * 60_000,
+        lastSentAt: now,
+        attempts: 0,
+      };
+      savePendingSignups();
+
+      const mailRes = await sendSignupVerificationEmail({
+        to: email,
+        username,
+        code,
+        verifyUrl: appOrigin ? `${appOrigin}/auth` : '',
+      });
+      if (!mailRes.ok) {
+        delete pendingSignups[email];
+        savePendingSignups();
+        res.status(502).json({
+          error: `Échec de l’envoi du code de vérification : ${mailRes.error || 'vérifiez la configuration email en administration.'}`,
+        });
+        return;
+      }
+
+      res.json({
+        token: '',
+        user: null,
+        requiresCode: true,
+        requiresConfirmation: true,
+        email,
+        expiresInMinutes: 15,
+        message: `Un code de vérification à 6 chiffres vient d’être envoyé à ${email}.`,
+      });
+      return;
+    }
+
+    if (shouldRequireSignupConfirmation()) {
+      res.status(400).json({
+        error:
+          'La confirmation par email est activée, mais aucune passerelle email (SMTP / Resend / Brevo) n’est configurée en administration.',
+      });
+      return;
+    }
+
+    await finalizeAccountCreation({
+      email,
+      password,
+      username,
+      appOrigin,
+      req,
+      res,
+    });
+  });
+
+  app.post('/api/auth/signup/verify-code', async (req, res) => {
+    const email = String(req.body?.email ?? '').trim().toLowerCase();
+    const code = String(req.body?.code ?? '').replace(/\D/g, '').slice(0, 6);
+    if (!email || code.length !== 6) {
+      res.status(400).json({ error: 'Veuillez saisir le code complet à 6 chiffres.' });
+      return;
+    }
+
+    const pending = pendingSignups[email];
+    if (!pending || pending.expiresAt <= Date.now()) {
+      if (pending) {
+        delete pendingSignups[email];
+        savePendingSignups();
+      }
+      res.status(400).json({
+        error: 'Code de vérification expiré ou introuvable. Veuillez recommencer l’inscription.',
+      });
+      return;
+    }
+
+    if (pending.attempts >= 5) {
+      delete pendingSignups[email];
+      savePendingSignups();
+      res.status(429).json({
+        error: 'Trop de tentatives incorrectes. Veuillez demander un nouveau code.',
+      });
+      return;
+    }
+
+    if (pending.code !== code) {
+      pending.attempts += 1;
+      savePendingSignups();
+      const remaining = Math.max(0, 5 - pending.attempts);
+      res.status(400).json({
+        error:
+          remaining > 0
+            ? `Code à 6 chiffres incorrect (${remaining} tentative${remaining > 1 ? 's' : ''} restante${remaining > 1 ? 's' : ''}).`
+            : 'Code incorrect. Veuillez demander un nouveau code.',
+      });
+      return;
+    }
+
+    if (await isUsernameTaken(pending.username)) {
+      res.status(409).json({
+        error: 'Ce pseudo vient d’être pris entre-temps. Veuillez en choisir un autre.',
+      });
+      return;
+    }
+    if (await isEmailTaken(pending.email)) {
+      delete pendingSignups[email];
+      savePendingSignups();
+      res.status(409).json({ error: 'Un compte utilise déjà cette adresse email.' });
+      return;
+    }
+
+    const ok = await finalizeAccountCreation({
+      email: pending.email,
+      password: pending.password,
+      username: pending.username,
+      appOrigin: resolveAppOrigin(req),
+      req,
+      res,
+    });
+    if (ok) {
+      delete pendingSignups[email];
+      savePendingSignups();
+    }
+  });
+
+  app.post('/api/auth/signup/resend-code', async (req, res) => {
+    const email = String(req.body?.email ?? '').trim().toLowerCase();
+    const pending = pendingSignups[email];
+    if (!pending || pending.expiresAt <= Date.now()) {
+      res.status(400).json({
+        error: 'Session d’inscription expirée. Veuillez remplir le formulaire à nouveau.',
+      });
+      return;
+    }
+
+    const waitMs = 20_000 - (Date.now() - pending.lastSentAt);
+    if (waitMs > 0) {
+      res.status(429).json({
+        error: `Patientez ${Math.ceil(waitMs / 1000)}s avant de renvoyer un code.`,
+      });
+      return;
+    }
+
+    const newCode = String(crypto.randomInt(100000, 1000000));
+    pending.code = newCode;
+    pending.expiresAt = Date.now() + 15 * 60_000;
+    pending.lastSentAt = Date.now();
+    pending.attempts = 0;
+    savePendingSignups();
+
+    const appOrigin = resolveAppOrigin(req);
+    const mailRes = await sendSignupVerificationEmail({
+      to: pending.email,
+      username: pending.username,
+      code: newCode,
+      verifyUrl: appOrigin ? `${appOrigin}/auth` : '',
+    });
+    if (!mailRes.ok) {
+      res.status(502).json({
+        error: `Échec du renvoi du code : ${mailRes.error || 'vérifiez la configuration email.'}`,
+      });
+      return;
+    }
+    res.json({
+      ok: true,
+      message: `Un nouveau code à 6 chiffres vient d’être envoyé à ${pending.email}.`,
     });
   });
 
@@ -2167,9 +2533,15 @@ async function startServer() {
       res.status(401).json({ error: 'Connexion requise' });
       return;
     }
-    const username = String(req.body?.username ?? '').trim().slice(0, 60);
-    if (!username) {
-      res.status(400).json({ error: 'Le pseudo ne peut pas être vide.' });
+    const usernameCheck = validateUsernameFormat(String(req.body?.username ?? ''));
+    if (!usernameCheck.valid) {
+      res.status(400).json({ error: usernameCheck.error || 'Le pseudo ne peut pas être vide.' });
+      return;
+    }
+    const username = usernameCheck.clean;
+
+    if (await isUsernameTaken(username, auth.user.id)) {
+      res.status(409).json({ error: 'Ce pseudo est déjà utilisé par un autre membre.' });
       return;
     }
 
@@ -2179,14 +2551,26 @@ async function startServer() {
     const chosenAvatar = setUserAvatarChoice(auth.user.id, requestedAvatar);
 
     if (isSupabaseEnabled() && auth.sbClient) {
-      const { error } = await auth.sbClient
+      const adminSb = createAdminClient();
+      const { error } = await (adminSb ?? auth.sbClient)
         .from('profiles')
         .update({ username })
         .eq('id', auth.user.id);
       if (error) {
-        res.status(400).json({ error: error.message });
+        const mapped = mapSupabaseSignupError(error.message);
+        res.status(mapped.status).json({ error: mapped.message });
         return;
       }
+      if (adminSb) {
+        try {
+          await adminSb.auth.admin.updateUserById(auth.user.id, {
+            user_metadata: { username, full_name: username, display_name: username },
+          });
+        } catch {
+          // Non-fatal
+        }
+      }
+      registerUserDirectoryEntry(auth.user.id, auth.user.email, username);
       const refreshed = await sbResolveUser(auth.token);
       res.json({
         profile: enrichUserProfile(

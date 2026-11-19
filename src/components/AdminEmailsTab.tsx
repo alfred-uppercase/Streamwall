@@ -40,6 +40,7 @@ const TEMPLATE_LABELS: Record<string, string> = {
 
 function renderPreviewText(raw: string, siteName: string): string {
   const sample: Record<string, string> = {
+    code: '482915',
     username: 'Rindra',
     email: 'rindra@exemple.com',
     old_email: 'ancien@exemple.com',
