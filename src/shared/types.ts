@@ -202,6 +202,7 @@ export type EmailTemplateKey =
   | 'signup_welcome'
   | 'signup_verify'
   | 'email_change'
+  | 'password_change'
   | 'subscription_activated'
   | 'subscription_expired'
   | 'password_reset';

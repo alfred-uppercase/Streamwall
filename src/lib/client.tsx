@@ -145,9 +145,26 @@ export const api = {
       method: 'POST',
     }),
   forgotPassword: (email: string) =>
-    apiRequest<{ message: string; resetPath: string | null }>('/api/auth/forgot-password', {
+    apiRequest<{
+      ok?: boolean;
+      requiresCode?: boolean;
+      email?: string;
+      expiresInMinutes?: number;
+      message: string;
+      resetPath: string | null;
+    }>('/api/auth/forgot-password', {
       method: 'POST',
       body: JSON.stringify({ email }),
+    }),
+  resendForgotPasswordCode: (email: string) =>
+    apiRequest<{ ok: boolean; message: string }>('/api/auth/forgot-password/resend-code', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    }),
+  verifyForgotPasswordCode: (email: string, code: string, password: string) =>
+    apiRequest<{ ok: boolean; message: string }>('/api/auth/reset-password/verify-code', {
+      method: 'POST',
+      body: JSON.stringify({ email, code, password }),
     }),
   resetPassword: (password: string, token?: string | null) =>
     apiRequest<{ ok: boolean }>('/api/auth/reset-password', {
@@ -202,13 +219,66 @@ export const api = {
       body: JSON.stringify({ username, avatar }),
     }),
   updateEmail: (email: string) =>
-    apiRequest<{ profile: UserProfile; message: string; requiresConfirmation?: boolean }>(
-      '/api/profile/email',
+    apiRequest<{
+      ok?: boolean;
+      requiresCode?: boolean;
+      email?: string;
+      expiresInMinutes?: number;
+      profile?: UserProfile;
+      message: string;
+      requiresConfirmation?: boolean;
+    }>('/api/profile/email', {
+      method: 'PUT',
+      body: JSON.stringify({ email }),
+    }),
+  requestEmailChangeCode: (email: string) =>
+    apiRequest<{
+      ok: boolean;
+      requiresCode: boolean;
+      email: string;
+      expiresInMinutes: number;
+      message: string;
+    }>('/api/profile/email/request-code', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    }),
+  resendEmailChangeCode: () =>
+    apiRequest<{ ok: boolean; message: string }>('/api/profile/email/resend-code', {
+      method: 'POST',
+    }),
+  verifyEmailChangeCode: (code: string) =>
+    apiRequest<{ ok: boolean; profile: UserProfile; message: string }>(
+      '/api/profile/email/verify-code',
       {
-        method: 'PUT',
-        body: JSON.stringify({ email }),
+        method: 'POST',
+        body: JSON.stringify({ code }),
       }
     ),
+  requestPasswordChangeCode: (newPassword: string) =>
+    apiRequest<{
+      ok: boolean;
+      requiresCode: boolean;
+      email: string;
+      expiresInMinutes: number;
+      message: string;
+    }>('/api/profile/password/request-code', {
+      method: 'POST',
+      body: JSON.stringify({ newPassword }),
+    }),
+  resendPasswordChangeCode: () =>
+    apiRequest<{ ok: boolean; message: string }>('/api/profile/password/resend-code', {
+      method: 'POST',
+    }),
+  verifyPasswordChangeCode: (code: string) =>
+    apiRequest<{ ok: boolean; message: string }>('/api/profile/password/verify-code', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    }),
+  deleteMyAccount: (confirmationText: string) =>
+    apiRequest<{ ok: boolean; message: string }>('/api/profile', {
+      method: 'DELETE',
+      body: JSON.stringify({ confirmationText }),
+    }),
   updateTheme: (theme: UserThemePreference | null) =>
     apiRequest<{ theme: UserThemePreference | null }>('/api/profile/theme', {
       method: 'PUT',

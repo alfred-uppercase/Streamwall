@@ -31,11 +31,12 @@ const TEMPLATE_LABELS: Record<string, string> = {
   test: 'Email de test',
   custom: 'Personnalisé',
   signup_welcome: 'Inscription (Bienvenue)',
-  signup_verify: 'Inscription (Confirmation)',
-  email_change: 'Changement d’email',
+  signup_verify: 'Inscription (Code à 6 chiffres)',
+  email_change: 'Changement d’email (Code à 6 chiffres)',
+  password_change: 'Changement mot de passe (Code à 6 chiffres)',
   subscription_activated: 'Souscription offre Pro',
   subscription_expired: 'Offre expirée',
-  password_reset: 'Mot de passe oublié',
+  password_reset: 'Mot de passe oublié (Code à 6 chiffres)',
 };
 
 function renderPreviewText(raw: string, siteName: string): string {
@@ -46,8 +47,6 @@ function renderPreviewText(raw: string, siteName: string): string {
     old_email: 'ancien@exemple.com',
     site_name: siteName,
     app_url: 'https://votresite.com',
-    verify_url: 'https://votresite.com/auth?verify=abc123',
-    reset_url: 'https://votresite.com/reset-password?token=abc123',
     plan_name: 'Pro Mensuel',
     expires_at: `jusqu’au ${new Date(Date.now() + 30 * 86_400_000).toLocaleDateString('fr-FR')}`,
     expired_at: new Date().toLocaleDateString('fr-FR'),
@@ -338,13 +337,39 @@ export function AdminEmailsTab({
             </label>
           </div>
 
+          {mergedSmtp.enabled &&
+          mergedSmtp.fromEmail?.includes('@') &&
+          ((mergedSmtp.provider === 'resend' &&
+            (smtpStatus?.resendApiKeyConfigured || resendKeyInput.trim().length > 0)) ||
+            (mergedSmtp.provider === 'brevo' &&
+              (smtpStatus?.brevoApiKeyConfigured || brevoKeyInput.trim().length > 0)) ||
+            ((mergedSmtp.provider || 'smtp') === 'smtp' && Boolean(mergedSmtp.host?.trim()))) ? (
+            <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3.5 py-2.5 text-xs text-foreground">
+              <CheckCircle2 className="size-4 shrink-0 text-emerald-400" />
+              <span>
+                Passerelle active : les nouveaux comptes recevront un{' '}
+                <strong>code de vérification à 6 chiffres</strong> par email avant activation.
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-start gap-2.5 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3.5 py-2.5 text-xs text-foreground">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-400" />
+              <div>
+                <p className="font-semibold">Passerelle email inactive ou incomplète</p>
+                <p className="mt-0.5 text-muted-foreground">
+                  Pour envoyer le code de vérification à 6 chiffres lors de l’inscription, activez l’envoi d’emails, renseignez votre clé API (Resend / Brevo) ou serveur SMTP ainsi que l’email d’expéditeur, puis enregistrez.
+                </p>
+              </div>
+            </div>
+          )}
+
           {backend === 'supabase' && !supabaseServiceRoleConfigured && (
             <div className="flex items-start gap-2.5 rounded-lg border border-amber-400/40 bg-amber-400/10 p-3.5 text-xs text-foreground">
               <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-400" />
               <div>
                 <p className="font-semibold">Mode Supabase détecté sans clé Service Role</p>
                 <p className="mt-0.5 text-muted-foreground">
-                  Sans <code className="font-mono text-primary">SUPABASE_SERVICE_ROLE_KEY</code> dans les Secrets, Supabase génère ses propres liens de confirmation et envoie l’email de bienvenue via votre passerelle. Ajoutez cette clé pour que les liens de validation Supabase soient aussi envoyés directement via Resend/Brevo/SMTP.
+                  Sans <code className="font-mono text-primary">SUPABASE_SERVICE_ROLE_KEY</code> dans les Secrets, Supabase génère ses propres liens de confirmation et envoie l’email de bienvenue via votre passerelle. Ajoutez cette clé pour que les codes de validation soient gérés directement via Resend/Brevo/SMTP.
                 </p>
               </div>
             </div>
@@ -469,7 +494,13 @@ export function AdminEmailsTab({
                       <input
                         type={showSmtpPass ? 'text' : 'password'}
                         value={smtpPassInput}
-                        onChange={(e) => setSmtpPassInput(e.target.value)}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setSmtpPassInput(v);
+                          if (v.trim() && smtpEdit.enabled === undefined && !smtpStatus?.enabled) {
+                            setSmtpEdit((prev) => ({ ...prev, enabled: true }));
+                          }
+                        }}
                         placeholder={
                           smtpStatus?.passConfigured
                             ? 'Laisser vide pour conserver le mot de passe actuel'
@@ -509,7 +540,13 @@ export function AdminEmailsTab({
                     <input
                       type={showResendKey ? 'text' : 'password'}
                       value={resendKeyInput}
-                      onChange={(e) => setResendKeyInput(e.target.value)}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setResendKeyInput(v);
+                        if (v.trim() && smtpEdit.enabled === undefined && !smtpStatus?.enabled) {
+                          setSmtpEdit((prev) => ({ ...prev, enabled: true }));
+                        }
+                      }}
                       placeholder={
                         smtpStatus?.resendApiKeyConfigured
                           ? 'Laisser vide pour conserver la clé Resend actuelle'
@@ -548,7 +585,13 @@ export function AdminEmailsTab({
                     <input
                       type={showBrevoKey ? 'text' : 'password'}
                       value={brevoKeyInput}
-                      onChange={(e) => setBrevoKeyInput(e.target.value)}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setBrevoKeyInput(v);
+                        if (v.trim() && smtpEdit.enabled === undefined && !smtpStatus?.enabled) {
+                          setSmtpEdit((prev) => ({ ...prev, enabled: true }));
+                        }
+                      }}
                       placeholder={
                         smtpStatus?.brevoApiKeyConfigured
                           ? 'Laisser vide pour conserver la clé Brevo actuelle'
@@ -891,7 +934,26 @@ export function AdminEmailsTab({
                       <div className="mt-3 space-y-2.5 text-xs leading-relaxed text-gray-300 whitespace-pre-line">
                         {renderPreviewText(tplDraft.body, siteName)}
                       </div>
-                      {tplDraft.ctaLabel.trim() && (
+                      {['signup_verify', 'email_change', 'password_change', 'password_reset'].includes(
+                        selectedTemplate.key
+                      ) &&
+                        !tplDraft.body.includes('{{code}}') && (
+                          <div className="my-4 rounded-lg border border-gray-700 bg-[#090b10] p-4 text-center">
+                            <div className="text-[10px] tracking-widest uppercase text-gray-400">
+                              Code de vérification
+                            </div>
+                            <div className="mt-1 font-mono text-2xl font-bold tracking-[0.4em] text-[#e6a82e]">
+                              482915
+                            </div>
+                            <div className="mt-1 text-[10px] text-gray-400">
+                              Valable pendant 15 minutes
+                            </div>
+                          </div>
+                        )}
+                      {tplDraft.ctaLabel.trim() &&
+                        !['signup_verify', 'email_change', 'password_change', 'password_reset'].includes(
+                          selectedTemplate.key
+                        ) && (
                         <div className="mt-5">
                           <span className="inline-block rounded-lg bg-[#e6a82e] px-4 py-2 text-xs font-bold text-[#0f172a]">
                             {renderPreviewText(tplDraft.ctaLabel, siteName)}

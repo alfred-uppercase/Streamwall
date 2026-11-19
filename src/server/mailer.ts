@@ -65,7 +65,7 @@ function defaultMailConfig(): StoredMailConfig {
     brevoApiKey: envBrevo,
     fromName: (process.env.SMTP_FROM_NAME || 'StreamWall').trim(),
     fromEmail: (process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || '').trim(),
-    requireSignupConfirmation: false,
+    requireSignupConfirmation: true,
   };
 }
 
@@ -121,6 +121,7 @@ export const EMAIL_TEMPLATE_KEYS: EmailTemplateKey[] = [
   'signup_welcome',
   'signup_verify',
   'email_change',
+  'password_change',
   'subscription_activated',
   'subscription_expired',
   'password_reset',
@@ -156,22 +157,37 @@ Merci pour votre inscription sur {{site_name}} avec l’adresse {{email}}.
 Saisissez ce code de vérification à 6 chiffres (valable 15 minutes) pour activer votre compte :`,
       ctaLabel: '',
       enabled: true,
-      variables: ['code', 'username', 'email', 'site_name', 'verify_url'],
+      variables: ['code', 'username', 'email', 'site_name'],
       updatedAt: now,
     },
     email_change: {
       key: 'email_change',
-      label: 'Changement d’adresse email',
-      description: 'Envoyé lorsqu’un membre modifie son adresse email depuis son profil.',
-      subject: 'Adresse email mise à jour — {{site_name}}',
-      heading: 'Adresse email mise à jour',
+      label: 'Changement d’adresse email (Code à 6 chiffres)',
+      description: 'Envoyé vers la nouvelle adresse email avec un code à 6 chiffres pour valider le changement.',
+      subject: 'Code changement d’email {{site_name}} : {{code}}',
+      heading: 'Confirmez votre nouvelle adresse email',
       body: `Bonjour {{username}},
 
-Votre nouvelle adresse email ({{email}}) est désormais associée à votre compte {{site_name}}.
-Si vous n’êtes pas à l’origine de ce changement, contactez immédiatement un administrateur.`,
-      ctaLabel: 'Ouvrir mon profil',
+Vous avez demandé à remplacer votre adresse email ({{old_email}}) par {{email}} sur {{site_name}}.
+Saisissez ce code de vérification à 6 chiffres (valable 15 minutes) pour confirmer la modification :`,
+      ctaLabel: '',
       enabled: true,
-      variables: ['username', 'email', 'old_email', 'site_name', 'app_url'],
+      variables: ['code', 'username', 'email', 'old_email', 'site_name'],
+      updatedAt: now,
+    },
+    password_change: {
+      key: 'password_change',
+      label: 'Changement de mot de passe (Code à 6 chiffres)',
+      description: 'Envoyé avec un code à 6 chiffres lorsqu’un membre modifie son mot de passe depuis son tableau de bord.',
+      subject: 'Code changement de mot de passe {{site_name}} : {{code}}',
+      heading: 'Confirmez votre changement de mot de passe',
+      body: `Bonjour {{username}},
+
+Vous avez demandé à modifier le mot de passe de votre compte {{site_name}} ({{email}}).
+Saisissez ce code de vérification à 6 chiffres (valable 15 minutes) pour valider votre nouveau mot de passe :`,
+      ctaLabel: '',
+      enabled: true,
+      variables: ['code', 'username', 'email', 'site_name'],
       updatedAt: now,
     },
     subscription_activated: {
@@ -208,17 +224,17 @@ Vous pouvez renouveler votre accès Pro à tout moment en un clic.`,
     },
     password_reset: {
       key: 'password_reset',
-      label: 'Mot de passe oublié',
-      description: 'Envoyé lors d’une demande de réinitialisation de mot de passe.',
-      subject: 'Réinitialisez votre mot de passe — {{site_name}}',
+      label: 'Mot de passe oublié (Code à 6 chiffres)',
+      description: 'Envoyé avec un code à 6 chiffres lors d’une demande de réinitialisation de mot de passe.',
+      subject: 'Code de réinitialisation {{site_name}} : {{code}}',
       heading: 'Réinitialisation du mot de passe',
       body: `Bonjour {{username}},
 
-Vous avez demandé à réinitialiser votre mot de passe sur {{site_name}}.
-Cliquez sur le bouton ci-dessous pour choisir un nouveau mot de passe (lien valable 30 minutes) :`,
-      ctaLabel: 'Choisir un nouveau mot de passe',
+Vous avez demandé à réinitialiser le mot de passe de votre compte {{site_name}} ({{email}}).
+Saisissez ce code de vérification à 6 chiffres (valable 15 minutes) pour choisir un nouveau mot de passe :`,
+      ctaLabel: '',
       enabled: true,
-      variables: ['username', 'email', 'reset_url', 'site_name'],
+      variables: ['code', 'username', 'email', 'site_name'],
       updatedAt: now,
     },
   };
@@ -226,6 +242,7 @@ Cliquez sur le bouton ci-dessous pour choisir un nouveau mot de passe (lien vala
 
 function loadTemplates(): Record<EmailTemplateKey, EmailTemplateConfig> {
   const defaults = buildDefaultTemplates();
+  let migrated = false;
   try {
     if (fs.existsSync(TEMPLATES_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(TEMPLATES_FILE, 'utf-8')) as Partial<
@@ -233,18 +250,29 @@ function loadTemplates(): Record<EmailTemplateKey, EmailTemplateConfig> {
       >;
       for (const key of EMAIL_TEMPLATE_KEYS) {
         const custom = parsed?.[key];
-        if (custom) {
-          defaults[key] = {
-            ...defaults[key],
-            subject: typeof custom.subject === 'string' && custom.subject.trim() ? custom.subject : defaults[key].subject,
-            heading: typeof custom.heading === 'string' && custom.heading.trim() ? custom.heading : defaults[key].heading,
-            body: typeof custom.body === 'string' && custom.body.trim() ? custom.body : defaults[key].body,
-            ctaLabel: typeof custom.ctaLabel === 'string' ? custom.ctaLabel : defaults[key].ctaLabel,
-            enabled: typeof custom.enabled === 'boolean' ? custom.enabled : defaults[key].enabled,
-            updatedAt: typeof custom.updatedAt === 'string' ? custom.updatedAt : defaults[key].updatedAt,
-          };
+        if (!custom) continue;
+
+        // Upgrade legacy link-based defaults for password_reset / email_change to 6-digit code defaults
+        if (key === 'password_reset' && typeof custom.body === 'string' && !custom.body.includes('{{code}}') && (custom.ctaLabel === 'Choisir un nouveau mot de passe' || custom.body.includes('Cliquez sur le bouton'))) {
+          migrated = true;
+          continue;
         }
+        if (key === 'email_change' && typeof custom.body === 'string' && !custom.body.includes('{{code}}') && custom.ctaLabel === 'Ouvrir mon profil') {
+          migrated = true;
+          continue;
+        }
+
+        defaults[key] = {
+          ...defaults[key],
+          subject: typeof custom.subject === 'string' && custom.subject.trim() ? custom.subject : defaults[key].subject,
+          heading: typeof custom.heading === 'string' && custom.heading.trim() ? custom.heading : defaults[key].heading,
+          body: typeof custom.body === 'string' && custom.body.trim() ? custom.body : defaults[key].body,
+          ctaLabel: typeof custom.ctaLabel === 'string' ? custom.ctaLabel : defaults[key].ctaLabel,
+          enabled: typeof custom.enabled === 'boolean' ? custom.enabled : defaults[key].enabled,
+          updatedAt: typeof custom.updatedAt === 'string' ? custom.updatedAt : defaults[key].updatedAt,
+        };
       }
+      if (migrated) saveTemplates(defaults);
     }
   } catch {
     // Use defaults
@@ -794,6 +822,46 @@ async function renderTemplateContent(
   };
 }
 
+function buildCodeBoxHtml(code: string): string {
+  return `<div style="margin:20px 0;padding:18px;border-radius:10px;background:#090b10;border:1px solid #374151;text-align:center;">
+        <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:#9ca3af;margin-bottom:8px;">Code de vérification</div>
+        <div style="font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;font-size:32px;font-weight:700;letter-spacing:10px;color:#e6a82e;">${escapeHtml(code)}</div>
+        <div style="font-size:11px;color:#9ca3af;margin-top:8px;">Valable pendant 15 minutes</div>
+      </div>`;
+}
+
+async function sendCodeVerificationEmail(params: {
+  templateKey: EmailTemplateKey;
+  to: string;
+  code: string;
+  vars: Record<string, string>;
+}): Promise<{ ok: boolean; error?: string }> {
+  const code = String(params.code).trim();
+  const tpl = getEmailTemplate(params.templateKey);
+  const extraHtml = !tpl.body.includes('{{code}}') ? buildCodeBoxHtml(code) : undefined;
+  const rendered = await renderTemplateContent(
+    params.templateKey,
+    {
+      ...params.vars,
+      code,
+      email: params.to,
+    },
+    undefined,
+    extraHtml
+  );
+  if (!rendered.enabled) return { ok: true };
+  const textWithCode = rendered.text.includes(code)
+    ? rendered.text
+    : `${rendered.text}\n\nCode de vérification : ${code} (valable 15 minutes)`;
+  return sendMail({
+    to: params.to,
+    subject: rendered.subject,
+    text: textWithCode,
+    html: rendered.html,
+    templateKey: params.templateKey,
+  });
+}
+
 export async function sendSignupVerificationEmail(params: {
   to: string;
   username: string;
@@ -801,46 +869,14 @@ export async function sendSignupVerificationEmail(params: {
   verifyUrl?: string;
 }): Promise<{ ok: boolean; error?: string }> {
   const code = params.code ? String(params.code).trim() : '';
-  const tpl = getEmailTemplate('signup_verify');
-  const codeBlockHtml = code
-    ? `<div style="margin:20px 0;padding:18px;border-radius:10px;background:#090b10;border:1px solid #374151;text-align:center;">
-        <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:#9ca3af;margin-bottom:8px;">Code de vérification</div>
-        <div style="font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;font-size:32px;font-weight:700;letter-spacing:10px;color:#e6a82e;">${escapeHtml(code)}</div>
-        <div style="font-size:11px;color:#9ca3af;margin-top:8px;">Valable pendant 15 minutes</div>
-      </div>`
-    : '';
-  const linkFallbackHtml = params.verifyUrl
-    ? `<p style="font-size:12px;color:#9ca3af;word-break:break-all;">Lien direct : ${escapeHtml(params.verifyUrl)}</p>`
-    : '';
-  const extraHtml = [
-    code && !tpl.body.includes('{{code}}') ? codeBlockHtml : '',
-    !code && linkFallbackHtml ? linkFallbackHtml : '',
-  ]
-    .filter(Boolean)
-    .join('');
-
-  const rendered = await renderTemplateContent(
-    'signup_verify',
-    {
-      code,
+  return sendCodeVerificationEmail({
+    templateKey: 'signup_verify',
+    to: params.to,
+    code,
+    vars: {
       username: params.username,
-      email: params.to,
       verify_url: params.verifyUrl || '',
     },
-    code ? undefined : params.verifyUrl || undefined,
-    extraHtml || undefined
-  );
-  if (!rendered.enabled) return { ok: true };
-  const textWithCode =
-    code && !rendered.text.includes(code)
-      ? `${rendered.text}\n\nCode de vérification : ${code} (valable 15 minutes)`
-      : rendered.text;
-  return sendMail({
-    to: params.to,
-    subject: rendered.subject,
-    text: textWithCode,
-    html: rendered.html,
-    templateKey: 'signup_verify',
   });
 }
 
@@ -868,30 +904,35 @@ export async function sendWelcomeEmail(params: {
   });
 }
 
-export async function sendEmailChangeNotice(params: {
+export async function sendEmailChangeVerificationEmail(params: {
   to: string;
   username: string;
   oldEmail?: string;
-  appUrl?: string;
+  code: string;
 }): Promise<{ ok: boolean; error?: string }> {
-  const profileUrl = params.appUrl ? `${params.appUrl.replace(/\/+$/, '')}/profil` : '';
-  const rendered = await renderTemplateContent(
-    'email_change',
-    {
-      username: params.username,
-      email: params.to,
-      old_email: params.oldEmail || '',
-      app_url: params.appUrl || '',
-    },
-    profileUrl || undefined
-  );
-  if (!rendered.enabled) return { ok: true };
-  return sendMail({
-    to: params.to,
-    subject: rendered.subject,
-    text: rendered.text,
-    html: rendered.html,
+  return sendCodeVerificationEmail({
     templateKey: 'email_change',
+    to: params.to,
+    code: params.code,
+    vars: {
+      username: params.username,
+      old_email: params.oldEmail || '',
+    },
+  });
+}
+
+export async function sendPasswordChangeVerificationEmail(params: {
+  to: string;
+  username: string;
+  code: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  return sendCodeVerificationEmail({
+    templateKey: 'password_change',
+    to: params.to,
+    code: params.code,
+    vars: {
+      username: params.username,
+    },
   });
 }
 
@@ -958,25 +999,15 @@ export async function sendSubscriptionExpiredEmail(params: {
 export async function sendPasswordResetEmail(params: {
   to: string;
   username?: string;
-  resetUrl: string;
+  code: string;
 }): Promise<{ ok: boolean; error?: string }> {
-  const rendered = await renderTemplateContent(
-    'password_reset',
-    {
-      username: params.username || params.to.split('@')[0] || 'Membre',
-      email: params.to,
-      reset_url: params.resetUrl,
-    },
-    params.resetUrl,
-    `<p style="font-size:12px;color:#9ca3af;word-break:break-all;">Lien valide 30 minutes : ${escapeHtml(params.resetUrl)}</p>`
-  );
-  if (!rendered.enabled) return { ok: true };
-  return sendMail({
-    to: params.to,
-    subject: rendered.subject,
-    text: rendered.text,
-    html: rendered.html,
+  return sendCodeVerificationEmail({
     templateKey: 'password_reset',
+    to: params.to,
+    code: params.code,
+    vars: {
+      username: params.username || params.to.split('@')[0] || 'Membre',
+    },
   });
 }
 
@@ -986,20 +1017,33 @@ export async function sendTemplateTestEmail(params: {
   appUrl?: string;
 }): Promise<{ ok: boolean; error?: string }> {
   const baseUrl = (params.appUrl || 'https://exemple.com').replace(/\/+$/, '');
+  const codeTemplates: EmailTemplateKey[] = [
+    'signup_verify',
+    'email_change',
+    'password_change',
+    'password_reset',
+  ];
+  const sampleCode = '482915';
   const sampleVars: Record<string, string> = {
-    code: '482915',
+    code: sampleCode,
     username: 'TestMembre',
     email: params.to,
     old_email: 'ancien@exemple.com',
     app_url: baseUrl,
-    verify_url: `${baseUrl}/auth?verify=exemple-jeton`,
-    reset_url: `${baseUrl}/reset-password?token=exemple-jeton`,
     plan_name: 'Pro Mensuel',
     expires_at: `jusqu’au ${new Date(Date.now() + 30 * 86_400_000).toLocaleDateString('fr-FR')}`,
     expired_at: new Date().toLocaleDateString('fr-FR'),
     renew_url: `${baseUrl}/abonnement`,
   };
-  const rendered = await renderTemplateContent(params.templateKey, sampleVars, baseUrl);
+  const isCodeTpl = codeTemplates.includes(params.templateKey);
+  const tpl = getEmailTemplate(params.templateKey);
+  const extraHtml = isCodeTpl && !tpl.body.includes('{{code}}') ? buildCodeBoxHtml(sampleCode) : undefined;
+  const rendered = await renderTemplateContent(
+    params.templateKey,
+    sampleVars,
+    isCodeTpl ? undefined : baseUrl,
+    extraHtml
+  );
   return sendMail({
     to: params.to,
     subject: `[TEST] ${rendered.subject}`,

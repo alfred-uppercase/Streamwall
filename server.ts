@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
@@ -65,7 +66,8 @@ import {
   listEmailTemplates,
   listMailLogs,
   resetEmailTemplate,
-  sendEmailChangeNotice,
+  sendEmailChangeVerificationEmail,
+  sendPasswordChangeVerificationEmail,
   sendPasswordResetEmail,
   sendSignupVerificationEmail,
   sendTemplateTestEmail,
@@ -104,6 +106,7 @@ import {
   listAllOrders,
   listPlans,
   listUserOrders,
+  pruneUserDirectory,
   registerUserDirectoryEntry,
   resolvePlanTemplateForUser,
   resolveUserAvatar,
@@ -263,6 +266,78 @@ function savePendingSignups(): void {
   }
 }
 
+const OTP_CHALLENGES_FILE = path.join(DATA_DIR, 'tapenaka-otp-challenges.json');
+
+interface OtpChallengeEntry {
+  purpose: 'password_reset' | 'email_change' | 'password_change';
+  userId: string;
+  email: string;
+  username: string;
+  newEmail?: string;
+  newPassword?: string;
+  code: string;
+  createdAt: number;
+  expiresAt: number;
+  lastSentAt: number;
+  attempts: number;
+}
+
+function loadOtpChallenges(): Record<string, OtpChallengeEntry> {
+  try {
+    if (fs.existsSync(OTP_CHALLENGES_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(OTP_CHALLENGES_FILE, 'utf-8')) as Record<
+        string,
+        OtpChallengeEntry
+      >;
+      const now = Date.now();
+      const cleaned: Record<string, OtpChallengeEntry> = {};
+      for (const [k, v] of Object.entries(parsed || {})) {
+        if (v && v.expiresAt > now) {
+          cleaned[k] = v;
+        }
+      }
+      return cleaned;
+    }
+  } catch {
+    // Ignore read error
+  }
+  return {};
+}
+
+const otpChallenges: Record<string, OtpChallengeEntry> = loadOtpChallenges();
+
+function saveOtpChallenges(): void {
+  try {
+    const now = Date.now();
+    for (const k of Object.keys(otpChallenges)) {
+      if (otpChallenges[k].expiresAt <= now) {
+        delete otpChallenges[k];
+      }
+    }
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(OTP_CHALLENGES_FILE, JSON.stringify(otpChallenges, null, 2), 'utf-8');
+  } catch {
+    // Non-fatal
+  }
+}
+
+function cleanupUserOtpChallenges(userId: string, email?: string): void {
+  let dirty = false;
+  const cleanEmail = (email || '').trim().toLowerCase();
+  for (const [key, entry] of Object.entries(otpChallenges)) {
+    if (
+      entry.userId === userId ||
+      (cleanEmail &&
+        (entry.email.trim().toLowerCase() === cleanEmail ||
+          (entry.newEmail || '').trim().toLowerCase() === cleanEmail))
+    ) {
+      delete otpChallenges[key];
+      dirty = true;
+    }
+  }
+  if (dirty) saveOtpChallenges();
+}
+
 function validateUsernameFormat(raw: string): { valid: boolean; clean: string; error?: string } {
   const clean = raw.trim();
   if (clean.length < 3) {
@@ -284,6 +359,51 @@ function validateUsernameFormat(raw: string): { valid: boolean; clean: string; e
   return { valid: true, clean };
 }
 
+async function listAllSupabaseAuthUsers(adminSb: SupabaseClient) {
+  const all: Array<{
+    id: string;
+    email?: string;
+    email_confirmed_at?: string | null;
+    confirmed_at?: string | null;
+    deleted_at?: string | null;
+    user_metadata?: Record<string, unknown>;
+  }> = [];
+  for (let page = 1; page <= 10; page += 1) {
+    const { data: listData, error } = await adminSb.auth.admin.listUsers({
+      page,
+      perPage: 1000,
+    });
+    if (error) break;
+    const batch = listData?.users ?? [];
+    all.push(...(batch as typeof all));
+    if (batch.length < 1000) break;
+  }
+  const active = all.filter((u) => !u.deleted_at);
+  pruneUserDirectory(new Set(active.map((u) => u.id)));
+  return active;
+}
+
+async function deleteSupabaseUserAndRelations(
+  adminSb: SupabaseClient,
+  targetId: string
+): Promise<{ ok: boolean; error?: string }> {
+  await Promise.allSettled([
+    adminSb.from('notifications').delete().or(`recipient_id.eq.${targetId},actor_id.eq.${targetId}`),
+    adminSb.from('user_roles').delete().eq('user_id', targetId),
+    adminSb.from('user_presence').delete().eq('user_id', targetId),
+    adminSb.from('favorites').delete().eq('user_id', targetId),
+    adminSb.from('watch_events').delete().eq('user_id', targetId),
+    adminSb.from('comments').delete().eq('user_id', targetId),
+    adminSb.from('friendships').delete().or(`user_id.eq.${targetId},friend_id.eq.${targetId}`),
+    adminSb.from('profiles').delete().eq('id', targetId),
+  ]);
+  const { error: delErr } = await adminSb.auth.admin.deleteUser(targetId, false);
+  if (delErr && !String(delErr.message || '').toLowerCase().includes('not found')) {
+    return { ok: false, error: delErr.message };
+  }
+  return { ok: true };
+}
+
 async function isUsernameTaken(username: string, excludeUserId?: string): Promise<boolean> {
   const target = username.trim().toLowerCase();
   if (!target) return false;
@@ -293,8 +413,6 @@ async function isUsernameTaken(username: string, excludeUserId?: string): Promis
       (u) => u.id !== excludeUserId && u.username.trim().toLowerCase() === target
     );
   }
-
-  if (isUsernameInDirectory(target, excludeUserId)) return true;
 
   const adminSb = createAdminClient();
   const reader = adminSb ?? createAnonClient();
@@ -320,8 +438,7 @@ async function isUsernameTaken(username: string, excludeUserId?: string): Promis
 
   if (adminSb) {
     try {
-      const { data: listData } = await adminSb.auth.admin.listUsers({ page: 1, perPage: 1000 });
-      const users = listData?.users ?? [];
+      const users = await listAllSupabaseAuthUsers(adminSb);
       for (const au of users) {
         if (excludeUserId && au.id === excludeUserId) continue;
         const meta = (au.user_metadata ?? {}) as Record<string, unknown>;
@@ -333,15 +450,37 @@ async function isUsernameTaken(username: string, excludeUserId?: string): Promis
           return true;
         }
       }
+      return false;
     } catch {
-      // Non-fatal
+      // Fall back to directory if auth list failed
     }
   }
 
+  if (isUsernameInDirectory(target, excludeUserId)) return true;
   return false;
 }
 
-async function isEmailTaken(email: string): Promise<boolean> {
+async function findUnconfirmedUserIdByEmail(email: string): Promise<string | null> {
+  const target = email.trim().toLowerCase();
+  if (!target || !isSupabaseEnabled()) return null;
+  const adminSb = createAdminClient();
+  if (!adminSb) return null;
+  try {
+    const users = await listAllSupabaseAuthUsers(adminSb);
+    const match = users.find((u) => (u.email || '').trim().toLowerCase() === target);
+    if (match && !match.email_confirmed_at && !match.confirmed_at) {
+      return match.id;
+    }
+  } catch {
+    // Non-fatal
+  }
+  return null;
+}
+
+async function isEmailTaken(
+  email: string,
+  options?: { allowUnconfirmed?: boolean }
+): Promise<boolean> {
   const target = email.trim().toLowerCase();
   if (!target) return false;
 
@@ -349,20 +488,22 @@ async function isEmailTaken(email: string): Promise<boolean> {
     return db.users.some((u) => u.email.trim().toLowerCase() === target);
   }
 
-  if (isEmailInDirectory(target)) return true;
-
   const adminSb = createAdminClient();
   if (adminSb) {
     try {
-      const { data: listData } = await adminSb.auth.admin.listUsers({ page: 1, perPage: 1000 });
-      if ((listData?.users ?? []).some((u) => (u.email || '').trim().toLowerCase() === target)) {
-        return true;
+      const users = await listAllSupabaseAuthUsers(adminSb);
+      const match = users.find((u) => (u.email || '').trim().toLowerCase() === target);
+      if (!match) return false;
+      if (options?.allowUnconfirmed && !match.email_confirmed_at && !match.confirmed_at) {
+        return false;
       }
+      return true;
     } catch {
-      // Non-fatal
+      // Fall back to directory if auth list failed
     }
   }
 
+  if (isEmailInDirectory(target)) return true;
   return false;
 }
 
@@ -378,7 +519,10 @@ function mapSupabaseSignupError(rawMessage: string): { status: number; message: 
   if (lower.includes('duplicate') || lower.includes('unique') || lower.includes('profiles_username')) {
     return { status: 409, message: 'Ce pseudo est déjà utilisé. Veuillez en choisir un autre.' };
   }
-  if (lower.includes('database error saving new user')) {
+  if (
+    lower.includes('database error saving new user') ||
+    lower.includes('database error creating new user')
+  ) {
     return {
       status: 400,
       message:
@@ -1251,7 +1395,7 @@ async function startServer() {
     }
     if (user.emailVerified === false) {
       res.status(403).json({
-        error: 'Veuillez confirmer votre adresse email via le lien reçu avant de vous connecter.',
+        error: 'Veuillez confirmer votre adresse email via le code à 6 chiffres reçu avant de vous connecter.',
       });
       return;
     }
@@ -1334,16 +1478,17 @@ async function startServer() {
     password: string;
     username: string;
     appOrigin: string;
+    verifiedByCode: boolean;
     req: express.Request;
     res: express.Response;
   }): Promise<boolean> {
-    const { email, password, username, appOrigin, res } = params;
+    const { email, password, username, appOrigin, verifiedByCode, res } = params;
 
     if (isSupabaseEnabled()) {
       const adminSb = createAdminClient();
       const sb = createAnonClient();
 
-      if (adminSb) {
+      if (verifiedByCode && adminSb) {
         const { data: created, error: createErr } = await adminSb.auth.admin.createUser({
           email,
           password,
@@ -1362,11 +1507,14 @@ async function startServer() {
         const createdId = created.user?.id;
         if (createdId) {
           registerUserDirectoryEntry(createdId, email, username);
-          // Ensure profile row has username & email cleanly synced
+          // Ensure profile row has username & contact_email cleanly synced
           try {
             await adminSb
               .from('profiles')
-              .upsert({ id: createdId, username, email }, { onConflict: 'id' });
+              .upsert(
+                { id: createdId, username, full_name: username, contact_email: email },
+                { onConflict: 'id' }
+              );
           } catch {
             // Non-fatal if trigger already handled or schema differs
           }
@@ -1423,16 +1571,26 @@ async function startServer() {
       }
       if (data.user?.id) {
         registerUserDirectoryEntry(data.user.id, email, username);
+        if (adminSb) {
+          try {
+            await adminSb
+              .from('profiles')
+              .upsert(
+                { id: data.user.id, username, full_name: username, contact_email: email },
+                { onConflict: 'id' }
+              );
+          } catch {
+            // Non-fatal
+          }
+        }
       }
       if (!data.session) {
-        if (isSmtpReady()) {
-          void sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
-        }
         res.json({
           token: '',
           user: null,
           requiresConfirmation: true,
-          message: 'Compte créé. Consultez votre boîte mail pour confirmer votre session.',
+          message:
+            'Compte créé. Consultez votre boîte mail pour confirmer votre inscription avant de vous connecter.',
         });
         return true;
       }
@@ -1510,13 +1668,21 @@ async function startServer() {
       return;
     }
 
-    if (await isUsernameTaken(username)) {
+    const smtpReady = isSmtpReady();
+    const unconfirmedId = smtpReady ? await findUnconfirmedUserIdByEmail(email) : null;
+
+    if (await isUsernameTaken(username, unconfirmedId ?? undefined)) {
       res.status(409).json({ error: 'Ce pseudo est déjà utilisé. Veuillez en choisir un autre.' });
       return;
     }
 
-    if (await isEmailTaken(email)) {
-      res.status(409).json({ error: 'Un compte utilise déjà cette adresse email.' });
+    if (await isEmailTaken(email, { allowUnconfirmed: smtpReady })) {
+      const unconfirmedPending = !smtpReady ? await findUnconfirmedUserIdByEmail(email) : null;
+      res.status(409).json({
+        error: unconfirmedPending
+          ? 'Une inscription non confirmée existe déjà pour cet email. Finalisez la validation ou supprimez le compte en attente dans Admin → Utilisateurs.'
+          : 'Un compte utilise déjà cette adresse email.',
+      });
       return;
     }
 
@@ -1578,6 +1744,7 @@ async function startServer() {
       password,
       username,
       appOrigin,
+      verifiedByCode: false,
       req,
       res,
     });
@@ -1625,17 +1792,32 @@ async function startServer() {
       return;
     }
 
-    if (await isUsernameTaken(pending.username)) {
+    const unconfirmedGhostId = await findUnconfirmedUserIdByEmail(pending.email);
+
+    if (await isUsernameTaken(pending.username, unconfirmedGhostId ?? undefined)) {
       res.status(409).json({
         error: 'Ce pseudo vient d’être pris entre-temps. Veuillez en choisir un autre.',
       });
       return;
     }
-    if (await isEmailTaken(pending.email)) {
+    if (await isEmailTaken(pending.email, { allowUnconfirmed: true })) {
       delete pendingSignups[email];
       savePendingSignups();
       res.status(409).json({ error: 'Un compte utilise déjà cette adresse email.' });
       return;
+    }
+
+    // If an unconfirmed ghost account exists for this verified email, remove it before creating the confirmed account
+    if (unconfirmedGhostId && isSupabaseEnabled()) {
+      const adminSb = createAdminClient();
+      if (adminSb) {
+        try {
+          await deleteSupabaseUserAndRelations(adminSb, unconfirmedGhostId);
+          cleanupUserBillingData(unconfirmedGhostId, pending.email);
+        } catch {
+          // Non-fatal
+        }
+      }
     }
 
     const ok = await finalizeAccountCreation({
@@ -1643,6 +1825,7 @@ async function startServer() {
       password: pending.password,
       username: pending.username,
       appOrigin: resolveAppOrigin(req),
+      verifiedByCode: true,
       req,
       res,
     });
@@ -1757,78 +1940,211 @@ async function startServer() {
 
   app.post('/api/auth/forgot-password', async (req, res) => {
     const email = String(req.body?.email ?? '').trim().toLowerCase();
-    const appOrigin = resolveAppOrigin(req);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      res.status(400).json({ error: 'Veuillez saisir une adresse email valide.' });
+      return;
+    }
+    if (!isSmtpReady()) {
+      res.status(400).json({
+        error:
+          'Aucune passerelle email (SMTP / Resend / Brevo) n’est configurée en administration pour envoyer le code à 6 chiffres.',
+      });
+      return;
+    }
+
+    let foundUser: { id: string; email: string; username: string } | null = null;
+    if (isSupabaseEnabled()) {
+      const adminSb = createAdminClient();
+      if (!adminSb) {
+        res.status(400).json({
+          error:
+            'Ajoutez SUPABASE_SERVICE_ROLE_KEY dans vos secrets pour réinitialiser le mot de passe par code à 6 chiffres.',
+        });
+        return;
+      }
+      const users = await listAllSupabaseAuthUsers(adminSb);
+      const match = users.find((u) => (u.email || '').trim().toLowerCase() === email);
+      if (match) {
+        const meta = (match.user_metadata ?? {}) as Record<string, unknown>;
+        const uname =
+          (typeof meta.username === 'string' && meta.username) ||
+          (typeof meta.full_name === 'string' && meta.full_name) ||
+          email.split('@')[0] ||
+          'Membre';
+        foundUser = { id: match.id, email, username: uname };
+      }
+    } else {
+      const localUser = db.users.find((u) => u.email.trim().toLowerCase() === email);
+      if (localUser) {
+        foundUser = { id: localUser.id, email: localUser.email, username: localUser.username };
+      }
+    }
+
+    if (!foundUser) {
+      res.status(404).json({ error: 'Aucun compte trouvé avec cette adresse email.' });
+      return;
+    }
+    if (isUserBanned(foundUser.id)) {
+      res.status(403).json({ error: 'Ce compte a été suspendu par un administrateur.' });
+      return;
+    }
+
+    const code = String(crypto.randomInt(100000, 1000000));
+    const now = Date.now();
+    const key = `password_reset:${email}`;
+    otpChallenges[key] = {
+      purpose: 'password_reset',
+      userId: foundUser.id,
+      email,
+      username: foundUser.username,
+      code,
+      createdAt: now,
+      expiresAt: now + 15 * 60_000,
+      lastSentAt: now,
+      attempts: 0,
+    };
+    saveOtpChallenges();
+
+    const mailRes = await sendPasswordResetEmail({
+      to: email,
+      username: foundUser.username,
+      code,
+    });
+    if (!mailRes.ok) {
+      delete otpChallenges[key];
+      saveOtpChallenges();
+      res.status(502).json({
+        error: `Échec de l’envoi du code : ${mailRes.error || 'vérifiez la configuration email.'}`,
+      });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      requiresCode: true,
+      email,
+      expiresInMinutes: 15,
+      message: `Un code de réinitialisation à 6 chiffres vient d’être envoyé à ${email}.`,
+      resetPath: null,
+    });
+  });
+
+  app.post('/api/auth/forgot-password/resend-code', async (req, res) => {
+    const email = String(req.body?.email ?? '').trim().toLowerCase();
+    const key = `password_reset:${email}`;
+    const challenge = otpChallenges[key];
+    if (!challenge || challenge.expiresAt <= Date.now()) {
+      res.status(400).json({
+        error: 'Session de réinitialisation expirée. Veuillez recommencer.',
+      });
+      return;
+    }
+    const waitMs = 20_000 - (Date.now() - challenge.lastSentAt);
+    if (waitMs > 0) {
+      res.status(429).json({
+        error: `Patientez ${Math.ceil(waitMs / 1000)}s avant de renvoyer un code.`,
+      });
+      return;
+    }
+
+    const newCode = String(crypto.randomInt(100000, 1000000));
+    challenge.code = newCode;
+    challenge.expiresAt = Date.now() + 15 * 60_000;
+    challenge.lastSentAt = Date.now();
+    challenge.attempts = 0;
+    saveOtpChallenges();
+
+    const mailRes = await sendPasswordResetEmail({
+      to: challenge.email,
+      username: challenge.username,
+      code: newCode,
+    });
+    if (!mailRes.ok) {
+      res.status(502).json({
+        error: `Échec du renvoi du code : ${mailRes.error || 'vérifiez la configuration email.'}`,
+      });
+      return;
+    }
+    res.json({
+      ok: true,
+      message: `Un nouveau code à 6 chiffres vient d’être envoyé à ${challenge.email}.`,
+    });
+  });
+
+  app.post('/api/auth/reset-password/verify-code', async (req, res) => {
+    const email = String(req.body?.email ?? '').trim().toLowerCase();
+    const code = String(req.body?.code ?? '').replace(/\D/g, '').slice(0, 6);
+    const password = String(req.body?.password ?? '');
+    if (!email || code.length !== 6) {
+      res.status(400).json({ error: 'Veuillez saisir l’adresse email et le code à 6 chiffres.' });
+      return;
+    }
+    if (password.length < 8) {
+      res.status(400).json({ error: 'Le nouveau mot de passe doit contenir au moins 8 caractères.' });
+      return;
+    }
+
+    const key = `password_reset:${email}`;
+    const challenge = otpChallenges[key];
+    if (!challenge || challenge.expiresAt <= Date.now()) {
+      if (challenge) {
+        delete otpChallenges[key];
+        saveOtpChallenges();
+      }
+      res.status(400).json({
+        error: 'Code expiré ou introuvable. Veuillez demander un nouveau code.',
+      });
+      return;
+    }
+
+    if (challenge.attempts >= 5) {
+      delete otpChallenges[key];
+      saveOtpChallenges();
+      res.status(429).json({
+        error: 'Trop de tentatives incorrectes. Veuillez demander un nouveau code.',
+      });
+      return;
+    }
+
+    if (challenge.code !== code) {
+      challenge.attempts += 1;
+      saveOtpChallenges();
+      const remaining = Math.max(0, 5 - challenge.attempts);
+      res.status(400).json({
+        error:
+          remaining > 0
+            ? `Code à 6 chiffres incorrect (${remaining} tentative${remaining > 1 ? 's' : ''} restante${remaining > 1 ? 's' : ''}).`
+            : 'Code incorrect. Veuillez demander un nouveau code.',
+      });
+      return;
+    }
 
     if (isSupabaseEnabled()) {
       const adminSb = createAdminClient();
-      if (isSmtpReady() && adminSb) {
-        const { data: linkData, error: linkErr } = await adminSb.auth.admin.generateLink({
-          type: 'recovery',
-          email,
-          options: { ...(appOrigin ? { redirectTo: `${appOrigin}/reset-password` } : {}) },
-        });
-        if (!linkErr && linkData?.properties?.action_link) {
-          const mailRes = await sendPasswordResetEmail({
-            to: email,
-            resetUrl: linkData.properties.action_link,
-          });
-          if (mailRes.ok) {
-            res.json({
-              message: `Email de réinitialisation envoyé à ${email}.`,
-              resetPath: null,
-            });
-            return;
-          }
-        }
+      if (!adminSb) {
+        res.status(400).json({ error: 'Clé SUPABASE_SERVICE_ROLE_KEY requise.' });
+        return;
       }
-
-      const sb = createAnonClient();
-      const { error } = await sb.auth.resetPasswordForEmail(email, {
-        ...(appOrigin ? { redirectTo: `${appOrigin}/reset-password` } : {}),
-      });
+      const { error } = await adminSb.auth.admin.updateUserById(challenge.userId, { password });
       if (error) {
         res.status(400).json({ error: error.message });
         return;
       }
-      res.json({
-        message: 'Email de réinitialisation envoyé via Supabase Auth.',
-        resetPath: null,
-      });
-      return;
-    }
-
-    const user = db.users.find((u) => u.email.toLowerCase() === email);
-    if (!user) {
-      res.json({
-        message: 'Si un compte correspond à cet email, un lien de réinitialisation a été généré.',
-        resetPath: null,
-      });
-      return;
-    }
-    const resetToken = crypto.randomBytes(20).toString('hex');
-    db.resetTokens = db.resetTokens.filter((t) => t.userId !== user.id);
-    db.resetTokens.push({
-      token: resetToken,
-      userId: user.id,
-      expiresAt: Date.now() + 30 * 60_000,
-    });
-    saveDb(db);
-
-    if (isSmtpReady()) {
-      const resetUrl = `${appOrigin || ''}/reset-password?token=${resetToken}`;
-      const mailRes = await sendPasswordResetEmail({ to: email, resetUrl });
-      if (mailRes.ok) {
-        res.json({
-          message: `Un lien de réinitialisation a été envoyé par email à ${email}.`,
-          resetPath: null,
-        });
+    } else {
+      const user = db.users.find((u) => u.id === challenge.userId);
+      if (!user) {
+        res.status(404).json({ error: 'Utilisateur introuvable.' });
         return;
       }
+      user.passwordHash = hashPassword(password);
+      saveDb(db);
     }
 
+    delete otpChallenges[key];
+    saveOtpChallenges();
     res.json({
-      message: 'Lien de récupération généré avec succès.',
-      resetPath: `/reset-password?token=${resetToken}`,
+      ok: true,
+      message: 'Mot de passe réinitialisé avec succès. Vous pouvez maintenant vous connecter.',
     });
   });
 
@@ -1841,6 +2157,12 @@ async function startServer() {
     }
 
     const auth = await resolveAuth(req);
+    if (isSmtpReady() && !token) {
+      res.status(400).json({
+        error: 'La modification de mot de passe nécessite une validation par code à 6 chiffres envoyé par email.',
+      });
+      return;
+    }
 
     if (isSupabaseEnabled()) {
       if (!auth?.sbClient) {
@@ -1859,7 +2181,7 @@ async function startServer() {
     if (token) {
       const record = db.resetTokens.find((t) => t.token === token && t.expiresAt > Date.now());
       if (!record) {
-        res.status(400).json({ error: 'Lien de récupération invalide ou expiré.' });
+        res.status(400).json({ error: 'Code ou jeton invalide ou expiré.' });
         return;
       }
       const user = db.users.find((u) => u.id === record.userId);
@@ -1882,7 +2204,7 @@ async function startServer() {
       res.json({ ok: true });
       return;
     }
-    res.status(401).json({ error: 'Session ou jeton de récupération requis.' });
+    res.status(401).json({ error: 'Session ou validation par code requise.' });
   });
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -2606,7 +2928,7 @@ async function startServer() {
     });
   });
 
-  app.put('/api/profile/email', async (req, res) => {
+  async function handleEmailChangeCodeRequest(req: express.Request, res: express.Response) {
     const auth = await resolveAuth(req);
     if (!auth) {
       res.status(401).json({ error: 'Connexion requise' });
@@ -2617,98 +2939,498 @@ async function startServer() {
       res.status(400).json({ error: 'Veuillez indiquer une adresse email valide.' });
       return;
     }
-    const previousEmail = auth.user.email;
-    if (newEmail === previousEmail.toLowerCase()) {
-      res.json({ profile: auth.user, message: 'Cette adresse email est déjà associée à votre compte.' });
+    const previousEmail = auth.user.email.trim().toLowerCase();
+    if (newEmail === previousEmail) {
+      res.status(400).json({ error: 'Cette adresse email est déjà associée à votre compte.' });
       return;
     }
-
-    const appOrigin = resolveAppOrigin(req);
-
-    if (isSupabaseEnabled() && auth.sbClient) {
-      const adminSb = createAdminClient();
-      if (adminSb) {
-        const { error: adminErr } = await adminSb.auth.admin.updateUserById(auth.user.id, {
-          email: newEmail,
-          email_confirm: true,
-        });
-        if (adminErr) {
-          res.status(400).json({ error: adminErr.message });
-          return;
-        }
-        await adminSb.from('profiles').update({ email: newEmail }).eq('id', auth.user.id);
-        registerUserDirectoryEntry(auth.user.id, newEmail, auth.user.username);
-        if (isSmtpReady()) {
-          await sendEmailChangeNotice({
-            to: newEmail,
-            oldEmail: previousEmail,
-            username: auth.user.username,
-            appUrl: appOrigin,
-          });
-        }
-        res.json({
-          profile: { ...auth.user, email: newEmail },
-          message: 'Adresse email mise à jour avec succès.',
-          requiresConfirmation: false,
-        });
-        return;
-      }
-
-      const { error } = await auth.sbClient.auth.updateUser({ email: newEmail });
-      if (error) {
-        res.status(400).json({ error: error.message });
-        return;
-      }
-      registerUserDirectoryEntry(auth.user.id, newEmail, auth.user.username);
-      if (isSmtpReady()) {
-        await sendEmailChangeNotice({
-          to: newEmail,
-          oldEmail: previousEmail,
-          username: auth.user.username,
-          appUrl: appOrigin,
-        });
-      }
-      res.json({
-        profile: auth.user,
-        message: 'Un email de confirmation a été envoyé à votre nouvelle adresse pour valider le changement.',
-        requiresConfirmation: true,
-      });
-      return;
-    }
-
-    if (db.users.some((u) => u.id !== auth.user.id && u.email.toLowerCase() === newEmail)) {
+    if (await isEmailTaken(newEmail)) {
       res.status(409).json({ error: 'Cette adresse email est déjà utilisée par un autre compte.' });
       return;
     }
-    const user = db.users.find((u) => u.id === auth.user.id);
-    if (!user) {
-      res.status(404).json({ error: 'Utilisateur introuvable.' });
+    if (!isSmtpReady()) {
+      res.status(400).json({
+        error:
+          'Aucune passerelle email (SMTP / Resend / Brevo) n’est configurée en administration pour envoyer le code à 6 chiffres.',
+      });
       return;
     }
-    user.email = newEmail;
-    saveDb(db);
-    registerUserDirectoryEntry(user.id, newEmail, user.username);
-    if (isSmtpReady()) {
-      await sendEmailChangeNotice({
-        to: newEmail,
-        oldEmail: previousEmail,
-        username: user.username,
-        appUrl: appOrigin,
+
+    const code = String(crypto.randomInt(100000, 1000000));
+    const now = Date.now();
+    const key = `email_change:${auth.user.id}`;
+    otpChallenges[key] = {
+      purpose: 'email_change',
+      userId: auth.user.id,
+      email: newEmail,
+      newEmail,
+      username: auth.user.username,
+      code,
+      createdAt: now,
+      expiresAt: now + 15 * 60_000,
+      lastSentAt: now,
+      attempts: 0,
+    };
+    saveOtpChallenges();
+
+    const mailRes = await sendEmailChangeVerificationEmail({
+      to: newEmail,
+      oldEmail: auth.user.email,
+      username: auth.user.username,
+      code,
+    });
+    if (!mailRes.ok) {
+      delete otpChallenges[key];
+      saveOtpChallenges();
+      res.status(502).json({
+        error: `Échec de l’envoi du code de confirmation : ${mailRes.error || 'vérifiez la configuration email.'}`,
       });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      requiresCode: true,
+      requiresConfirmation: true,
+      email: newEmail,
+      expiresInMinutes: 15,
+      message: `Un code de confirmation à 6 chiffres vient d’être envoyé à ${newEmail}.`,
+    });
+  }
+
+  app.put('/api/profile/email', handleEmailChangeCodeRequest);
+  app.post('/api/profile/email/request-code', handleEmailChangeCodeRequest);
+
+  app.post('/api/profile/email/resend-code', async (req, res) => {
+    const auth = await resolveAuth(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Connexion requise' });
+      return;
+    }
+    const key = `email_change:${auth.user.id}`;
+    const challenge = otpChallenges[key];
+    if (!challenge || challenge.expiresAt <= Date.now() || !challenge.newEmail) {
+      res.status(400).json({
+        error: 'Demande de changement d’email expirée. Veuillez recommencer.',
+      });
+      return;
+    }
+    const waitMs = 20_000 - (Date.now() - challenge.lastSentAt);
+    if (waitMs > 0) {
+      res.status(429).json({
+        error: `Patientez ${Math.ceil(waitMs / 1000)}s avant de renvoyer un code.`,
+      });
+      return;
+    }
+
+    const newCode = String(crypto.randomInt(100000, 1000000));
+    challenge.code = newCode;
+    challenge.expiresAt = Date.now() + 15 * 60_000;
+    challenge.lastSentAt = Date.now();
+    challenge.attempts = 0;
+    saveOtpChallenges();
+
+    const mailRes = await sendEmailChangeVerificationEmail({
+      to: challenge.newEmail,
+      oldEmail: auth.user.email,
+      username: auth.user.username,
+      code: newCode,
+    });
+    if (!mailRes.ok) {
+      res.status(502).json({
+        error: `Échec du renvoi du code : ${mailRes.error || 'vérifiez la configuration email.'}`,
+      });
+      return;
     }
     res.json({
-      profile: enrichUserProfile({
+      ok: true,
+      message: `Un nouveau code à 6 chiffres vient d’être envoyé à ${challenge.newEmail}.`,
+    });
+  });
+
+  app.post('/api/profile/email/verify-code', async (req, res) => {
+    const auth = await resolveAuth(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Connexion requise' });
+      return;
+    }
+    const code = String(req.body?.code ?? '').replace(/\D/g, '').slice(0, 6);
+    if (code.length !== 6) {
+      res.status(400).json({ error: 'Veuillez saisir le code complet à 6 chiffres.' });
+      return;
+    }
+
+    const key = `email_change:${auth.user.id}`;
+    const challenge = otpChallenges[key];
+    if (!challenge || challenge.expiresAt <= Date.now() || !challenge.newEmail) {
+      if (challenge) {
+        delete otpChallenges[key];
+        saveOtpChallenges();
+      }
+      res.status(400).json({
+        error: 'Code expiré ou introuvable. Veuillez redemander un code.',
+      });
+      return;
+    }
+
+    if (challenge.attempts >= 5) {
+      delete otpChallenges[key];
+      saveOtpChallenges();
+      res.status(429).json({
+        error: 'Trop de tentatives incorrectes. Veuillez redemander un code.',
+      });
+      return;
+    }
+
+    if (challenge.code !== code) {
+      challenge.attempts += 1;
+      saveOtpChallenges();
+      const remaining = Math.max(0, 5 - challenge.attempts);
+      res.status(400).json({
+        error:
+          remaining > 0
+            ? `Code à 6 chiffres incorrect (${remaining} tentative${remaining > 1 ? 's' : ''} restante${remaining > 1 ? 's' : ''}).`
+            : 'Code incorrect. Veuillez redemander un code.',
+      });
+      return;
+    }
+
+    const newEmail = challenge.newEmail;
+    if (await isEmailTaken(newEmail)) {
+      delete otpChallenges[key];
+      saveOtpChallenges();
+      res.status(409).json({ error: 'Cette adresse email est déjà utilisée par un autre compte.' });
+      return;
+    }
+
+    let updatedProfile: UserProfile = { ...auth.user, email: newEmail };
+    if (isSupabaseEnabled() && auth.sbClient) {
+      const adminSb = createAdminClient();
+      if (!adminSb) {
+        res.status(400).json({
+          error: 'Clé SUPABASE_SERVICE_ROLE_KEY requise pour valider le changement d’adresse email.',
+        });
+        return;
+      }
+      const { error: adminErr } = await adminSb.auth.admin.updateUserById(auth.user.id, {
+        email: newEmail,
+        email_confirm: true,
+      });
+      if (adminErr) {
+        res.status(400).json({ error: adminErr.message });
+        return;
+      }
+      try {
+        await adminSb.from('profiles').update({ contact_email: newEmail }).eq('id', auth.user.id);
+      } catch {
+        // Non-fatal
+      }
+      registerUserDirectoryEntry(auth.user.id, newEmail, auth.user.username);
+    } else {
+      const user = db.users.find((u) => u.id === auth.user.id);
+      if (!user) {
+        res.status(404).json({ error: 'Utilisateur introuvable.' });
+        return;
+      }
+      user.email = newEmail;
+      saveDb(db);
+      registerUserDirectoryEntry(user.id, newEmail, user.username);
+      updatedProfile = enrichUserProfile({
         id: user.id,
         email: user.email,
         username: user.username,
         avatar: user.avatar,
         role: user.role,
         createdAt: user.createdAt,
-      }),
-      message: 'Adresse email mise à jour avec succès.',
-      requiresConfirmation: false,
+      });
+    }
+
+    delete otpChallenges[key];
+    saveOtpChallenges();
+    res.json({
+      ok: true,
+      profile: updatedProfile,
+      message: 'Adresse email vérifiée et mise à jour avec succès.',
     });
   });
+
+  app.post('/api/profile/password/request-code', async (req, res) => {
+    const auth = await resolveAuth(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Connexion requise' });
+      return;
+    }
+    const newPassword = String(req.body?.newPassword ?? '');
+    if (newPassword.length < 8) {
+      res.status(400).json({ error: 'Le mot de passe doit contenir au moins 8 caractères.' });
+      return;
+    }
+    if (!isSmtpReady()) {
+      res.status(400).json({
+        error:
+          'Aucune passerelle email (SMTP / Resend / Brevo) n’est configurée en administration pour envoyer le code à 6 chiffres.',
+      });
+      return;
+    }
+
+    const code = String(crypto.randomInt(100000, 1000000));
+    const now = Date.now();
+    const key = `password_change:${auth.user.id}`;
+    otpChallenges[key] = {
+      purpose: 'password_change',
+      userId: auth.user.id,
+      email: auth.user.email,
+      username: auth.user.username,
+      newPassword,
+      code,
+      createdAt: now,
+      expiresAt: now + 15 * 60_000,
+      lastSentAt: now,
+      attempts: 0,
+    };
+    saveOtpChallenges();
+
+    const mailRes = await sendPasswordChangeVerificationEmail({
+      to: auth.user.email,
+      username: auth.user.username,
+      code,
+    });
+    if (!mailRes.ok) {
+      delete otpChallenges[key];
+      saveOtpChallenges();
+      res.status(502).json({
+        error: `Échec de l’envoi du code de confirmation : ${mailRes.error || 'vérifiez la configuration email.'}`,
+      });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      requiresCode: true,
+      email: auth.user.email,
+      expiresInMinutes: 15,
+      message: `Un code de confirmation à 6 chiffres vient d’être envoyé à ${auth.user.email}.`,
+    });
+  });
+
+  app.post('/api/profile/password/resend-code', async (req, res) => {
+    const auth = await resolveAuth(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Connexion requise' });
+      return;
+    }
+    const key = `password_change:${auth.user.id}`;
+    const challenge = otpChallenges[key];
+    if (!challenge || challenge.expiresAt <= Date.now()) {
+      res.status(400).json({
+        error: 'Demande de changement de mot de passe expirée. Veuillez recommencer.',
+      });
+      return;
+    }
+    const waitMs = 20_000 - (Date.now() - challenge.lastSentAt);
+    if (waitMs > 0) {
+      res.status(429).json({
+        error: `Patientez ${Math.ceil(waitMs / 1000)}s avant de renvoyer un code.`,
+      });
+      return;
+    }
+
+    const newCode = String(crypto.randomInt(100000, 1000000));
+    challenge.code = newCode;
+    challenge.expiresAt = Date.now() + 15 * 60_000;
+    challenge.lastSentAt = Date.now();
+    challenge.attempts = 0;
+    saveOtpChallenges();
+
+    const mailRes = await sendPasswordChangeVerificationEmail({
+      to: auth.user.email,
+      username: auth.user.username,
+      code: newCode,
+    });
+    if (!mailRes.ok) {
+      res.status(502).json({
+        error: `Échec du renvoi du code : ${mailRes.error || 'vérifiez la configuration email.'}`,
+      });
+      return;
+    }
+    res.json({
+      ok: true,
+      message: `Un nouveau code à 6 chiffres vient d’être envoyé à ${auth.user.email}.`,
+    });
+  });
+
+  app.post('/api/profile/password/verify-code', async (req, res) => {
+    const auth = await resolveAuth(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Connexion requise' });
+      return;
+    }
+    const code = String(req.body?.code ?? '').replace(/\D/g, '').slice(0, 6);
+    if (code.length !== 6) {
+      res.status(400).json({ error: 'Veuillez saisir le code complet à 6 chiffres.' });
+      return;
+    }
+
+    const key = `password_change:${auth.user.id}`;
+    const challenge = otpChallenges[key];
+    if (!challenge || challenge.expiresAt <= Date.now() || !challenge.newPassword) {
+      if (challenge) {
+        delete otpChallenges[key];
+        saveOtpChallenges();
+      }
+      res.status(400).json({
+        error: 'Code expiré ou introuvable. Veuillez redemander un code.',
+      });
+      return;
+    }
+
+    if (challenge.attempts >= 5) {
+      delete otpChallenges[key];
+      saveOtpChallenges();
+      res.status(429).json({
+        error: 'Trop de tentatives incorrectes. Veuillez redemander un code.',
+      });
+      return;
+    }
+
+    if (challenge.code !== code) {
+      challenge.attempts += 1;
+      saveOtpChallenges();
+      const remaining = Math.max(0, 5 - challenge.attempts);
+      res.status(400).json({
+        error:
+          remaining > 0
+            ? `Code à 6 chiffres incorrect (${remaining} tentative${remaining > 1 ? 's' : ''} restante${remaining > 1 ? 's' : ''}).`
+            : 'Code incorrect. Veuillez redemander un code.',
+      });
+      return;
+    }
+
+    const nextPassword = challenge.newPassword;
+    if (isSupabaseEnabled() && auth.sbClient) {
+      const adminSb = createAdminClient();
+      if (adminSb) {
+        const { error } = await adminSb.auth.admin.updateUserById(auth.user.id, {
+          password: nextPassword,
+        });
+        if (error) {
+          res.status(400).json({ error: error.message });
+          return;
+        }
+      } else {
+        const { error } = await auth.sbClient.auth.updateUser({ password: nextPassword });
+        if (error) {
+          res.status(400).json({ error: error.message });
+          return;
+        }
+      }
+    } else {
+      const user = db.users.find((u) => u.id === auth.user.id);
+      if (!user) {
+        res.status(404).json({ error: 'Utilisateur introuvable.' });
+        return;
+      }
+      user.passwordHash = hashPassword(nextPassword);
+      saveDb(db);
+    }
+
+    delete otpChallenges[key];
+    saveOtpChallenges();
+    res.json({
+      ok: true,
+      message: 'Mot de passe vérifié et mis à jour avec succès.',
+    });
+  });
+
+  async function handleSelfAccountDelete(req: express.Request, res: express.Response) {
+    const auth = await resolveAuth(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Connexion requise' });
+      return;
+    }
+
+    const confirmationText = String(req.body?.confirmationText ?? '').trim().toUpperCase();
+    if (confirmationText !== 'SUPPRIMER') {
+      res.status(400).json({
+        error: 'Veuillez saisir SUPPRIMER pour confirmer la suppression définitive de votre compte.',
+      });
+      return;
+    }
+
+    const targetId = auth.user.id;
+    const deletedEmail = auth.user.email.trim().toLowerCase();
+
+    if (isSupabaseEnabled()) {
+      const adminSb = createAdminClient();
+      if (!adminSb) {
+        res.status(400).json({
+          error:
+            'Ajoutez SUPABASE_SERVICE_ROLE_KEY dans vos secrets pour permettre la suppression définitive du compte.',
+        });
+        return;
+      }
+
+      if (auth.user.role === 'admin') {
+        const { data: admins } = await adminSb
+          .from('user_roles')
+          .select('user_id')
+          .eq('role', 'admin');
+        if ((admins?.length ?? 0) <= 1) {
+          res.status(400).json({
+            error:
+              'Vous êtes le dernier administrateur. Nommez un autre administrateur avant de supprimer votre compte.',
+          });
+          return;
+        }
+      }
+
+      const delRes = await deleteSupabaseUserAndRelations(adminSb, targetId);
+      if (!delRes.ok) {
+        res.status(400).json({ error: delRes.error || 'Suppression du compte impossible.' });
+        return;
+      }
+    } else {
+      const targetUser = db.users.find((u) => u.id === targetId);
+      if (!targetUser) {
+        res.status(404).json({ error: 'Compte introuvable.' });
+        return;
+      }
+      if (targetUser.role === 'admin' && db.users.filter((u) => u.role === 'admin').length <= 1) {
+        res.status(400).json({
+          error:
+            'Vous êtes le dernier administrateur. Nommez un autre administrateur avant de supprimer votre compte.',
+        });
+        return;
+      }
+      db.users = db.users.filter((u) => u.id !== targetId);
+      db.sessions = db.sessions.filter((s) => s.userId !== targetId);
+      db.resetTokens = db.resetTokens.filter((t) => t.userId !== targetId);
+      db.verifyTokens = (db.verifyTokens ?? []).filter((t) => t.userId !== targetId);
+      delete db.favorites[targetId];
+      delete db.watchProgress[targetId];
+      db.watchEvents = db.watchEvents.filter((w) => w.userId !== targetId);
+      db.comments = db.comments.filter((c) => c.userId !== targetId);
+      db.friendships = db.friendships.filter((f) => f.userId !== targetId && f.friendId !== targetId);
+      delete db.presence[targetId];
+      db.ratings = db.ratings.filter((r) => r.userId !== targetId);
+      saveDb(db);
+    }
+
+    if (deletedEmail && pendingSignups[deletedEmail]) {
+      delete pendingSignups[deletedEmail];
+      savePendingSignups();
+    }
+    cleanupUserOtpChallenges(targetId, deletedEmail || undefined);
+    cleanupUserBillingData(targetId, deletedEmail || undefined);
+    cleanupUserNotifications(targetId);
+
+    res.clearCookie('tapenaka_session', { path: '/' });
+    res.clearCookie('streamwall_watch', { path: '/api/public/watch' });
+    res.json({ ok: true, message: 'Votre compte a été supprimé définitivement.' });
+  }
+
+  app.delete('/api/profile', handleSelfAccountDelete);
+  app.post('/api/profile/delete', handleSelfAccountDelete);
 
   app.post('/api/ratings', async (req, res) => {
     const auth = await resolveAuth(req);
@@ -3367,6 +4089,7 @@ async function startServer() {
       return;
     }
 
+    let deletedEmail = '';
     if (isSupabaseEnabled()) {
       const adminSb = createAdminClient();
       if (!adminSb) {
@@ -3376,27 +4099,25 @@ async function startServer() {
         });
         return;
       }
-      const { error: delErr } = await adminSb.auth.admin.deleteUser(targetId);
-      if (delErr) {
-        res.status(400).json({ error: delErr.message });
+      try {
+        const { data: uData } = await adminSb.auth.admin.getUserById(targetId);
+        deletedEmail = (uData?.user?.email || '').trim().toLowerCase();
+      } catch {
+        // Ignore lookup error
+      }
+      const delRes = await deleteSupabaseUserAndRelations(adminSb, targetId);
+      if (!delRes.ok) {
+        res.status(400).json({ error: delRes.error || 'Suppression impossible' });
         return;
       }
-      await Promise.allSettled([
-        adminSb.from('user_roles').delete().eq('user_id', targetId),
-        adminSb.from('user_presence').delete().eq('user_id', targetId),
-        adminSb.from('favorites').delete().eq('user_id', targetId),
-        adminSb.from('watch_events').delete().eq('user_id', targetId),
-        adminSb.from('comments').delete().eq('user_id', targetId),
-        adminSb.from('friendships').delete().or(`user_id.eq.${targetId},friend_id.eq.${targetId}`),
-        adminSb.from('profiles').delete().eq('id', targetId),
-      ]);
     } else {
-      const before = db.users.length;
-      db.users = db.users.filter((u) => u.id !== targetId);
-      if (db.users.length === before) {
+      const targetUser = db.users.find((u) => u.id === targetId);
+      if (!targetUser) {
         res.status(404).json({ error: 'Utilisateur introuvable' });
         return;
       }
+      deletedEmail = targetUser.email.trim().toLowerCase();
+      db.users = db.users.filter((u) => u.id !== targetId);
       db.sessions = db.sessions.filter((s) => s.userId !== targetId);
       db.resetTokens = db.resetTokens.filter((t) => t.userId !== targetId);
       db.verifyTokens = (db.verifyTokens ?? []).filter((t) => t.userId !== targetId);
@@ -3410,7 +4131,12 @@ async function startServer() {
       saveDb(db);
     }
 
-    cleanupUserBillingData(targetId);
+    if (deletedEmail && pendingSignups[deletedEmail]) {
+      delete pendingSignups[deletedEmail];
+      savePendingSignups();
+    }
+    cleanupUserOtpChallenges(targetId, deletedEmail || undefined);
+    cleanupUserBillingData(targetId, deletedEmail || undefined);
     cleanupUserNotifications(targetId);
     res.json({ ok: true });
   });
@@ -4270,6 +4996,7 @@ async function startServer() {
   // ─────────────────────────────────────────────────────────────────────────
   // FRONTEND SERVING
   // ─────────────────────────────────────────────────────────────────────────
+  const httpServer = http.createServer(app);
   const distPath = path.join(__dirname, 'dist');
   if (process.env.NODE_ENV === 'production' && fs.existsSync(distPath)) {
     app.use(express.static(distPath));
@@ -4278,13 +5005,18 @@ async function startServer() {
     });
   } else {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        allowedHosts: true,
+        ws: { server: httpServer },
+        hmr: process.env.DISABLE_HMR !== 'true',
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(
       `Tapenaka — StreamWall listening on http://0.0.0.0:${PORT} (DB: ${
         isSupabaseEnabled() ? 'Supabase Online' : 'Local Store'

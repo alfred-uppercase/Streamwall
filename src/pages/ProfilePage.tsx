@@ -1,11 +1,29 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, Crown, LogOut, Moon, Palette, RotateCcw, Search, Shield, Shuffle, Sun, UserPlus, X } from 'lucide-react';
+import {
+  AlertTriangle,
+  Check,
+  Crown,
+  LogOut,
+  MailCheck,
+  Moon,
+  Palette,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Shield,
+  Shuffle,
+  Sun,
+  Trash2,
+  UserPlus,
+  X,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
 import { THEME_PRESETS, useTheme } from '../lib/theme';
+import { OtpCodeInput } from '../components/OtpCodeInput';
 import {
   AVATAR_PRESETS,
   AvatarArtwork,
@@ -49,14 +67,48 @@ export function ProfilePage() {
   const [savingProfile, setSavingProfile] = useState(false);
 
   const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
   const [savingPassword, setSavingPassword] = useState(false);
+  const [pendingPasswordEmail, setPendingPasswordEmail] = useState<string | null>(null);
+  const [passwordOtpDigits, setPasswordOtpDigits] = useState<string[]>(['', '', '', '', '', '']);
+  const [passwordResendCooldown, setPasswordResendCooldown] = useState(0);
 
   const [newEmail, setNewEmail] = useState(user?.email ?? '');
   const [savingEmail, setSavingEmail] = useState(false);
+  const [pendingEmailTarget, setPendingEmailTarget] = useState<string | null>(null);
+  const [emailOtpDigits, setEmailOtpDigits] = useState<string[]>(['', '', '', '', '', '']);
+  const [emailResendCooldown, setEmailResendCooldown] = useState(0);
+
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deletingAccount, setDeletingAccount] = useState(false);
 
   useEffect(() => {
-    if (user?.email) setNewEmail(user.email);
-  }, [user?.email]);
+    if (user?.email && !pendingEmailTarget) setNewEmail(user.email);
+  }, [user?.email, pendingEmailTarget]);
+
+  useEffect(() => {
+    if (emailResendCooldown <= 0) return;
+    const t = window.setTimeout(() => setEmailResendCooldown((v) => Math.max(0, v - 1)), 1000);
+    return () => window.clearTimeout(t);
+  }, [emailResendCooldown]);
+
+  useEffect(() => {
+    if (passwordResendCooldown <= 0) return;
+    const t = window.setTimeout(() => setPasswordResendCooldown((v) => Math.max(0, v - 1)), 1000);
+    return () => window.clearTimeout(t);
+  }, [passwordResendCooldown]);
+
+  useEffect(() => {
+    if (!deleteModalOpen) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape' && !deletingAccount) {
+        setDeleteModalOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [deleteModalOpen, deletingAccount]);
 
   const [friendSearch, setFriendSearch] = useState('');
   const [searchResults, setSearchResults] = useState<
@@ -102,25 +154,67 @@ export function ProfilePage() {
     }
   }
 
-  async function updatePassword(e: React.FormEvent) {
+  async function requestPasswordCode(e: React.FormEvent) {
     e.preventDefault();
     if (newPassword.length < 8) {
       toast.error('Le mot de passe doit contenir au moins 8 caractères.');
       return;
     }
+    if (newPassword !== confirmNewPassword) {
+      toast.error('Les deux mots de passe ne correspondent pas.');
+      return;
+    }
     setSavingPassword(true);
     try {
-      await api.resetPassword(newPassword);
-      setNewPassword('');
-      toast.success('Mot de passe mis à jour.');
+      const res = await api.requestPasswordChangeCode(newPassword);
+      setPendingPasswordEmail(res.email);
+      setPasswordOtpDigits(['', '', '', '', '', '']);
+      setPasswordResendCooldown(20);
+      toast.success(res.message);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Échec de la mise à jour.');
+      toast.error(err instanceof Error ? err.message : 'Envoi du code impossible.');
     } finally {
       setSavingPassword(false);
     }
   }
 
-  async function updateEmail(e: React.FormEvent) {
+  async function verifyPasswordCode(codeOverride?: string) {
+    const code = codeOverride ?? passwordOtpDigits.join('');
+    if (code.length !== 6) {
+      toast.error('Veuillez saisir le code complet à 6 chiffres.');
+      return;
+    }
+    setSavingPassword(true);
+    try {
+      const res = await api.verifyPasswordChangeCode(code);
+      setPendingPasswordEmail(null);
+      setPasswordOtpDigits(['', '', '', '', '', '']);
+      setNewPassword('');
+      setConfirmNewPassword('');
+      toast.success(res.message);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Code invalide ou expiré.');
+    } finally {
+      setSavingPassword(false);
+    }
+  }
+
+  async function resendPasswordCode() {
+    if (passwordResendCooldown > 0 || savingPassword) return;
+    setSavingPassword(true);
+    try {
+      const res = await api.resendPasswordChangeCode();
+      setPasswordOtpDigits(['', '', '', '', '', '']);
+      setPasswordResendCooldown(20);
+      toast.success(res.message);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Renvoi impossible.');
+    } finally {
+      setSavingPassword(false);
+    }
+  }
+
+  async function requestEmailCode(e: React.FormEvent) {
     e.preventDefault();
     const cleaned = newEmail.trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleaned)) {
@@ -129,14 +223,72 @@ export function ProfilePage() {
     }
     setSavingEmail(true);
     try {
-      const res = await api.updateEmail(cleaned);
-      await refreshUser();
-      await queryClient.invalidateQueries({ queryKey: ['member'] });
-      toast.success(res.message || 'Adresse email mise à jour.');
+      const res = await api.requestEmailChangeCode(cleaned);
+      setPendingEmailTarget(res.email);
+      setEmailOtpDigits(['', '', '', '', '', '']);
+      setEmailResendCooldown(20);
+      toast.success(res.message);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Modification impossible.');
+      toast.error(err instanceof Error ? err.message : 'Envoi du code impossible.');
     } finally {
       setSavingEmail(false);
+    }
+  }
+
+  async function verifyEmailCode(codeOverride?: string) {
+    const code = codeOverride ?? emailOtpDigits.join('');
+    if (code.length !== 6) {
+      toast.error('Veuillez saisir le code complet à 6 chiffres.');
+      return;
+    }
+    setSavingEmail(true);
+    try {
+      const res = await api.verifyEmailChangeCode(code);
+      setPendingEmailTarget(null);
+      setEmailOtpDigits(['', '', '', '', '', '']);
+      setNewEmail(res.profile.email);
+      await refreshUser();
+      await queryClient.invalidateQueries({ queryKey: ['member'] });
+      toast.success(res.message);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Code invalide ou expiré.');
+    } finally {
+      setSavingEmail(false);
+    }
+  }
+
+  async function resendEmailCode() {
+    if (emailResendCooldown > 0 || savingEmail) return;
+    setSavingEmail(true);
+    try {
+      const res = await api.resendEmailChangeCode();
+      setEmailOtpDigits(['', '', '', '', '', '']);
+      setEmailResendCooldown(20);
+      toast.success(res.message);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Renvoi impossible.');
+    } finally {
+      setSavingEmail(false);
+    }
+  }
+
+  async function handleConfirmDeleteAccount(e: React.FormEvent) {
+    e.preventDefault();
+    if (deleteConfirmText.trim().toUpperCase() !== 'SUPPRIMER') {
+      toast.error('Veuillez saisir SUPPRIMER pour confirmer.');
+      return;
+    }
+    setDeletingAccount(true);
+    try {
+      const res = await api.deleteMyAccount(deleteConfirmText.trim());
+      await signOut();
+      setDeleteModalOpen(false);
+      toast.success(res.message || 'Votre compte a été supprimé.');
+      navigate('/auth', { replace: true });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Suppression impossible.');
+    } finally {
+      setDeletingAccount(false);
     }
   }
 
@@ -340,53 +492,194 @@ export function ProfilePage() {
               Adresse email & Sécurité
             </h2>
             <p className="text-sm text-muted-foreground">
-              Modifiez votre adresse email ou votre mot de passe à tout moment pour sécuriser votre compte.
+              Chaque modification d’email ou de mot de passe est protégée par un code de vérification à 6 chiffres envoyé par email.
             </p>
           </div>
 
-          <form onSubmit={updateEmail} className="space-y-3 border-b border-border pb-6">
-            <label className="block text-sm font-medium text-foreground">
-              Adresse email du compte
-              <input
-                type="email"
-                required
-                value={newEmail}
-                onChange={(e) => setNewEmail(e.target.value)}
-                placeholder="nom@exemple.com"
-                className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
-              />
-            </label>
-            <button
-              type="submit"
-              disabled={savingEmail || !newEmail.trim() || newEmail.trim().toLowerCase() === (user?.email ?? '').toLowerCase()}
-              className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap"
+          {pendingEmailTarget ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void verifyEmailCode();
+              }}
+              className="space-y-4 rounded-lg border border-primary/30 bg-background/70 p-4"
             >
-              {savingEmail ? 'Enregistrement…' : 'Modifier l’adresse email'}
-            </button>
-          </form>
+              <div className="flex items-start gap-2.5 text-xs text-muted-foreground">
+                <MailCheck className="mt-0.5 size-4 shrink-0 text-primary" />
+                <span>
+                  Code à 6 chiffres envoyé à <strong className="text-foreground">{pendingEmailTarget}</strong>. Saisissez-le ci-dessous pour confirmer la nouvelle adresse.
+                </span>
+              </div>
 
-          <form onSubmit={updatePassword} className="space-y-4">
-            <label className="block text-sm font-medium text-foreground">
-              Nouveau mot de passe (8 caractères min.)
-              <input
-                type="password"
-                minLength={8}
-                required
-                autoComplete="new-password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="••••••••"
-                className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
+              <OtpCodeInput
+                digits={emailOtpDigits}
+                onChange={setEmailOtpDigits}
+                onComplete={(joined) => void verifyEmailCode(joined)}
+                disabled={savingEmail}
               />
-            </label>
-            <button
-              type="submit"
-              disabled={savingPassword || newPassword.length < 8}
-              className="rounded-lg border border-border bg-background px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <button
+                  type="submit"
+                  disabled={savingEmail || emailOtpDigits.join('').length !== 6}
+                  className="rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                >
+                  {savingEmail ? 'Vérification…' : 'Valider le changement d’email'}
+                </button>
+                <div className="flex items-center gap-3 text-xs">
+                  <button
+                    type="button"
+                    disabled={savingEmail || emailResendCooldown > 0}
+                    onClick={() => void resendEmailCode()}
+                    className="inline-flex items-center gap-1 font-medium text-primary hover:underline disabled:opacity-50"
+                  >
+                    <RefreshCw className="size-3" />
+                    <span>
+                      {emailResendCooldown > 0 ? `Renvoyer (${emailResendCooldown}s)` : 'Renvoyer'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={savingEmail}
+                    onClick={() => {
+                      setPendingEmailTarget(null);
+                      setEmailOtpDigits(['', '', '', '', '', '']);
+                    }}
+                    className="text-muted-foreground hover:text-foreground"
+                  >
+                    Annuler
+                  </button>
+                </div>
+              </div>
+            </form>
+          ) : (
+            <form onSubmit={requestEmailCode} className="space-y-3 border-b border-border pb-6">
+              <label className="block text-sm font-medium text-foreground">
+                Adresse email du compte
+                <input
+                  type="email"
+                  required
+                  value={newEmail}
+                  onChange={(e) => setNewEmail(e.target.value)}
+                  placeholder="mail@mail.fr"
+                  className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={
+                  savingEmail ||
+                  !newEmail.trim() ||
+                  newEmail.trim().toLowerCase() === (user?.email ?? '').toLowerCase()
+                }
+                className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap"
+              >
+                {savingEmail ? 'Envoi du code…' : 'Recevoir le code pour modifier l’email'}
+              </button>
+            </form>
+          )}
+
+          {pendingPasswordEmail ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void verifyPasswordCode();
+              }}
+              className="space-y-4 rounded-lg border border-primary/30 bg-background/70 p-4"
             >
-              {savingPassword ? 'Mise à jour…' : 'Mettre à jour le mot de passe'}
-            </button>
-          </form>
+              <div className="flex items-start gap-2.5 text-xs text-muted-foreground">
+                <MailCheck className="mt-0.5 size-4 shrink-0 text-primary" />
+                <span>
+                  Code à 6 chiffres envoyé à <strong className="text-foreground">{pendingPasswordEmail}</strong> pour confirmer votre nouveau mot de passe.
+                </span>
+              </div>
+
+              <OtpCodeInput
+                digits={passwordOtpDigits}
+                onChange={setPasswordOtpDigits}
+                onComplete={(joined) => void verifyPasswordCode(joined)}
+                disabled={savingPassword}
+              />
+
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <button
+                  type="submit"
+                  disabled={savingPassword || passwordOtpDigits.join('').length !== 6}
+                  className="rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                >
+                  {savingPassword ? 'Validation…' : 'Valider le nouveau mot de passe'}
+                </button>
+                <div className="flex items-center gap-3 text-xs">
+                  <button
+                    type="button"
+                    disabled={savingPassword || passwordResendCooldown > 0}
+                    onClick={() => void resendPasswordCode()}
+                    className="inline-flex items-center gap-1 font-medium text-primary hover:underline disabled:opacity-50"
+                  >
+                    <RefreshCw className="size-3" />
+                    <span>
+                      {passwordResendCooldown > 0
+                        ? `Renvoyer (${passwordResendCooldown}s)`
+                        : 'Renvoyer'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={savingPassword}
+                    onClick={() => {
+                      setPendingPasswordEmail(null);
+                      setPasswordOtpDigits(['', '', '', '', '', '']);
+                    }}
+                    className="text-muted-foreground hover:text-foreground"
+                  >
+                    Annuler
+                  </button>
+                </div>
+              </div>
+            </form>
+          ) : (
+            <form onSubmit={requestPasswordCode} className="space-y-4">
+              <label className="block text-sm font-medium text-foreground">
+                Nouveau mot de passe (8 caractères min.)
+                <input
+                  type="password"
+                  minLength={8}
+                  required
+                  autoComplete="new-password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
+                />
+              </label>
+              <label className="block text-sm font-medium text-foreground">
+                Confirmer le nouveau mot de passe
+                <input
+                  type="password"
+                  minLength={8}
+                  required
+                  autoComplete="new-password"
+                  value={confirmNewPassword}
+                  onChange={(e) => setConfirmNewPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={
+                  savingPassword ||
+                  newPassword.length < 8 ||
+                  newPassword !== confirmNewPassword
+                }
+                className="rounded-lg border border-border bg-background px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+              >
+                {savingPassword
+                  ? 'Envoi du code…'
+                  : 'Recevoir le code pour changer le mot de passe'}
+              </button>
+            </form>
+          )}
         </section>
       </div>
 
@@ -683,6 +976,115 @@ export function ProfilePage() {
           </p>
         )}
       </section>
+
+      {/* Danger Zone — Account Self-Deletion */}
+      <section className="rounded-xl border border-destructive/35 bg-card p-6">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="grid size-10 shrink-0 place-items-center rounded-xl border border-destructive/30 bg-destructive/10 text-destructive">
+              <AlertTriangle className="size-5" />
+            </div>
+            <div>
+              <h2 className="font-display text-lg font-semibold text-foreground">
+                Supprimer mon compte
+              </h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                Cette action supprime définitivement votre profil, vos favoris, votre historique, vos commentaires et vos accès associés.
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              setDeleteConfirmText('');
+              setDeleteModalOpen(true);
+            }}
+            className="inline-flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-2 text-xs font-semibold text-destructive transition-colors hover:bg-destructive hover:text-white whitespace-nowrap shrink-0"
+          >
+            <Trash2 className="size-3.5" />
+            <span>Supprimer mon compte</span>
+          </button>
+        </div>
+      </section>
+
+      {deleteModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-account-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
+          onClick={() => {
+            if (!deletingAccount) setDeleteModalOpen(false);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-destructive/15 text-destructive">
+                  <AlertTriangle className="size-4" />
+                </div>
+                <h3 id="delete-account-title" className="font-display text-lg font-bold text-foreground">
+                  Confirmer la suppression
+                </h3>
+              </div>
+              <button
+                type="button"
+                disabled={deletingAccount}
+                onClick={() => setDeleteModalOpen(false)}
+                aria-label="Fermer"
+                className="rounded-lg p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Vous êtes sur le point de supprimer définitivement le compte{' '}
+              <strong className="text-foreground">{user?.email}</strong>. Cette opération est irréversible et libérera immédiatement votre adresse email et votre pseudo.
+            </p>
+
+            <form onSubmit={handleConfirmDeleteAccount} className="space-y-4">
+              <label className="block text-xs font-medium text-foreground">
+                Saisissez <span className="font-mono font-bold text-destructive">SUPPRIMER</span> pour confirmer :
+                <input
+                  type="text"
+                  autoFocus
+                  required
+                  value={deleteConfirmText}
+                  onChange={(e) => setDeleteConfirmText(e.target.value)}
+                  placeholder="SUPPRIMER"
+                  className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 font-mono text-sm text-foreground uppercase focus:border-destructive focus:outline-none"
+                />
+              </label>
+
+              <div className="flex items-center justify-end gap-2.5 pt-1">
+                <button
+                  type="button"
+                  disabled={deletingAccount}
+                  onClick={() => setDeleteModalOpen(false)}
+                  className="rounded-lg border border-border bg-background px-4 py-2 text-xs font-medium text-foreground hover:bg-accent disabled:opacity-50"
+                >
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  disabled={
+                    deletingAccount || deleteConfirmText.trim().toUpperCase() !== 'SUPPRIMER'
+                  }
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-destructive px-4 py-2 text-xs font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+                >
+                  <Trash2 className="size-3.5" />
+                  <span>{deletingAccount ? 'Suppression…' : 'Supprimer définitivement'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

@@ -302,7 +302,20 @@ export function isUserBanned(userId: string): boolean {
   return Boolean(billingDb.bannedUsers?.[userId]);
 }
 
-export function cleanupUserBillingData(userId: string): void {
+export function pruneUserDirectory(validUserIds: Set<string>): void {
+  const dir = billingDb.userDirectory;
+  if (!dir) return;
+  let dirty = false;
+  for (const uid of Object.keys(dir)) {
+    if (!validUserIds.has(uid)) {
+      delete dir[uid];
+      dirty = true;
+    }
+  }
+  if (dirty) saveBillingDb(billingDb);
+}
+
+export function cleanupUserBillingData(userId: string, email?: string): void {
   let dirty = false;
   if (billingDb.subscriptions[userId]) {
     delete billingDb.subscriptions[userId];
@@ -319,6 +332,15 @@ export function cleanupUserBillingData(userId: string): void {
   if (billingDb.userDirectory?.[userId]) {
     delete billingDb.userDirectory[userId];
     dirty = true;
+  }
+  if (email && billingDb.userDirectory) {
+    const cleanEmail = email.trim().toLowerCase();
+    for (const [uid, entry] of Object.entries(billingDb.userDirectory)) {
+      if (entry?.email && entry.email.trim().toLowerCase() === cleanEmail) {
+        delete billingDb.userDirectory[uid];
+        dirty = true;
+      }
+    }
   }
   if (billingDb.bannedUsers?.[userId]) {
     delete billingDb.bannedUsers[userId];

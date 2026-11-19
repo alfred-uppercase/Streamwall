@@ -1,10 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft,
-  ArrowRight,
   CheckCircle2,
-  KeyRound,
   MailCheck,
   RefreshCw,
   Shield,
@@ -14,6 +12,7 @@ import {
 import { toast } from 'sonner';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle, useSiteConfig } from '../lib/siteConfig';
+import { OtpCodeInput } from '../components/OtpCodeInput';
 
 export function AuthPage() {
   const { isMember, backend, setSession } = useAuth();
@@ -32,19 +31,22 @@ export function AuthPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
-  const [resetPath, setResetPath] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState('');
   const [statusError, setStatusError] = useState(false);
 
-  // 6-digit verification code state
+  // 6-digit verification code state (for signup AND forgot-password)
+  const [pendingKind, setPendingKind] = useState<'signup' | 'forgot' | null>(null);
   const [pendingCodeEmail, setPendingCodeEmail] = useState<string | null>(null);
   const [otpDigits, setOtpDigits] = useState<string[]>(['', '', '', '', '', '']);
   const [resendCooldown, setResendCooldown] = useState(0);
-  const otpRefs = useRef<(HTMLInputElement | null)[]>([]);
+  const [resetNewPassword, setResetNewPassword] = useState('');
+  const [resetConfirmPassword, setResetConfirmPassword] = useState('');
 
   useDocumentTitle(
     pendingCodeEmail
-      ? 'Vérification par code'
+      ? pendingKind === 'forgot'
+        ? 'Réinitialisation par code'
+        : 'Vérification par code'
       : mode === 'signup'
         ? 'Inscription'
         : mode === 'forgot'
@@ -70,7 +72,7 @@ export function AuthPage() {
         if (!active) return;
         setStatusError(true);
         setStatusMessage(
-          err instanceof Error ? err.message : 'Lien de confirmation invalide ou expiré.'
+          err instanceof Error ? err.message : 'Code ou jeton de confirmation invalide.'
         );
         const cleaned = new URLSearchParams(searchParams);
         cleaned.delete('verify');
@@ -140,24 +142,29 @@ export function AuthPage() {
     return () => window.clearTimeout(t);
   }, [resendCooldown]);
 
-  // Focus first OTP box when entering code verification step
-  useEffect(() => {
-    if (pendingCodeEmail) {
-      window.setTimeout(() => otpRefs.current[0]?.focus(), 50);
-    }
-  }, [pendingCodeEmail]);
-
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setStatusMessage('');
     setStatusError(false);
-    setResetPath(null);
     try {
       if (mode === 'forgot') {
-        const res = await api.forgotPassword(email);
-        setStatusMessage(res.message);
-        if (res.resetPath) setResetPath(res.resetPath);
+        const res = await api.forgotPassword(email.trim().toLowerCase());
+        if (res.requiresCode) {
+          setPendingKind('forgot');
+          setPendingCodeEmail(res.email || email.trim().toLowerCase());
+          setOtpDigits(['', '', '', '', '', '']);
+          setResetNewPassword('');
+          setResetConfirmPassword('');
+          setResendCooldown(20);
+          setStatusError(false);
+          setStatusMessage(
+            res.message || `Un code à 6 chiffres a été envoyé à ${res.email || email}.`
+          );
+          toast.success('Code de réinitialisation envoyé par email');
+        } else {
+          setStatusMessage(res.message);
+        }
       } else if (mode === 'signup') {
         if (usernameStatus.available === false) {
           setStatusError(true);
@@ -167,6 +174,7 @@ export function AuthPage() {
         }
         const res = await api.signup(username, email, password);
         if (res.requiresCode) {
+          setPendingKind('signup');
           setPendingCodeEmail(res.email || email.trim().toLowerCase());
           setOtpDigits(['', '', '', '', '', '']);
           setResendCooldown(20);
@@ -198,8 +206,8 @@ export function AuthPage() {
     }
   }
 
-  async function submitOtpCode(codeToVerify: string) {
-    if (!pendingCodeEmail || codeToVerify.length !== 6) return;
+  async function submitSignupOtpCode(codeToVerify: string) {
+    if (!pendingCodeEmail || pendingKind !== 'signup' || codeToVerify.length !== 6) return;
     setBusy(true);
     setStatusMessage('');
     setStatusError(false);
@@ -216,64 +224,47 @@ export function AuthPage() {
     }
   }
 
-  function handleOtpChange(index: number, rawValue: string) {
-    const digitsOnly = rawValue.replace(/\D/g, '');
-    if (digitsOnly.length > 1) {
-      // User pasted multiple digits into an input
-      const next = [...otpDigits];
-      for (let i = 0; i < 6 && index + i < 6; i++) {
-        next[index + i] = digitsOnly[i] ?? '';
-      }
-      setOtpDigits(next);
-      const nextFocus = Math.min(5, index + digitsOnly.length);
-      otpRefs.current[nextFocus]?.focus();
-      const joined = next.join('');
-      if (joined.length === 6 && !busy) {
-        void submitOtpCode(joined);
-      }
+  async function submitForgotOtpReset(e: React.FormEvent) {
+    e.preventDefault();
+    if (!pendingCodeEmail || pendingKind !== 'forgot') return;
+    const code = otpDigits.join('');
+    if (code.length !== 6) {
+      setStatusError(true);
+      setStatusMessage('Veuillez saisir le code complet à 6 chiffres.');
+      return;
+    }
+    if (resetNewPassword.length < 8) {
+      setStatusError(true);
+      setStatusMessage('Le nouveau mot de passe doit contenir au moins 8 caractères.');
+      return;
+    }
+    if (resetNewPassword !== resetConfirmPassword) {
+      setStatusError(true);
+      setStatusMessage('Les deux mots de passe ne correspondent pas.');
       return;
     }
 
-    const next = [...otpDigits];
-    next[index] = digitsOnly;
-    setOtpDigits(next);
-    if (digitsOnly && index < 5) {
-      otpRefs.current[index + 1]?.focus();
-    }
-    const joined = next.join('');
-    if (joined.length === 6 && !busy) {
-      void submitOtpCode(joined);
-    }
-  }
-
-  function handleOtpKeyDown(index: number, e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === 'Backspace' && !otpDigits[index] && index > 0) {
-      e.preventDefault();
-      const next = [...otpDigits];
-      next[index - 1] = '';
-      setOtpDigits(next);
-      otpRefs.current[index - 1]?.focus();
-    } else if (e.key === 'ArrowLeft' && index > 0) {
-      e.preventDefault();
-      otpRefs.current[index - 1]?.focus();
-    } else if (e.key === 'ArrowRight' && index < 5) {
-      e.preventDefault();
-      otpRefs.current[index + 1]?.focus();
-    }
-  }
-
-  function handleOtpPaste(e: React.ClipboardEvent<HTMLInputElement>) {
-    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
-    if (!pasted) return;
-    e.preventDefault();
-    const next = ['', '', '', '', '', ''];
-    for (let i = 0; i < pasted.length; i++) {
-      next[i] = pasted[i];
-    }
-    setOtpDigits(next);
-    otpRefs.current[Math.min(5, pasted.length - 1)]?.focus();
-    if (pasted.length === 6 && !busy) {
-      void submitOtpCode(pasted);
+    setBusy(true);
+    setStatusMessage('');
+    setStatusError(false);
+    try {
+      const res = await api.verifyForgotPasswordCode(pendingCodeEmail, code, resetNewPassword);
+      toast.success(res.message);
+      setEmail(pendingCodeEmail);
+      setPassword('');
+      setPendingKind(null);
+      setPendingCodeEmail(null);
+      setOtpDigits(['', '', '', '', '', '']);
+      setResetNewPassword('');
+      setResetConfirmPassword('');
+      setMode('login');
+      setStatusError(false);
+      setStatusMessage('Mot de passe mis à jour. Connectez-vous avec votre nouveau mot de passe.');
+    } catch (err) {
+      setStatusError(true);
+      setStatusMessage(err instanceof Error ? err.message : 'Code invalide ou expiré.');
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -283,12 +274,14 @@ export function AuthPage() {
     setStatusMessage('');
     setStatusError(false);
     try {
-      const res = await api.resendSignupCode(pendingCodeEmail);
+      const res =
+        pendingKind === 'forgot'
+          ? await api.resendForgotPasswordCode(pendingCodeEmail)
+          : await api.resendSignupCode(pendingCodeEmail);
       setOtpDigits(['', '', '', '', '', '']);
       setResendCooldown(20);
       setStatusMessage(res.message);
-      toast.success('Nouveau code envoyé par email');
-      otpRefs.current[0]?.focus();
+      toast.success('Nouveau code à 6 chiffres envoyé par email');
     } catch (err) {
       setStatusError(true);
       setStatusMessage(err instanceof Error ? err.message : 'Renvoi impossible.');
@@ -335,7 +328,9 @@ export function AuthPage() {
           </Link>
           <h1 className="mt-3 font-display text-xl font-semibold text-foreground">
             {pendingCodeEmail
-              ? 'Vérification à 6 chiffres'
+              ? pendingKind === 'forgot'
+                ? 'Réinitialisation par code'
+                : 'Vérification à 6 chiffres'
               : mode === 'login'
                 ? 'Connexion à votre espace'
                 : mode === 'signup'
@@ -349,11 +344,11 @@ export function AuthPage() {
           </p>
         </div>
 
-        {pendingCodeEmail ? (
+        {pendingCodeEmail && pendingKind === 'signup' ? (
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              void submitOtpCode(fullCode);
+              void submitSignupOtpCode(fullCode);
             }}
             className="space-y-5"
           >
@@ -362,27 +357,12 @@ export function AuthPage() {
               <span>Code valable 15 minutes · Pensez à vérifier vos spams</span>
             </div>
 
-            <div className="flex justify-center gap-2" aria-label="Code de vérification à 6 chiffres">
-              {otpDigits.map((digit, idx) => (
-                <input
-                  key={idx}
-                  ref={(el) => {
-                    otpRefs.current[idx] = el;
-                  }}
-                  type="text"
-                  inputMode="numeric"
-                  autoComplete={idx === 0 ? 'one-time-code' : 'off'}
-                  maxLength={6}
-                  value={digit}
-                  disabled={busy}
-                  aria-label={`Chiffre ${idx + 1} sur 6`}
-                  onChange={(e) => handleOtpChange(idx, e.target.value)}
-                  onKeyDown={(e) => handleOtpKeyDown(idx, e)}
-                  onPaste={handleOtpPaste}
-                  className="h-12 w-11 rounded-lg border border-input bg-background text-center font-mono text-xl font-bold text-foreground tabular-nums focus:border-primary focus:ring-2 focus:ring-primary/25 focus:outline-none disabled:opacity-50 sm:h-13 sm:w-12"
-                />
-              ))}
-            </div>
+            <OtpCodeInput
+              digits={otpDigits}
+              onChange={setOtpDigits}
+              onComplete={(joined) => void submitSignupOtpCode(joined)}
+              disabled={busy}
+            />
 
             <button
               type="submit"
@@ -411,6 +391,7 @@ export function AuthPage() {
                 type="button"
                 disabled={busy}
                 onClick={() => {
+                  setPendingKind(null);
                   setPendingCodeEmail(null);
                   setOtpDigits(['', '', '', '', '', '']);
                   setStatusMessage('');
@@ -420,6 +401,89 @@ export function AuthPage() {
               >
                 <ArrowLeft className="size-3.5" />
                 <span>Modifier mes infos</span>
+              </button>
+            </div>
+          </form>
+        ) : pendingCodeEmail && pendingKind === 'forgot' ? (
+          <form onSubmit={submitForgotOtpReset} className="space-y-4">
+            <div className="flex items-center justify-center gap-2 rounded-lg border border-border bg-background/60 px-3 py-2.5 text-xs text-muted-foreground">
+              <MailCheck className="size-4 shrink-0 text-primary" />
+              <span>Code valable 15 minutes · Pensez à vérifier vos spams</span>
+            </div>
+
+            <OtpCodeInput
+              digits={otpDigits}
+              onChange={setOtpDigits}
+              disabled={busy}
+            />
+
+            <label className="block text-sm font-medium text-foreground">
+              Nouveau mot de passe (8 caractères min.)
+              <input
+                type="password"
+                minLength={8}
+                required
+                autoComplete="new-password"
+                value={resetNewPassword}
+                onChange={(e) => setResetNewPassword(e.target.value)}
+                placeholder="••••••••"
+                className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
+              />
+            </label>
+
+            <label className="block text-sm font-medium text-foreground">
+              Confirmer le mot de passe
+              <input
+                type="password"
+                minLength={8}
+                required
+                autoComplete="new-password"
+                value={resetConfirmPassword}
+                onChange={(e) => setResetConfirmPassword(e.target.value)}
+                placeholder="••••••••"
+                className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
+              />
+            </label>
+
+            <button
+              type="submit"
+              disabled={busy || fullCode.length !== 6 || resetNewPassword.length < 8}
+              className="w-full rounded-lg bg-primary py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+            >
+              {busy ? 'Réinitialisation…' : 'Valider le code et réinitialiser'}
+            </button>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-xs">
+              <button
+                type="button"
+                disabled={busy || resendCooldown > 0}
+                onClick={() => void handleResendCode()}
+                className="inline-flex items-center gap-1.5 font-medium text-primary hover:underline disabled:opacity-50"
+              >
+                <RefreshCw className={`size-3.5 ${busy ? 'animate-spin' : ''}`} />
+                <span>
+                  {resendCooldown > 0
+                    ? `Renvoyer le code (${resendCooldown}s)`
+                    : 'Renvoyer un nouveau code'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setPendingKind(null);
+                  setPendingCodeEmail(null);
+                  setOtpDigits(['', '', '', '', '', '']);
+                  setResetNewPassword('');
+                  setResetConfirmPassword('');
+                  setStatusMessage('');
+                  setStatusError(false);
+                }}
+                className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+              >
+                <ArrowLeft className="size-3.5" />
+                <span>Modifier l’email</span>
               </button>
             </div>
           </form>
@@ -497,7 +561,7 @@ export function AuthPage() {
                   ? 'Se connecter'
                   : mode === 'signup'
                     ? 'Recevoir le code de confirmation'
-                    : 'Générer le lien de récupération'}
+                    : 'Recevoir le code par email'}
             </button>
           </form>
         )}
@@ -512,16 +576,6 @@ export function AuthPage() {
             }`}
           >
             <p>{statusMessage}</p>
-            {resetPath && (
-              <Link
-                to={resetPath}
-                className="mt-2 inline-flex items-center gap-1.5 font-semibold text-primary hover:underline"
-              >
-                <KeyRound className="size-3.5" />
-                <span>Ouvrir le lien de réinitialisation maintenant</span>
-                <ArrowRight className="size-3.5" />
-              </Link>
-            )}
           </div>
         )}
 
@@ -562,7 +616,6 @@ export function AuthPage() {
                 setMode(mode === 'signup' ? 'login' : 'signup');
                 setStatusMessage('');
                 setStatusError(false);
-                setResetPath(null);
               }}
               className="font-medium text-primary hover:underline"
             >
@@ -574,7 +627,6 @@ export function AuthPage() {
                 setMode(mode === 'forgot' ? 'login' : 'forgot');
                 setStatusMessage('');
                 setStatusError(false);
-                setResetPath(null);
               }}
               className="text-muted-foreground hover:text-foreground"
             >
@@ -588,28 +640,87 @@ export function AuthPage() {
 }
 
 export function ResetPasswordPage() {
-  useDocumentTitle('Nouveau mot de passe');
+  useDocumentTitle('Réinitialisation du mot de passe');
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { isMember } = useAuth();
   const token = searchParams.get('token');
 
+  const [email, setEmail] = useState('');
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null);
+  const [otpDigits, setOtpDigits] = useState<string[]>(['', '', '', '', '', '']);
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [resendCooldown, setResendCooldown] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  const canReset = Boolean(token || isMember);
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const t = window.setTimeout(() => setResendCooldown((v) => Math.max(0, v - 1)), 1000);
+    return () => window.clearTimeout(t);
+  }, [resendCooldown]);
 
-  async function handleSubmit(e: React.FormEvent) {
+  if (isMember && !token) {
+    return <Navigate to="/profil" replace />;
+  }
+
+  async function handleLegacyTokenSubmit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError('');
     try {
       await api.resetPassword(password, token);
       toast.success('Nouveau mot de passe enregistré !');
-      navigate(isMember ? '/profil' : '/auth', { replace: true });
+      navigate('/auth', { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Réinitialisation impossible.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRequestCode(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      const res = await api.forgotPassword(email.trim().toLowerCase());
+      setPendingEmail(res.email || email.trim().toLowerCase());
+      setOtpDigits(['', '', '', '', '', '']);
+      setResendCooldown(20);
+      toast.success('Code à 6 chiffres envoyé par email.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Envoi impossible.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleVerifyReset(e: React.FormEvent) {
+    e.preventDefault();
+    if (!pendingEmail) return;
+    const code = otpDigits.join('');
+    if (code.length !== 6) {
+      setError('Veuillez saisir le code complet à 6 chiffres.');
+      return;
+    }
+    if (password.length < 8) {
+      setError('Le mot de passe doit contenir au moins 8 caractères.');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError('Les deux mots de passe ne correspondent pas.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const res = await api.verifyForgotPasswordCode(pendingEmail, code, password);
+      toast.success(res.message);
+      navigate('/auth', { replace: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Code invalide ou expiré.');
     } finally {
       setBusy(false);
     }
@@ -619,10 +730,11 @@ export function ResetPasswordPage() {
     <main className="mx-auto max-w-md px-4 py-16 sm:px-6">
       <div className="rounded-xl border border-border bg-card p-6 sm:p-8">
         <h1 className="mb-3 font-display text-2xl font-bold text-foreground">
-          Nouveau mot de passe
+          Réinitialiser le mot de passe
         </h1>
-        {canReset ? (
-          <form onSubmit={handleSubmit} className="space-y-4">
+
+        {token ? (
+          <form onSubmit={handleLegacyTokenSubmit} className="space-y-4">
             <label className="block text-sm font-medium text-foreground">
               Choisissez un nouveau mot de passe (8 caractères min.)
               <input
@@ -645,18 +757,106 @@ export function ResetPasswordPage() {
               {busy ? 'Enregistrement…' : 'Enregistrer le mot de passe'}
             </button>
           </form>
-        ) : (
-          <div className="space-y-4">
-            <p className="text-sm text-muted-foreground">
-              Générez d’abord un lien de récupération depuis la page de connexion.
+        ) : pendingEmail ? (
+          <form onSubmit={handleVerifyReset} className="space-y-4">
+            <p className="text-xs text-muted-foreground">
+              Saisissez le code à 6 chiffres envoyé à <strong className="text-foreground">{pendingEmail}</strong>.
             </p>
-            <Link
-              to="/auth"
-              className="inline-flex rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground"
+            <OtpCodeInput digits={otpDigits} onChange={setOtpDigits} disabled={busy} />
+            <label className="block text-sm font-medium text-foreground">
+              Nouveau mot de passe (8 caractères min.)
+              <input
+                required
+                type="password"
+                minLength={8}
+                autoComplete="new-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
+              />
+            </label>
+            <label className="block text-sm font-medium text-foreground">
+              Confirmer le mot de passe
+              <input
+                required
+                type="password"
+                minLength={8}
+                autoComplete="new-password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="••••••••"
+                className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
+              />
+            </label>
+            {error && <p className="text-xs text-destructive">{error}</p>}
+            <button
+              type="submit"
+              disabled={busy || otpDigits.join('').length !== 6 || password.length < 8}
+              className="w-full rounded-lg bg-primary py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
             >
-              Aller à la connexion
+              {busy ? 'Validation…' : 'Valider le code et réinitialiser'}
+            </button>
+            <div className="flex items-center justify-between text-xs">
+              <button
+                type="button"
+                disabled={busy || resendCooldown > 0}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    const r = await api.resendForgotPasswordCode(pendingEmail);
+                    setResendCooldown(20);
+                    toast.success(r.message);
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : 'Renvoi impossible.');
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                className="font-medium text-primary hover:underline disabled:opacity-50"
+              >
+                {resendCooldown > 0 ? `Renvoyer (${resendCooldown}s)` : 'Renvoyer un code'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPendingEmail(null);
+                  setError('');
+                }}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                Changer d’email
+              </button>
+            </div>
+          </form>
+        ) : (
+          <form onSubmit={handleRequestCode} className="space-y-4">
+            <p className="text-xs text-muted-foreground">
+              Indiquez votre adresse email pour recevoir un code de réinitialisation à 6 chiffres.
+            </p>
+            <label className="block text-sm font-medium text-foreground">
+              Adresse email
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="mail@mail.fr"
+                className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
+              />
+            </label>
+            {error && <p className="text-xs text-destructive">{error}</p>}
+            <button
+              type="submit"
+              disabled={busy}
+              className="w-full rounded-lg bg-primary py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+            >
+              {busy ? 'Envoi…' : 'Recevoir le code par email'}
+            </button>
+            <Link to="/auth" className="block text-center text-xs text-muted-foreground hover:text-foreground">
+              Retour à la connexion
             </Link>
-          </div>
+          </form>
         )}
       </div>
     </main>
