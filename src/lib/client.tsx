@@ -25,6 +25,7 @@ import type {
   PaymentOrder,
   PlanTier,
   PlayerTemplates,
+  PopupConfig,
   SiteConfig,
   SubscriptionPlan,
   UserProfile,
@@ -394,7 +395,14 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   adminNotificationHistory: () =>
-    apiRequest<{ broadcasts: AdminBroadcastRecord[] }>('/api/admin/notifications'),
+    apiRequest<{ broadcasts: AdminBroadcastRecord[]; guestNotifications?: NotificationRecord[] }>(
+      '/api/admin/notifications'
+    ),
+  adminDeleteGuestNotification: (id: string) =>
+    apiRequest<{ ok: boolean; guestNotifications: NotificationRecord[] }>(
+      `/api/admin/notifications/guest/${encodeURIComponent(id)}`,
+      { method: 'DELETE' }
+    ),
   adminSendNotification: (payload: {
     target: AdminNotificationTarget;
     userIds?: string[];
@@ -564,7 +572,7 @@ export const api = {
     ),
   adminAssignUserSubscription: (
     userId: string,
-    payload: { planId: string; durationDays?: number; autoRenew?: boolean }
+    payload: { planId: string; durationDays?: number; autoRenew?: boolean; replaceExisting?: boolean }
   ) =>
     apiRequest<{ subscription: UserSubscription }>(
       `/api/admin/users/${encodeURIComponent(userId)}/subscription`,
@@ -573,6 +581,24 @@ export const api = {
         body: JSON.stringify(payload),
       }
     ),
+
+  // Configurable Popups
+  activePopups: () => apiRequest<{ popups: PopupConfig[] }>('/api/popups/active'),
+  trackPopupEvent: (id: string, event: 'impression' | 'click') =>
+    apiRequest<{ ok: boolean }>(`/api/popups/${encodeURIComponent(id)}/track`, {
+      method: 'POST',
+      body: JSON.stringify({ event }),
+    }),
+  adminPopups: () => apiRequest<{ popups: PopupConfig[] }>('/api/admin/popups'),
+  adminSavePopup: (payload: Partial<PopupConfig> & { imageUploadDataUrl?: string | null }) =>
+    apiRequest<{ popup: PopupConfig }>('/api/admin/popups', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  adminDeletePopup: (id: string) =>
+    apiRequest<{ ok: boolean }>(`/api/admin/popups/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
 };
 
 interface AuthContextValue {

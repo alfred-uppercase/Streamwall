@@ -124,13 +124,24 @@ import {
 import {
   cleanupUserNotifications,
   clearUserNotifications,
+  createGuestNotification,
   createNotification,
+  deleteGuestNotification,
   listAdminBroadcasts,
+  listGuestNotifications,
   listUserNotifications,
   markAllNotificationsRead,
   markNotificationRead,
   recordAdminBroadcast,
 } from './src/server/notificationsStore.ts';
+import {
+  deletePopup,
+  listActivePopups,
+  listAllPopups,
+  resolvePopupAssetFile,
+  trackPopupEvent,
+  upsertPopup,
+} from './src/server/popupsStore.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3000;
@@ -4273,7 +4284,21 @@ async function startServer() {
   app.get('/api/admin/notifications', async (req, res) => {
     const auth = await requireAdmin(req, res);
     if (!auth) return;
-    res.json({ broadcasts: listAdminBroadcasts() });
+    res.json({
+      broadcasts: listAdminBroadcasts(),
+      guestNotifications: listGuestNotifications(),
+    });
+  });
+
+  app.delete('/api/admin/notifications/guest/:id', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const ok = deleteGuestNotification(req.params.id);
+    if (!ok) {
+      res.status(404).json({ error: 'Notification invité introuvable.' });
+      return;
+    }
+    res.json({ ok: true, guestNotifications: listGuestNotifications() });
   });
 
   app.post('/api/admin/notifications', async (req, res) => {
@@ -4281,7 +4306,7 @@ async function startServer() {
     if (!auth) return;
 
     const rawTarget = String(req.body?.target ?? 'all');
-    const target: AdminNotificationTarget = ['all', 'pro', 'free', 'user'].includes(rawTarget)
+    const target: AdminNotificationTarget = ['all', 'pro', 'free', 'guest', 'user'].includes(rawTarget)
       ? (rawTarget as AdminNotificationTarget)
       : 'all';
     const title = String(req.body?.title ?? '').trim().slice(0, 120);
@@ -4294,56 +4319,75 @@ async function startServer() {
       return;
     }
 
-    let knownUserIds: string[] = [];
-    if (isSupabaseEnabled() && auth.sbClient) {
-      try {
-        const sbOverview = await sbGetAdminOverview(auth.sbClient);
-        knownUserIds = sbOverview.users.map((u) => u.id);
-      } catch (err) {
-        res.status(500).json({
-          error: err instanceof Error ? err.message : 'Impossible de charger les utilisateurs Supabase.',
-        });
-        return;
-      }
-    } else {
-      knownUserIds = db.users.map((u) => u.id);
-    }
-
-    let recipientIds: string[] = [];
-    if (target === 'user') {
-      const requested: string[] = Array.isArray(req.body?.userIds)
-        ? (req.body.userIds as unknown[]).map((x) => String(x).trim()).filter(Boolean)
-        : [];
-      const single = req.body?.userId ? String(req.body.userId).trim() : '';
-      const rawSelected: string[] = [...new Set(single ? [...requested, single] : requested)];
-      if (rawSelected.length === 0) {
-        res.status(400).json({ error: 'Sélectionnez au moins un utilisateur cible.' });
-        return;
-      }
-      const knownSet = new Set(knownUserIds);
-      recipientIds = knownSet.size > 0 ? rawSelected.filter((id) => knownSet.has(id)) : rawSelected;
-      if (recipientIds.length === 0) {
-        res.status(404).json({ error: 'Aucun utilisateur valide trouvé dans la sélection.' });
-        return;
-      }
-    } else if (target === 'pro') {
-      recipientIds = knownUserIds.filter((id) => isUserPro(id));
-    } else if (target === 'free') {
-      recipientIds = knownUserIds.filter((id) => !isUserPro(id));
-    } else {
-      recipientIds = knownUserIds;
-    }
-
     let sentCount = 0;
-    for (const userId of recipientIds) {
-      const created = createNotification({
-        userId,
+    if (target === 'guest') {
+      createGuestNotification({
         kind: 'admin_announcement',
         title,
         message,
         link,
       });
-      if (created) sentCount += 1;
+      sentCount = 1;
+    } else {
+      let knownUserIds: string[] = [];
+      if (isSupabaseEnabled() && auth.sbClient) {
+        try {
+          const sbOverview = await sbGetAdminOverview(auth.sbClient);
+          knownUserIds = sbOverview.users.map((u) => u.id);
+        } catch (err) {
+          res.status(500).json({
+            error: err instanceof Error ? err.message : 'Impossible de charger les utilisateurs Supabase.',
+          });
+          return;
+        }
+      } else {
+        knownUserIds = db.users.map((u) => u.id);
+      }
+
+      let recipientIds: string[] = [];
+      if (target === 'user') {
+        const requested: string[] = Array.isArray(req.body?.userIds)
+          ? (req.body.userIds as unknown[]).map((x) => String(x).trim()).filter(Boolean)
+          : [];
+        const single = req.body?.userId ? String(req.body.userId).trim() : '';
+        const rawSelected: string[] = [...new Set(single ? [...requested, single] : requested)];
+        if (rawSelected.length === 0) {
+          res.status(400).json({ error: 'Sélectionnez au moins un utilisateur cible.' });
+          return;
+        }
+        const knownSet = new Set(knownUserIds);
+        recipientIds = knownSet.size > 0 ? rawSelected.filter((id) => knownSet.has(id)) : rawSelected;
+        if (recipientIds.length === 0) {
+          res.status(404).json({ error: 'Aucun utilisateur valide trouvé dans la sélection.' });
+          return;
+        }
+      } else if (target === 'pro') {
+        recipientIds = knownUserIds.filter((id) => isUserPro(id));
+      } else if (target === 'free') {
+        recipientIds = knownUserIds.filter((id) => !isUserPro(id));
+      } else {
+        recipientIds = knownUserIds;
+      }
+
+      for (const userId of recipientIds) {
+        const created = createNotification({
+          userId,
+          kind: 'admin_announcement',
+          title,
+          message,
+          link,
+        });
+        if (created) sentCount += 1;
+      }
+
+      if (target === 'all') {
+        createGuestNotification({
+          kind: 'admin_announcement',
+          title,
+          message,
+          link,
+        });
+      }
     }
 
     const broadcast = recordAdminBroadcast({
@@ -4812,7 +4856,12 @@ async function startServer() {
   app.get('/api/notifications', async (req, res) => {
     const auth = await resolveAuth(req);
     if (!auth) {
-      res.status(401).json({ error: 'Connexion requise' });
+      const guestNotifs = listGuestNotifications();
+      res.json({
+        notifications: guestNotifs,
+        unreadCount: guestNotifs.length,
+        guest: true,
+      });
       return;
     }
     ensureExpiryWarningNotification(auth.user.id);
@@ -4986,11 +5035,66 @@ async function startServer() {
       expiresAt,
       source: 'admin_manual',
       autoRenew: Boolean(req.body?.autoRenew),
+      replaceExisting: Boolean(req.body?.replaceExisting),
       userEmail: targetEmail,
       username: targetUsername,
       appUrl: resolveAppOrigin(req),
     });
     res.json({ subscription });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // CONFIGURABLE POPUPS (PUBLIC + ADMIN)
+  // ─────────────────────────────────────────────────────────────────────────
+  app.get('/api/popups/active', (_req, res) => {
+    res.json({ popups: listActivePopups() });
+  });
+
+  app.post('/api/popups/:id/track', (req, res) => {
+    const ev = req.body?.event === 'click' ? 'click' : 'impression';
+    trackPopupEvent(req.params.id, ev);
+    res.json({ ok: true });
+  });
+
+  app.get('/api/popups/asset/:filename', (req, res) => {
+    const asset = resolvePopupAssetFile(req.params.filename);
+    if (!asset) {
+      res.status(404).end();
+      return;
+    }
+    res
+      .status(200)
+      .setHeader('content-type', asset.contentType)
+      .setHeader('cache-control', 'public, max-age=86400')
+      .send(fs.readFileSync(asset.filePath));
+  });
+
+  app.get('/api/admin/popups', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    res.json({ popups: listAllPopups() });
+  });
+
+  app.post('/api/admin/popups', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const result = upsertPopup((req.body ?? {}) as Record<string, unknown>);
+    if (result.error || !result.popup) {
+      res.status(400).json({ error: result.error || 'Configuration du popup invalide.' });
+      return;
+    }
+    res.json({ popup: result.popup });
+  });
+
+  app.delete('/api/admin/popups/:id', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const ok = deletePopup(req.params.id);
+    if (!ok) {
+      res.status(404).json({ error: 'Popup introuvable.' });
+      return;
+    }
+    res.json({ ok: true });
   });
 
   // ─────────────────────────────────────────────────────────────────────────

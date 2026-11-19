@@ -391,6 +391,19 @@ export function ProfilePage() {
                     : 'Accès Pro illimité · Couronne dorée et lecteur Pro activés'
                   : 'Passez en Pro pour débloquer le lecteur sans publicité et afficher la couronne Pro.'}
               </p>
+              {isPro && subscription?.queued && subscription.queued.length > 0 && (
+                <div className="mt-1.5 space-y-0.5 text-[11px] text-primary tabular-nums">
+                  {subscription.queued.map((q) => (
+                    <p key={q.id}>
+                      À suivre le {new Date(q.startsAt).toLocaleDateString('fr-FR')} :{' '}
+                      <span className="font-semibold">{q.planName}</span>
+                      {q.expiresAt
+                        ? ` (jusqu’au ${new Date(q.expiresAt).toLocaleDateString('fr-FR')})`
+                        : ' (illimité)'}
+                    </p>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
           <Link
@@ -402,7 +415,7 @@ export function ProfilePage() {
             }`}
           >
             <Crown className="size-4" />
-            <span>{isPro ? 'Gérer / Renouveler' : 'Devenir Pro'}</span>
+            <span>{isPro ? 'Gérer / Prolonger' : 'Devenir Pro'}</span>
           </Link>
         </section>
       )}

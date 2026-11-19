@@ -15,6 +15,7 @@ const NOTIFICATIONS_FILE = path.join(DATA_DIR, 'tapenaka-notifications.json');
 
 interface NotificationsDatabase {
   notifications: NotificationRecord[];
+  guestNotifications?: NotificationRecord[];
   adminBroadcasts?: AdminBroadcastRecord[];
 }
 
@@ -27,6 +28,9 @@ function loadNotificationsDb(): NotificationsDatabase {
       if (parsed && Array.isArray(parsed.notifications)) {
         return {
           notifications: parsed.notifications,
+          guestNotifications: Array.isArray(parsed.guestNotifications)
+            ? parsed.guestNotifications
+            : [],
           adminBroadcasts: Array.isArray(parsed.adminBroadcasts) ? parsed.adminBroadcasts : [],
         };
       }
@@ -34,7 +38,7 @@ function loadNotificationsDb(): NotificationsDatabase {
   } catch {
     // Re-seed if corrupted
   }
-  return { notifications: [], adminBroadcasts: [] };
+  return { notifications: [], guestNotifications: [], adminBroadcasts: [] };
 }
 
 function saveNotificationsDb(state: NotificationsDatabase): void {
@@ -83,6 +87,43 @@ export function createNotification(input: {
   }
   saveNotificationsDb(notificationsDb);
   return record;
+}
+
+export function createGuestNotification(input: {
+  kind: NotificationKind;
+  title: string;
+  message: string;
+  link: string;
+}): NotificationRecord {
+  const record: NotificationRecord = {
+    id: `gntf_${crypto.randomBytes(6).toString('hex')}`,
+    userId: 'guest',
+    audience: 'guest',
+    kind: input.kind,
+    title: input.title.trim().slice(0, 120),
+    message: input.message.trim().slice(0, 400),
+    link: input.link || '/',
+    read: false,
+    createdAt: new Date().toISOString(),
+  };
+  const list = notificationsDb.guestNotifications ?? [];
+  list.unshift(record);
+  notificationsDb.guestNotifications = list.slice(0, 30);
+  saveNotificationsDb(notificationsDb);
+  return record;
+}
+
+export function listGuestNotifications(): NotificationRecord[] {
+  return (notificationsDb.guestNotifications ?? []).slice(0, 30);
+}
+
+export function deleteGuestNotification(notificationId: string): boolean {
+  const list = notificationsDb.guestNotifications ?? [];
+  const next = list.filter((n) => n.id !== notificationId);
+  if (next.length === list.length) return false;
+  notificationsDb.guestNotifications = next;
+  saveNotificationsDb(notificationsDb);
+  return true;
 }
 
 export function recordAdminBroadcast(input: {

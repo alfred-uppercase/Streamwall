@@ -9,6 +9,7 @@ import {
   CreditCard,
   Database,
   Globe,
+  Layers,
   Mail,
   RefreshCw,
   RotateCcw,
@@ -35,6 +36,7 @@ import { AdminBillingTab } from '../components/AdminBillingTab';
 import { AdminUsersTab } from '../components/AdminUsersTab';
 import { AdminNotificationsTab } from '../components/AdminNotificationsTab';
 import { AdminEmailsTab } from '../components/AdminEmailsTab';
+import { AdminPopupsTab } from '../components/AdminPopupsTab';
 import { ProCrownBadge } from '../components/UserAvatar';
 
 const PLAYER_FIELDS: { key: PlayerKey; label: string; hint: string }[] = [
@@ -55,6 +57,7 @@ type AdminTab =
   | 'offers'
   | 'users'
   | 'notifications'
+  | 'popups'
   | 'emails'
   | 'api'
   | 'players'
@@ -65,6 +68,7 @@ const VALID_TABS: AdminTab[] = [
   'offers',
   'users',
   'notifications',
+  'popups',
   'emails',
   'api',
   'players',
@@ -76,6 +80,7 @@ const TAB_TITLE_MAP: Record<AdminTab, string> = {
   offers: 'Administration · Offres & Paiements',
   users: 'Administration · Utilisateurs',
   notifications: 'Administration · Notifications',
+  popups: 'Administration · Popups',
   emails: 'Administration · Emails & Logs',
   api: 'Administration · Configuration & API',
   players: 'Administration · Lecteurs',
@@ -332,6 +337,7 @@ export function AdminPage() {
             ['offers', 'Offres & Paiements', CreditCard],
             ['users', 'Utilisateurs', Users],
             ['notifications', 'Notifications', Bell],
+            ['popups', 'Popups', Layers],
             ['emails', 'Emails & Logs', Mail],
             ['api', 'Configuration & API', Globe],
             ['players', 'Lecteurs', null],
@@ -385,6 +391,9 @@ export function AdminPage() {
           preselectedUserIds={preselectedNotifyUserIds}
         />
       )}
+
+      {/* TAB: CONFIGURABLE POPUPS */}
+      {tab === 'popups' && <AdminPopupsTab />}
 
       {/* TAB: EMAILS, TEMPLATES & MAIL LOGS */}
       {tab === 'emails' && (

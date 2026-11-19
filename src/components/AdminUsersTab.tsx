@@ -880,6 +880,22 @@ export function AdminUsersTab({
                 </span>
               </div>
 
+              {selectedUser.subscription?.queued && selectedUser.subscription.queued.length > 0 && (
+                <div className="rounded-lg border border-primary/30 bg-background/70 px-3 py-2 text-xs space-y-0.5 tabular-nums">
+                  <p className="font-semibold text-primary">
+                    Offre(s) programmée(s) à la suite :
+                  </p>
+                  {selectedUser.subscription.queued.map((q) => (
+                    <p key={q.id} className="text-muted-foreground">
+                      • {q.planName} — démarre le {new Date(q.startsAt).toLocaleDateString('fr-FR')}
+                      {q.expiresAt
+                        ? ` jusqu’au ${new Date(q.expiresAt).toLocaleDateString('fr-FR')}`
+                        : ' (illimité)'}
+                    </p>
+                  ))}
+                </div>
+              )}
+
               <div className="grid gap-3 sm:grid-cols-3">
                 <label className="block text-xs">
                   <span className="mb-1 block text-muted-foreground">Offre</span>

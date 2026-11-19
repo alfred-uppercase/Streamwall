@@ -12,6 +12,7 @@ import {
   type PaymentOrder,
   type PlanTier,
   type PlayerTemplates,
+  type QueuedSubscription,
   type SubscriptionPlan,
   type UserSubscription,
   type UserThemePreference,
@@ -357,9 +358,35 @@ export function getFreePlan(): SubscriptionPlan {
   );
 }
 
+function formatFrDate(isoOrMs: string | number): string {
+  return new Date(isoOrMs).toLocaleDateString('fr-FR');
+}
+
+export function getUserEffectiveProEndMs(sub: UserSubscription | null | undefined): number | null {
+  if (!sub || sub.tier !== 'pro') return null;
+  if (sub.expiresAt === null) return Infinity;
+  let maxMs = new Date(sub.expiresAt).getTime();
+  if (!Number.isFinite(maxMs)) return null;
+  for (const q of sub.queued ?? []) {
+    if (q.expiresAt === null) return Infinity;
+    const qMs = new Date(q.expiresAt).getTime();
+    if (Number.isFinite(qMs) && qMs > maxMs) {
+      maxMs = qMs;
+    }
+  }
+  return maxMs;
+}
+
+export function hasLifetimePro(userId: string): boolean {
+  const sub = getUserSubscription(userId);
+  return getUserEffectiveProEndMs(sub) === Infinity;
+}
+
 /**
- * Checks all stored Pro subscriptions and automatically downgrades expired ones
- * back to Basic (Gratuit). Returns true if any state mutated.
+ * Checks all stored Pro subscriptions:
+ * - If the active offer has expired and queued continuation offers exist, promotes the next queued offer cleanly.
+ * - Otherwise automatically downgrades expired Pro subscriptions back to Basic (Gratuit).
+ * Returns true if any state mutated.
  */
 export function reconcileExpiredSubscriptions(): boolean {
   const now = Date.now();
@@ -370,45 +397,101 @@ export function reconcileExpiredSubscriptions(): boolean {
     if (sub.tier === 'pro' && sub.expiresAt) {
       const expMs = new Date(sub.expiresAt).getTime();
       if (Number.isFinite(expMs) && expMs <= now) {
-        billingDb.subscriptions[userId] = {
-          userId,
-          planId: freePlan.id,
-          planName: freePlan.name,
-          tier: 'free',
-          expiresAt: null,
-          autoRenew: false,
-          source: 'free',
-          status: 'expired',
-          updatedAt: new Date(now).toISOString(),
-        };
-        createNotification({
-          userId,
-          kind: 'pro_expired',
-          title: 'Offre Pro expirée',
-          message: `Votre offre ${sub.planName} est arrivée à expiration. Votre compte est repassé automatiquement en offre Basic (${freePlan.name}).`,
-          link: '/abonnement',
-          dedupKey: `pro_expired:${sub.planId}:${sub.expiresAt}`,
-        });
-        const contact = resolveUserContact(userId);
-        if (contact && isSmtpReady()) {
-          void sendSubscriptionExpiredEmail({
-            to: contact.email,
-            username: contact.username,
-            planName: sub.planName,
-            expiredAt: sub.expiresAt,
-            renewUrl: knownAppUrl ? `${knownAppUrl}/abonnement` : '',
-          });
+        const queue = Array.isArray(sub.queued) ? [...sub.queued] : [];
+        let promoted: QueuedSubscription | null = null;
+
+        while (queue.length > 0) {
+          const candidate = queue.shift()!;
+          if (candidate.expiresAt === null) {
+            promoted = candidate;
+            break;
+          }
+          const candExpMs = new Date(candidate.expiresAt).getTime();
+          if (Number.isFinite(candExpMs) && candExpMs > now) {
+            promoted = candidate;
+            break;
+          }
         }
-        changed = true;
-      } else if (Number.isFinite(expMs) && expMs - now <= 5 * 86_400_000) {
-        const daysLeft = Math.max(1, Math.ceil((expMs - now) / 86_400_000));
+
+        if (promoted) {
+          billingDb.subscriptions[userId] = {
+            userId,
+            planId: promoted.planId,
+            planName: promoted.planName,
+            tier: 'pro',
+            startsAt: promoted.startsAt,
+            expiresAt: promoted.expiresAt,
+            autoRenew: promoted.autoRenew,
+            source: promoted.source,
+            status: 'active',
+            updatedAt: new Date(now).toISOString(),
+            queued: queue,
+          };
+          createNotification({
+            userId,
+            kind: 'pro_activated',
+            title: `Offre ${promoted.planName} activée`,
+            message: promoted.expiresAt
+              ? `Suite automatique de votre abonnement : votre offre ${promoted.planName} a pris le relais jusqu’au ${formatFrDate(promoted.expiresAt)}.`
+              : `Suite automatique de votre abonnement : votre offre ${promoted.planName} (accès illimité) est maintenant active.`,
+            link: '/profil',
+            dedupKey: `pro_promoted:${promoted.id}`,
+          });
+          changed = true;
+        } else {
+          billingDb.subscriptions[userId] = {
+            userId,
+            planId: freePlan.id,
+            planName: freePlan.name,
+            tier: 'free',
+            startsAt: null,
+            expiresAt: null,
+            autoRenew: false,
+            source: 'free',
+            status: 'expired',
+            updatedAt: new Date(now).toISOString(),
+            queued: [],
+          };
+          createNotification({
+            userId,
+            kind: 'pro_expired',
+            title: 'Offre Pro expirée',
+            message: `Votre offre ${sub.planName} est arrivée à expiration. Votre compte est repassé automatiquement en offre Basic (${freePlan.name}).`,
+            link: '/abonnement',
+            dedupKey: `pro_expired:${sub.planId}:${sub.expiresAt}`,
+          });
+          const contact = resolveUserContact(userId);
+          if (contact && isSmtpReady()) {
+            void sendSubscriptionExpiredEmail({
+              to: contact.email,
+              username: contact.username,
+              planName: sub.planName,
+              expiredAt: sub.expiresAt,
+              renewUrl: knownAppUrl ? `${knownAppUrl}/abonnement` : '',
+            });
+          }
+          changed = true;
+        }
+      }
+
+      const activeSub = billingDb.subscriptions[userId];
+      const effectiveEndMs = getUserEffectiveProEndMs(activeSub);
+      if (
+        activeSub.tier === 'pro' &&
+        effectiveEndMs !== null &&
+        Number.isFinite(effectiveEndMs) &&
+        effectiveEndMs > now &&
+        effectiveEndMs - now <= 5 * 86_400_000
+      ) {
+        const daysLeft = Math.max(1, Math.ceil((effectiveEndMs - now) / 86_400_000));
+        const endIso = new Date(effectiveEndMs).toISOString();
         createNotification({
           userId,
           kind: 'pro_expiring_soon',
           title: 'Votre offre Pro expire bientôt',
-          message: `Il reste ${daysLeft} jour${daysLeft > 1 ? 's' : ''} avant l’expiration de votre offre ${sub.planName} (le ${new Date(sub.expiresAt).toLocaleDateString('fr-FR')}).`,
+          message: `Il reste ${daysLeft} jour${daysLeft > 1 ? 's' : ''} avant l’expiration de votre accès Pro (le ${formatFrDate(endIso)}).`,
           link: '/abonnement',
-          dedupKey: `pro_expiring_5d:${sub.planId}:${sub.expiresAt}`,
+          dedupKey: `pro_expiring_5d:${activeSub.planId}:${endIso}`,
         });
       }
     }
@@ -420,23 +503,29 @@ export function reconcileExpiredSubscriptions(): boolean {
 
 export function ensureExpiryWarningNotification(userId: string): void {
   const sub = getUserSubscription(userId);
-  if (sub.tier === 'pro' && sub.expiresAt) {
-    const msLeft = new Date(sub.expiresAt).getTime() - Date.now();
-    if (msLeft > 0 && msLeft <= 5 * 86_400_000) {
-      const daysLeft = Math.max(1, Math.ceil(msLeft / 86_400_000));
-      createNotification({
-        userId,
-        kind: 'pro_expiring_soon',
-        title: 'Votre offre Pro expire bientôt',
-        message: `Il reste ${daysLeft} jour${daysLeft > 1 ? 's' : ''} avant l’expiration de votre offre ${sub.planName} (le ${new Date(sub.expiresAt).toLocaleDateString('fr-FR')}).`,
-        link: '/abonnement',
-        dedupKey: `pro_expiring_5d:${sub.planId}:${sub.expiresAt}`,
-      });
-    }
+  const effectiveEndMs = getUserEffectiveProEndMs(sub);
+  const now = Date.now();
+  if (
+    sub.tier === 'pro' &&
+    effectiveEndMs !== null &&
+    Number.isFinite(effectiveEndMs) &&
+    effectiveEndMs > now &&
+    effectiveEndMs - now <= 5 * 86_400_000
+  ) {
+    const daysLeft = Math.max(1, Math.ceil((effectiveEndMs - now) / 86_400_000));
+    const endIso = new Date(effectiveEndMs).toISOString();
+    createNotification({
+      userId,
+      kind: 'pro_expiring_soon',
+      title: 'Votre offre Pro expire bientôt',
+      message: `Il reste ${daysLeft} jour${daysLeft > 1 ? 's' : ''} avant l’expiration de votre accès Pro (le ${formatFrDate(endIso)}).`,
+      link: '/abonnement',
+      dedupKey: `pro_expiring_5d:${sub.planId}:${endIso}`,
+    });
   }
 }
 
-// Periodic background sweep every 60s so expired Pro users downgrade automatically & 5-day reminders trigger
+// Periodic background sweep every 60s so expired Pro users downgrade/promote automatically & 5-day reminders trigger
 setInterval(() => {
   reconcileExpiredSubscriptions();
 }, 60_000).unref();
@@ -444,7 +533,12 @@ setInterval(() => {
 export function getUserSubscription(userId: string): UserSubscription {
   reconcileExpiredSubscriptions();
   const existing = billingDb.subscriptions[userId];
-  if (existing) return existing;
+  if (existing) {
+    return {
+      ...existing,
+      queued: Array.isArray(existing.queued) ? existing.queued : [],
+    };
+  }
 
   const freePlan = getFreePlan();
   return {
@@ -452,11 +546,13 @@ export function getUserSubscription(userId: string): UserSubscription {
     planId: freePlan.id,
     planName: freePlan.name,
     tier: 'free',
+    startsAt: null,
     expiresAt: null,
     autoRenew: false,
     source: 'free',
     status: 'active',
     updatedAt: freePlan.createdAt,
+    queued: [],
   };
 }
 
@@ -472,6 +568,7 @@ export function assignUserPlan(params: {
   source: UserSubscription['source'];
   autoRenew?: boolean;
   stackDuration?: boolean;
+  replaceExisting?: boolean;
   userEmail?: string;
   username?: string;
   appUrl?: string;
@@ -493,36 +590,106 @@ export function assignUserPlan(params: {
       planId: plan.id,
       planName: plan.name,
       tier: 'free',
+      startsAt: null,
       expiresAt: null,
       autoRenew: false,
       source: params.source,
       status: 'active',
       updatedAt: nowIso,
+      queued: [],
     };
     billingDb.subscriptions[params.userId] = sub;
     saveBillingDb(billingDb);
     return sub;
   }
 
+  const days =
+    params.durationDays !== undefined ? Math.max(0, params.durationDays) : plan.durationDays;
+
+  const current = billingDb.subscriptions[params.userId];
+  const currentActiveEndMs =
+    current?.tier === 'pro'
+      ? current.expiresAt === null
+        ? Infinity
+        : new Date(current.expiresAt).getTime()
+      : null;
+  const hasActivePro =
+    !params.replaceExisting &&
+    params.expiresAt === undefined &&
+    current?.tier === 'pro' &&
+    currentActiveEndMs !== null &&
+    (currentActiveEndMs === Infinity || (Number.isFinite(currentActiveEndMs) && currentActiveEndMs > nowMs));
+
+  // If the member already has an active Pro offer, chain the newly purchased offer right after
+  // the current (or last queued) offer expires — never duplicate or overwrite the active offer.
+  if (hasActivePro && params.stackDuration !== false) {
+    const chainEndMs = getUserEffectiveProEndMs(current);
+    if (chainEndMs === Infinity) {
+      return {
+        ...current,
+        queued: Array.isArray(current.queued) ? current.queued : [],
+      };
+    }
+
+    const startMs = chainEndMs && chainEndMs > nowMs ? chainEndMs : nowMs;
+    const startsAt = new Date(startMs).toISOString();
+    const queuedExpiresAt = days > 0 ? new Date(startMs + days * 86_400_000).toISOString() : null;
+
+    const queuedEntry: QueuedSubscription = {
+      id: `qsub_${crypto.randomBytes(5).toString('hex')}`,
+      planId: plan.id,
+      planName: plan.name,
+      tier: 'pro',
+      startsAt,
+      expiresAt: queuedExpiresAt,
+      durationDays: days,
+      autoRenew: params.autoRenew ?? plan.autoRenew,
+      source: params.source,
+      createdAt: nowIso,
+    };
+
+    const nextQueued = [...(Array.isArray(current.queued) ? current.queued : []), queuedEntry];
+    const updatedSub: UserSubscription = {
+      ...current,
+      autoRenew: params.autoRenew ?? current.autoRenew,
+      updatedAt: nowIso,
+      queued: nextQueued,
+    };
+
+    billingDb.subscriptions[params.userId] = updatedSub;
+    saveBillingDb(billingDb);
+
+    createNotification({
+      userId: params.userId,
+      kind: 'pro_activated',
+      title: `Offre ${plan.name} programmée à la suite`,
+      message: queuedExpiresAt
+        ? `Votre offre actuelle (${current.planName}) reste active jusqu’au ${formatFrDate(current.expiresAt!)}. ${plan.name} démarrera automatiquement le ${formatFrDate(startsAt)} jusqu’au ${formatFrDate(queuedExpiresAt)}.`
+        : `Votre offre actuelle (${current.planName}) reste active jusqu’au ${formatFrDate(current.expiresAt!)}. ${plan.name} (accès illimité) prendra le relais le ${formatFrDate(startsAt)}.`,
+      link: '/profil',
+      dedupKey: `pro_queued:${queuedEntry.id}`,
+    });
+
+    if (contact && isSmtpReady()) {
+      void sendSubscriptionActivatedEmail({
+        to: contact.email,
+        username: contact.username,
+        planName: `${plan.name} (à partir du ${formatFrDate(startsAt)})`,
+        expiresAt: queuedExpiresAt,
+        appUrl: params.appUrl || knownAppUrl,
+      });
+    }
+
+    return updatedSub;
+  }
+
   let resolvedExpiresAt: string | null = null;
   if (params.expiresAt !== undefined) {
     resolvedExpiresAt = params.expiresAt;
+  } else if (days > 0) {
+    resolvedExpiresAt = new Date(nowMs + days * 86_400_000).toISOString();
   } else {
-    const days =
-      params.durationDays !== undefined ? Math.max(0, params.durationDays) : plan.durationDays;
-    if (days > 0) {
-      const current = billingDb.subscriptions[params.userId];
-      const baseMs =
-        params.stackDuration &&
-        current?.tier === 'pro' &&
-        current.expiresAt &&
-        new Date(current.expiresAt).getTime() > nowMs
-          ? new Date(current.expiresAt).getTime()
-          : nowMs;
-      resolvedExpiresAt = new Date(baseMs + days * 86_400_000).toISOString();
-    } else {
-      resolvedExpiresAt = null;
-    }
+    resolvedExpiresAt = null;
   }
 
   const sub: UserSubscription = {
@@ -530,11 +697,13 @@ export function assignUserPlan(params: {
     planId: plan.id,
     planName: plan.name,
     tier: 'pro',
+    startsAt: nowIso,
     expiresAt: resolvedExpiresAt,
     autoRenew: params.autoRenew ?? plan.autoRenew,
     source: params.source,
     status: 'active',
     updatedAt: nowIso,
+    queued: [],
   };
 
   billingDb.subscriptions[params.userId] = sub;
@@ -545,7 +714,7 @@ export function assignUserPlan(params: {
     kind: 'pro_activated',
     title: `Offre ${plan.name} activée`,
     message: resolvedExpiresAt
-      ? `Votre accès Pro est désormais actif jusqu’au ${new Date(resolvedExpiresAt).toLocaleDateString('fr-FR')}. Votre couronne dorée et le lecteur dédié sont débloqués.`
+      ? `Votre accès Pro est désormais actif jusqu’au ${formatFrDate(resolvedExpiresAt)}. Votre couronne dorée et le lecteur dédié sont débloqués.`
       : 'Votre accès Pro illimité est désormais actif. Votre couronne dorée et le lecteur dédié sont débloqués.',
     link: '/profil',
     dedupKey: `pro_activated:${nowIso}`,
@@ -828,6 +997,10 @@ export async function createCryptoGateOrder(params: {
     };
   }
 
+  if (hasLifetimePro(params.userId)) {
+    return { error: 'Vous bénéficiez déjà d’un accès Pro illimité à vie.' };
+  }
+
   const plan = getPlanById(params.planId);
   if (!plan || !plan.active || plan.tier !== 'pro' || plan.price <= 0) {
     return { error: 'Offre Pro invalide ou inactive.' };
@@ -994,6 +1167,9 @@ export function createManualOrder(params: {
 }): { order?: PaymentOrder; error?: string } {
   if (!billingDb.config.manualPaymentEnabled) {
     return { error: 'Le paiement manuel est actuellement désactivé.' };
+  }
+  if (hasLifetimePro(params.userId)) {
+    return { error: 'Vous bénéficiez déjà d’un accès Pro illimité à vie.' };
   }
   const plan = getPlanById(params.planId);
   if (!plan || !plan.active || plan.tier !== 'pro') {

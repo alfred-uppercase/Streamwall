@@ -145,16 +145,31 @@ export interface SubscriptionPlan {
   updatedAt: string;
 }
 
+export interface QueuedSubscription {
+  id: string;
+  planId: string;
+  planName: string;
+  tier: 'pro';
+  startsAt: string;
+  expiresAt: string | null;
+  durationDays: number;
+  autoRenew: boolean;
+  source: UserSubscription['source'];
+  createdAt: string;
+}
+
 export interface UserSubscription {
   userId: string;
   planId: string;
   planName: string;
   tier: PlanTier;
+  startsAt?: string | null;
   expiresAt: string | null;
   autoRenew: boolean;
   source: 'free' | 'admin_manual' | 'crypto_gate' | 'manual_payment';
   status: 'active' | 'expired';
   updatedAt: string;
+  queued?: QueuedSubscription[];
 }
 
 export interface PaymentOrder {
@@ -286,7 +301,7 @@ export type NotificationKind =
   | 'pro_expired'
   | 'admin_announcement';
 
-export type AdminNotificationTarget = 'all' | 'pro' | 'free' | 'user';
+export type AdminNotificationTarget = 'all' | 'pro' | 'free' | 'guest' | 'user';
 
 export interface AdminBroadcastRecord {
   id: string;
@@ -306,6 +321,7 @@ export interface SiteConfig {
 export interface NotificationRecord {
   id: string;
   userId: string;
+  audience?: 'member' | 'guest';
   kind: NotificationKind;
   title: string;
   message: string;
@@ -313,6 +329,76 @@ export interface NotificationRecord {
   read: boolean;
   dedupKey?: string;
   createdAt: string;
+}
+
+export type PopupContentMode = 'text' | 'image';
+
+export type PopupTriggerType =
+  | 'after_delay'
+  | 'on_scroll'
+  | 'on_exit_intent'
+  | 'after_page_views'
+  | 'on_player_open'
+  | 'immediate';
+
+export type PopupPageScope =
+  | 'all'
+  | 'home'
+  | 'catalogue'
+  | 'detail'
+  | 'pricing'
+  | 'custom';
+
+export type PopupAudience =
+  | 'all'
+  | 'guests'
+  | 'free'
+  | 'guests_and_free'
+  | 'pro';
+
+export type PopupDeviceTarget = 'all' | 'desktop' | 'mobile';
+
+export type PopupFrequency =
+  | 'once_per_week'
+  | 'once_per_day'
+  | 'once_per_session'
+  | 'custom_days'
+  | 'once_ever';
+
+export interface PopupConfig {
+  id: string;
+  name: string;
+  enabled: boolean;
+  mode: PopupContentMode;
+  title: string;
+  bodyText: string;
+  buttonLabel: string;
+  buttonUrl: string;
+  buttonNewTab: boolean;
+  imageUrl: string;
+  imageAlt: string;
+  imageLink: string;
+  imageNewTab: boolean;
+  triggerType: PopupTriggerType;
+  delaySeconds: number;
+  scrollPercent: number;
+  minPageViews: number;
+  pageScope: PopupPageScope;
+  customPaths: string;
+  excludePaths: string;
+  audience: PopupAudience;
+  deviceTarget: PopupDeviceTarget;
+  frequency: PopupFrequency;
+  customIntervalDays: number;
+  closeOnBackdrop: boolean;
+  autoCloseSeconds: number;
+  priority: number;
+  startAt: string | null;
+  endAt: string | null;
+  impressions: number;
+  clicks: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface UserProfile {

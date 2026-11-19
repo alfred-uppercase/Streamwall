@@ -3,9 +3,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Check,
   Crown,
+  Globe,
   Megaphone,
   Search,
   Send,
+  Trash2,
   UserCheck,
   UserRound,
   Users,
@@ -17,9 +19,10 @@ import { api } from '../lib/client';
 import { ProCrownBadge, UserAvatar } from './UserAvatar';
 
 const TARGET_LABELS: Record<AdminNotificationTarget, string> = {
-  all: 'Tous les utilisateurs',
+  all: 'Tous (Membres & Invités)',
   pro: 'Utilisateurs Pro',
   free: 'Utilisateurs Gratuit',
+  guest: 'Visiteurs invités',
   user: 'Utilisateur(s) spécifique(s)',
 };
 
@@ -68,12 +71,26 @@ export function AdminNotificationsTab({
       void queryClient.invalidateQueries({ queryKey: ['admin-notifications-history'] });
       void queryClient.invalidateQueries({ queryKey: ['notifications'] });
       toast.success(
-        `Notification envoyée à ${res.sentCount} destinataire${res.sentCount > 1 ? 's' : ''}.`
+        target === 'guest'
+          ? 'Notification publiée pour tous les visiteurs invités.'
+          : target === 'all'
+            ? `Notification envoyée à ${res.sentCount} membre${res.sentCount > 1 ? 's' : ''} + visiteurs invités.`
+            : `Notification envoyée à ${res.sentCount} destinataire${res.sentCount > 1 ? 's' : ''}.`
       );
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Échec de l'envoi");
     },
+  });
+
+  const deleteGuestNotifMutation = useMutation({
+    mutationFn: (id: string) => api.adminDeleteGuestNotification(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-notifications-history'] });
+      void queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      toast.success('Notification invité supprimée.');
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : 'Suppression impossible'),
   });
 
   const proCount = useMemo(() => users.filter((u) => u.isPro).length, [users]);
@@ -97,7 +114,11 @@ export function AdminNotificationsTab({
         ? proCount
         : target === 'free'
           ? freeCount
-          : selectedUserIds.length;
+          : target === 'guest'
+            ? 1
+            : selectedUserIds.length;
+
+  const canSendTarget = target === 'all' || target === 'guest' || recipientCountPreview > 0;
 
   const toggleUser = (id: string) => {
     setSelectedUserIds((prev) =>
@@ -106,6 +127,7 @@ export function AdminNotificationsTab({
   };
 
   const broadcasts = historyQuery.data?.broadcasts ?? [];
+  const guestNotifications = historyQuery.data?.guestNotifications ?? [];
 
   return (
     <div className="grid gap-6 lg:grid-cols-3">
@@ -128,13 +150,13 @@ export function AdminNotificationsTab({
         {/* Target Audience Selector */}
         <div>
           <p className="mb-2.5 text-xs font-medium text-muted-foreground">Destinataires</p>
-          <div className="grid gap-2.5 sm:grid-cols-2">
+          <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
             {(
               [
                 {
                   id: 'all',
-                  label: 'Tous les utilisateurs',
-                  count: `${users.length} membre${users.length > 1 ? 's' : ''}`,
+                  label: 'Tous (Membres & Invités)',
+                  count: `${users.length} membre${users.length > 1 ? 's' : ''} + invités`,
                   Icon: Users,
                 },
                 {
@@ -148,6 +170,12 @@ export function AdminNotificationsTab({
                   label: 'Utilisateurs Gratuit',
                   count: `${freeCount} membre${freeCount > 1 ? 's' : ''} Basic`,
                   Icon: UserRound,
+                },
+                {
+                  id: 'guest',
+                  label: 'Visiteurs invités',
+                  count: 'Non connectés (tous)',
+                  Icon: Globe,
                 },
                 {
                   id: 'user',
@@ -363,7 +391,7 @@ export function AdminNotificationsTab({
                 sendMutation.isPending ||
                 !title.trim() ||
                 !message.trim() ||
-                recipientCountPreview === 0
+                !canSendTarget
               }
               className="inline-flex items-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap"
             >
@@ -371,55 +399,108 @@ export function AdminNotificationsTab({
               <span>
                 {sendMutation.isPending
                   ? 'Envoi en cours…'
-                  : `Envoyer la notification (${recipientCountPreview} destinataire${
-                      recipientCountPreview > 1 ? 's' : ''
-                    })`}
+                  : target === 'guest'
+                    ? 'Envoyer aux visiteurs invités'
+                    : target === 'all'
+                      ? `Envoyer à tous (${users.length} membre${users.length > 1 ? 's' : ''} + invités)`
+                      : `Envoyer la notification (${recipientCountPreview} destinataire${
+                          recipientCountPreview > 1 ? 's' : ''
+                        })`}
               </span>
             </button>
           </div>
         </form>
       </section>
 
-      {/* Sent Broadcast History */}
-      <section className="rounded-xl border border-border bg-card p-6 space-y-4">
-        <div>
-          <h3 className="font-display text-lg font-semibold text-foreground">
-            Historique des envois
-          </h3>
-          <p className="text-xs text-muted-foreground">
-            Dernières notifications diffusées depuis la console.
-          </p>
-        </div>
+      {/* Sent Broadcast History & Active Guest Notifications */}
+      <div className="space-y-6">
+        <section className="rounded-xl border border-border bg-card p-6 space-y-4">
+          <div>
+            <h3 className="font-display text-lg font-semibold text-foreground">
+              Notifications invités actives ({guestNotifications.length})
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Visibles par les visiteurs non connectés dans la cloche du header.
+            </p>
+          </div>
 
-        {broadcasts.length === 0 ? (
-          <p className="rounded-lg border border-border bg-background/50 p-5 text-center text-xs text-muted-foreground">
-            Aucune notification envoyée pour le moment.
-          </p>
-        ) : (
-          <ul className="max-h-[34rem] space-y-2.5 overflow-y-auto pr-1">
-            {broadcasts.map((b) => (
-              <li
-                key={b.id}
-                className="rounded-lg border border-border bg-background p-3.5 space-y-1.5"
-              >
-                <div className="flex items-center justify-between gap-2 text-[11px]">
-                  <span className="font-semibold text-primary">
-                    {TARGET_LABELS[b.target]} ({b.recipientCount})
-                  </span>
-                  <span className="text-muted-foreground tabular-nums">
-                    {new Date(b.createdAt).toLocaleString('fr-FR', {
-                      dateStyle: 'short',
-                      timeStyle: 'short',
-                    })}
-                  </span>
-                </div>
-                <p className="text-xs font-semibold text-foreground">{b.title}</p>
-                <p className="text-xs leading-snug text-muted-foreground">{b.message}</p>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+          {guestNotifications.length === 0 ? (
+            <p className="rounded-lg border border-border bg-background/50 p-4 text-center text-xs text-muted-foreground">
+              Aucune notification invité active.
+            </p>
+          ) : (
+            <ul className="max-h-56 space-y-2 overflow-y-auto pr-1">
+              {guestNotifications.map((gn) => (
+                <li
+                  key={gn.id}
+                  className="flex items-start justify-between gap-2.5 rounded-lg border border-border bg-background p-3"
+                >
+                  <div className="min-w-0 space-y-0.5">
+                    <p className="truncate text-xs font-semibold text-foreground">{gn.title}</p>
+                    <p className="line-clamp-2 text-xs text-muted-foreground">{gn.message}</p>
+                    <p className="text-[10px] text-muted-foreground tabular-nums">
+                      {new Date(gn.createdAt).toLocaleString('fr-FR', {
+                        dateStyle: 'short',
+                        timeStyle: 'short',
+                      })}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label={`Supprimer ${gn.title}`}
+                    disabled={deleteGuestNotifMutation.isPending}
+                    onClick={() => deleteGuestNotifMutation.mutate(gn.id)}
+                    className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-destructive"
+                  >
+                    <Trash2 className="size-3.5" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <section className="rounded-xl border border-border bg-card p-6 space-y-4">
+          <div>
+            <h3 className="font-display text-lg font-semibold text-foreground">
+              Historique des envois
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Dernières notifications diffusées depuis la console.
+            </p>
+          </div>
+
+          {broadcasts.length === 0 ? (
+            <p className="rounded-lg border border-border bg-background/50 p-5 text-center text-xs text-muted-foreground">
+              Aucune notification envoyée pour le moment.
+            </p>
+          ) : (
+            <ul className="max-h-80 space-y-2.5 overflow-y-auto pr-1">
+              {broadcasts.map((b) => (
+                <li
+                  key={b.id}
+                  className="rounded-lg border border-border bg-background p-3.5 space-y-1.5"
+                >
+                  <div className="flex items-center justify-between gap-2 text-[11px]">
+                    <span className="font-semibold text-primary">
+                      {TARGET_LABELS[b.target]}
+                      {b.target !== 'guest' ? ` (${b.recipientCount})` : ''}
+                    </span>
+                    <span className="text-muted-foreground tabular-nums">
+                      {new Date(b.createdAt).toLocaleString('fr-FR', {
+                        dateStyle: 'short',
+                        timeStyle: 'short',
+                      })}
+                    </span>
+                  </div>
+                  <p className="text-xs font-semibold text-foreground">{b.title}</p>
+                  <p className="text-xs leading-snug text-muted-foreground">{b.message}</p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </div>
     </div>
   );
 }

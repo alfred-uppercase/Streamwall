@@ -231,6 +231,7 @@ export function DetailPage() {
           void queryClient.invalidateQueries({ queryKey: ['home'] });
         }
         setModal('watch');
+        window.dispatchEvent(new CustomEvent('tapenaka:player-opened'));
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Impossible d'ouvrir le lecteur.");
       } finally {

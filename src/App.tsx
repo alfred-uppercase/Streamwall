@@ -24,6 +24,7 @@ import { PricingPage } from './pages/PricingPage';
 import { AuthPage, ResetPasswordPage } from './pages/AuthPage';
 import { AnalyticsTracker } from './components/AnalyticsTracker';
 import { OfflineIndicator } from './components/PWAInstallButton';
+import { PopupManager } from './components/PopupManager';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -75,6 +76,7 @@ function AppShell() {
       <ScrollToTop />
       <AnalyticsTracker />
       <OfflineIndicator />
+      <PopupManager />
       <Navbar />
       <div className="flex-1">
         <Routes>

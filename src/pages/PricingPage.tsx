@@ -128,6 +128,20 @@ export function PricingPage() {
     }
   }, [plans, selectedPlanId]);
 
+  const hasLifetimeAlready = Boolean(
+    subscription?.tier === 'pro' &&
+      (subscription.expiresAt === null ||
+        subscription.queued?.some((q) => q.expiresAt === null))
+  );
+  const queuedOffers = subscription?.queued ?? [];
+  const lastQueued = queuedOffers.length > 0 ? queuedOffers[queuedOffers.length - 1] : null;
+  const effectiveProEndIso =
+    subscription?.tier === 'pro'
+      ? lastQueued
+        ? lastQueued.expiresAt
+        : subscription.expiresAt
+      : null;
+
   useEffect(() => {
     if (subscription?.tier === 'pro' && !isPro) {
       void refreshUser();
@@ -212,6 +226,13 @@ export function PricingPage() {
                     : `${subscription.planName} · Accès illimité`
                   : `Offre actuelle : ${subscription?.planName || 'Gratuit (Basic)'}`}
               </p>
+              {queuedOffers.length > 0 && (
+                <p className="mt-0.5 text-[11px] font-medium text-primary tabular-nums">
+                  À suivre : {queuedOffers[0].planName} dès le{' '}
+                  {new Date(queuedOffers[0].startsAt).toLocaleDateString('fr-FR')}
+                  {queuedOffers.length > 1 ? ` (+${queuedOffers.length - 1})` : ''}
+                </p>
+              )}
             </div>
           </div>
         )}
@@ -345,6 +366,15 @@ export function PricingPage() {
                       >
                         <span>Se connecter pour activer Pro</span>
                       </Link>
+                    ) : hasLifetimeAlready ? (
+                      <button
+                        type="button"
+                        disabled
+                        className="flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-background px-4 py-2.5 text-sm font-semibold text-muted-foreground opacity-75 whitespace-nowrap"
+                      >
+                        <Crown className="size-4 text-amber-400" />
+                        <span>Accès à vie déjà actif</span>
+                      </button>
                     ) : (
                       <button
                         type="button"
@@ -361,10 +391,12 @@ export function PricingPage() {
                         <Crown className="size-4" />
                         <span>
                           {isCurrentPlan
-                            ? 'Prolonger cette offre Pro'
-                            : isSelected
-                              ? 'Offre sélectionnée'
-                              : 'Choisir cette offre Pro'}
+                            ? 'Prolonger après expiration'
+                            : isPro
+                              ? 'Continuer avec cette offre'
+                              : isSelected
+                                ? 'Offre sélectionnée'
+                                : 'Choisir cette offre Pro'}
                         </span>
                       </button>
                     )}
@@ -379,18 +411,49 @@ export function PricingPage() {
       {/* Checkout Drawer / Panel for Signed-In Member */}
       {isMember && selectedPlan && selectedPlan.tier === 'pro' && config && (
         <section className="rounded-xl border border-border bg-card p-6 space-y-6">
-          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-4">
-            <div>
-              <h2 className="font-display text-xl font-bold text-foreground">
-                Finaliser l’abonnement : {selectedPlan.name}
-              </h2>
-              <p className="mt-0.5 text-sm text-muted-foreground tabular-nums">
-                Montant : <strong className="text-foreground">{formatPrice(selectedPlan.price, selectedPlan.currency)}</strong> ·{' '}
-                {selectedPlan.durationDays > 0
-                  ? `Validité ${selectedPlan.durationDays} jours (retour automatique en Basic après expiration)`
-                  : 'Validité illimitée'}
-              </p>
+          {hasLifetimeAlready ? (
+            <div className="flex items-center gap-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-4 text-sm text-emerald-300">
+              <CheckCircle2 className="size-5 shrink-0" />
+              <span>
+                Vous disposez déjà d’un abonnement Pro illimité à vie. Aucun nouvel achat n’est nécessaire.
+              </span>
             </div>
+          ) : (
+            <>
+              {isPro && effectiveProEndIso && (
+                <div className="flex items-start gap-3 rounded-lg border border-primary/35 bg-primary/10 p-4 text-xs leading-relaxed text-foreground">
+                  <Clock className="mt-0.5 size-4 shrink-0 text-primary" />
+                  <div>
+                    <p className="font-semibold">
+                      Prolongation automatique sans doublon
+                    </p>
+                    <p className="mt-0.5 text-muted-foreground tabular-nums">
+                      Votre offre actuelle (<strong>{subscription?.planName}</strong>) reste active jusqu’au{' '}
+                      <strong>{new Date(subscription!.expiresAt!).toLocaleDateString('fr-FR')}</strong>.
+                      Si vous souscrivez à <strong>{selectedPlan.name}</strong> aujourd’hui, elle démarrera automatiquement le{' '}
+                      <strong>{new Date(effectiveProEndIso).toLocaleDateString('fr-FR')}</strong>
+                      {selectedPlan.durationDays > 0
+                        ? ` jusqu’au ${new Date(
+                            new Date(effectiveProEndIso).getTime() + selectedPlan.durationDays * 86_400_000
+                          ).toLocaleDateString('fr-FR')}`
+                        : ' (accès illimité)'}
+                      .
+                    </p>
+                  </div>
+                </div>
+              )}
+              <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-4">
+                <div>
+                  <h2 className="font-display text-xl font-bold text-foreground">
+                    Finaliser l’abonnement : {selectedPlan.name}
+                  </h2>
+                  <p className="mt-0.5 text-sm text-muted-foreground tabular-nums">
+                    Montant : <strong className="text-foreground">{formatPrice(selectedPlan.price, selectedPlan.currency)}</strong> ·{' '}
+                    {selectedPlan.durationDays > 0
+                      ? `Validité ${selectedPlan.durationDays} jours (retour automatique en Basic après expiration)`
+                      : 'Validité illimitée'}
+                  </p>
+                </div>
 
             <div
               role="tablist"
@@ -559,6 +622,8 @@ export function PricingPage() {
                 </span>
               </button>
             </form>
+          )}
+            </>
           )}
         </section>
       )}

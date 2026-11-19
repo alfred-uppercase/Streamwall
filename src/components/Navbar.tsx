@@ -39,6 +39,27 @@ function renderNotificationIcon(kind: NotificationRecord['kind']) {
   }
 }
 
+const GUEST_READ_STORAGE_KEY = 'tapenaka_guest_notif_read_v1';
+const GUEST_CLEARED_STORAGE_KEY = 'tapenaka_guest_notif_cleared_v1';
+
+function readIdList(key: string): string[] {
+  try {
+    const raw = localStorage.getItem(key);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeIdList(key: string, ids: string[]): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(ids.slice(-100)));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
 export function Navbar() {
   const { user, isMember, isAdmin, isPro } = useAuth();
   const { siteName } = useSiteConfig();
@@ -49,6 +70,12 @@ export function Navbar() {
 
   const [notifOpen, setNotifOpen] = useState(false);
   const notifContainerRef = useRef<HTMLDivElement>(null);
+  const [guestReadIds, setGuestReadIds] = useState<string[]>(() =>
+    readIdList(GUEST_READ_STORAGE_KEY)
+  );
+  const [guestClearedIds, setGuestClearedIds] = useState<string[]>(() =>
+    readIdList(GUEST_CLEARED_STORAGE_KEY)
+  );
 
   const billingPlansQuery = useQuery({
     queryKey: ['billing-plans'],
@@ -59,7 +86,6 @@ export function Navbar() {
   const notificationsQuery = useQuery({
     queryKey: ['notifications', user?.id ?? 'guest'],
     queryFn: () => api.notifications(),
-    enabled: isMember,
     refetchInterval: 30_000,
   });
 
@@ -112,8 +138,42 @@ export function Navbar() {
   const showProMenu =
     Boolean(billingPlansQuery.data?.config?.proOffersMenuVisible) && hasActiveProPlan;
 
-  const notifications = notificationsQuery.data?.notifications ?? [];
-  const unreadCount = notificationsQuery.data?.unreadCount ?? 0;
+  const rawNotifications = notificationsQuery.data?.notifications ?? [];
+  const notifications = isMember
+    ? rawNotifications
+    : rawNotifications
+        .filter((n) => !guestClearedIds.includes(n.id))
+        .map((n) => ({ ...n, read: guestReadIds.includes(n.id) }));
+  const unreadCount = isMember
+    ? (notificationsQuery.data?.unreadCount ?? 0)
+    : notifications.filter((n) => !n.read).length;
+
+  const markGuestRead = (id: string) => {
+    setGuestReadIds((prev) => {
+      if (prev.includes(id)) return prev;
+      const next = [...prev, id];
+      writeIdList(GUEST_READ_STORAGE_KEY, next);
+      return next;
+    });
+  };
+
+  const markAllGuestRead = () => {
+    const allIds = notifications.map((n) => n.id);
+    setGuestReadIds((prev) => {
+      const next = [...new Set([...prev, ...allIds])];
+      writeIdList(GUEST_READ_STORAGE_KEY, next);
+      return next;
+    });
+  };
+
+  const clearAllGuest = () => {
+    const allIds = notifications.map((n) => n.id);
+    setGuestClearedIds((prev) => {
+      const next = [...new Set([...prev, ...allIds])];
+      writeIdList(GUEST_CLEARED_STORAGE_KEY, next);
+      return next;
+    });
+  };
 
   const desktopNavItems = [
     { to: '/catalogue', label: 'Catalogue', icon: LayoutGrid, exact: false },
@@ -183,122 +243,136 @@ export function Navbar() {
             })}
           </nav>
 
-          {/* Zone 3: Right Icons — PWA Install, Notifications (members), Loupe (Catalogue) & User Icon */}
+          {/* Zone 3: Right Icons — PWA Install, Notifications (members & guests), Loupe (Catalogue) & User Icon */}
           <div className="flex items-center gap-2 shrink-0">
             <PWAInstallButton compact />
-            {isMember && (
-              <div ref={notifContainerRef} className="relative">
-                <button
-                  type="button"
-                  aria-label="Notifications"
-                  aria-expanded={notifOpen}
-                  title="Notifications"
-                  onClick={() => setNotifOpen((prev) => !prev)}
-                  className="relative inline-flex size-10 items-center justify-center rounded-full border border-border bg-card text-foreground transition-colors hover:bg-accent hover:text-primary"
-                >
-                  <Bell className="size-4.5" />
-                  {unreadCount > 0 && (
-                    <span className="absolute -top-1 -right-1 grid min-w-5 h-5 place-items-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground tabular-nums">
-                      {unreadCount > 99 ? '99+' : unreadCount}
-                    </span>
-                  )}
-                </button>
-
-                {notifOpen && (
-                  <div
-                    role="dialog"
-                    aria-label="Centre de notifications"
-                    className="fixed inset-x-3 top-16 z-50 overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-2xl sm:absolute sm:inset-auto sm:right-0 sm:top-12 sm:w-96"
-                  >
-                    <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
-                      <div>
-                        <h2 className="font-display text-sm font-semibold text-foreground">
-                          Notifications
-                        </h2>
-                        <p className="text-[11px] text-muted-foreground tabular-nums">
-                          {unreadCount > 0
-                            ? `${unreadCount} non lue${unreadCount > 1 ? 's' : ''}`
-                            : 'Toutes lues'}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        {unreadCount > 0 && (
-                          <button
-                            type="button"
-                            onClick={() => markAllReadMutation.mutate()}
-                            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-primary hover:bg-accent whitespace-nowrap"
-                          >
-                            <CheckCheck className="size-3.5" />
-                            <span>Tout lire</span>
-                          </button>
-                        )}
-                        {notifications.length > 0 && (
-                          <button
-                            type="button"
-                            aria-label="Effacer les notifications"
-                            onClick={() => clearNotifMutation.mutate()}
-                            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-destructive whitespace-nowrap"
-                          >
-                            <Trash2 className="size-3.5" />
-                            <span>Effacer</span>
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {notifications.length === 0 ? (
-                      <div className="px-4 py-8 text-center text-xs text-muted-foreground">
-                        Aucune notification pour le moment. Vous serez alerté des réponses à vos commentaires, mentions et changements d’offre Pro.
-                      </div>
-                    ) : (
-                      <ul className="max-h-80 divide-y divide-border overflow-y-auto">
-                        {notifications.map((n) => (
-                          <li key={n.id}>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (!n.read) markReadMutation.mutate(n.id);
-                                setNotifOpen(false);
-                                navigate(n.link || '/');
-                              }}
-                              className={`flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-accent/70 ${
-                                !n.read ? 'bg-primary/5' : ''
-                              }`}
-                            >
-                              <div className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-lg border border-border bg-background">
-                                {renderNotificationIcon(n.kind)}
-                              </div>
-                              <div className="min-w-0 flex-1 space-y-0.5">
-                                <div className="flex items-center justify-between gap-2">
-                                  <p className="truncate text-xs font-semibold text-foreground">
-                                    {n.title}
-                                  </p>
-                                  {!n.read && (
-                                    <span
-                                      aria-label="Non lu"
-                                      className="size-2 shrink-0 rounded-full bg-primary"
-                                    />
-                                  )}
-                                </div>
-                                <p className="line-clamp-2 text-xs leading-snug text-muted-foreground">
-                                  {n.message}
-                                </p>
-                                <p className="text-[10px] text-muted-foreground/80 tabular-nums">
-                                  {new Date(n.createdAt).toLocaleString('fr-FR', {
-                                    dateStyle: 'short',
-                                    timeStyle: 'short',
-                                  })}
-                                </p>
-                              </div>
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
+            <div ref={notifContainerRef} className="relative">
+              <button
+                type="button"
+                aria-label="Notifications"
+                aria-expanded={notifOpen}
+                title="Notifications"
+                onClick={() => setNotifOpen((prev) => !prev)}
+                className="relative inline-flex size-10 items-center justify-center rounded-full border border-border bg-card text-foreground transition-colors hover:bg-accent hover:text-primary"
+              >
+                <Bell className="size-4.5" />
+                {unreadCount > 0 && (
+                  <span className="absolute -top-1 -right-1 grid min-w-5 h-5 place-items-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground tabular-nums">
+                    {unreadCount > 99 ? '99+' : unreadCount}
+                  </span>
                 )}
-              </div>
-            )}
+              </button>
+
+              {notifOpen && (
+                <div
+                  role="dialog"
+                  aria-label="Centre de notifications"
+                  className="fixed inset-x-3 top-16 z-50 overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-2xl sm:absolute sm:inset-auto sm:right-0 sm:top-12 sm:w-96"
+                >
+                  <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
+                    <div>
+                      <h2 className="font-display text-sm font-semibold text-foreground">
+                        Notifications
+                      </h2>
+                      <p className="text-[11px] text-muted-foreground tabular-nums">
+                        {unreadCount > 0
+                          ? `${unreadCount} non lue${unreadCount > 1 ? 's' : ''}`
+                          : 'Toutes lues'}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {unreadCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isMember) markAllReadMutation.mutate();
+                            else markAllGuestRead();
+                          }}
+                          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-primary hover:bg-accent whitespace-nowrap"
+                        >
+                          <CheckCheck className="size-3.5" />
+                          <span>Tout lire</span>
+                        </button>
+                      )}
+                      {notifications.length > 0 && (
+                        <button
+                          type="button"
+                          aria-label="Effacer les notifications"
+                          onClick={() => {
+                            if (isMember) clearNotifMutation.mutate();
+                            else clearAllGuest();
+                          }}
+                          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-destructive whitespace-nowrap"
+                        >
+                          <Trash2 className="size-3.5" />
+                          <span>Effacer</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {notifications.length === 0 ? (
+                    <div className="px-4 py-8 text-center text-xs text-muted-foreground">
+                      {isMember
+                        ? 'Aucune notification pour le moment. Vous serez alerté des réponses à vos commentaires, mentions et changements d’offre Pro.'
+                        : 'Aucune notification pour le moment. Les annonces et nouveautés importantes apparaîtront ici.'}
+                    </div>
+                  ) : (
+                    <ul className="max-h-80 divide-y divide-border overflow-y-auto">
+                      {notifications.map((n) => (
+                        <li key={n.id}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!n.read) {
+                                if (isMember) markReadMutation.mutate(n.id);
+                                else markGuestRead(n.id);
+                              }
+                              setNotifOpen(false);
+                              const targetLink = n.link || '/';
+                              if (/^https?:\/\//i.test(targetLink)) {
+                                window.open(targetLink, '_blank', 'noopener,noreferrer');
+                              } else {
+                                navigate(targetLink);
+                              }
+                            }}
+                            className={`flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-accent/70 ${
+                              !n.read ? 'bg-primary/5' : ''
+                            }`}
+                          >
+                            <div className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-lg border border-border bg-background">
+                              {renderNotificationIcon(n.kind)}
+                            </div>
+                            <div className="min-w-0 flex-1 space-y-0.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="truncate text-xs font-semibold text-foreground">
+                                  {n.title}
+                                </p>
+                                {!n.read && (
+                                  <span
+                                    aria-label="Non lu"
+                                    className="size-2 shrink-0 rounded-full bg-primary"
+                                  />
+                                )}
+                              </div>
+                              <p className="line-clamp-2 text-xs leading-snug text-muted-foreground">
+                                {n.message}
+                              </p>
+                              <p className="text-[10px] text-muted-foreground/80 tabular-nums">
+                                {new Date(n.createdAt).toLocaleString('fr-FR', {
+                                  dateStyle: 'short',
+                                  timeStyle: 'short',
+                                })}
+                              </p>
+                            </div>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </div>
 
             <Link
               to="/catalogue"
