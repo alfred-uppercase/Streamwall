@@ -3,12 +3,17 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
+  CalendarClock,
   Check,
   Crown,
+  KeyRound,
+  Lock,
   LogOut,
+  Mail,
   MailCheck,
   Moon,
   Palette,
+  Pencil,
   RefreshCw,
   RotateCcw,
   Search,
@@ -62,10 +67,19 @@ export function ProfilePage() {
     hasActiveProPlan &&
     (isPro || isAdmin || Boolean(billingPlansQuery.data?.config?.proOffersMenuVisible));
 
-  const [username, setUsername] = useState(user?.username ?? '');
   const [avatar, setAvatar] = useState<string | null>(user?.avatar ?? null);
+  const [draftAvatar, setDraftAvatar] = useState<string | null>(user?.avatar ?? null);
+  const [avatarModalOpen, setAvatarModalOpen] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
 
+  const [emailModalOpen, setEmailModalOpen] = useState(false);
+  const [newEmail, setNewEmail] = useState('');
+  const [savingEmail, setSavingEmail] = useState(false);
+  const [pendingEmailTarget, setPendingEmailTarget] = useState<string | null>(null);
+  const [emailOtpDigits, setEmailOtpDigits] = useState<string[]>(['', '', '', '', '', '']);
+  const [emailResendCooldown, setEmailResendCooldown] = useState(0);
+
+  const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
   const [savingPassword, setSavingPassword] = useState(false);
@@ -73,19 +87,9 @@ export function ProfilePage() {
   const [passwordOtpDigits, setPasswordOtpDigits] = useState<string[]>(['', '', '', '', '', '']);
   const [passwordResendCooldown, setPasswordResendCooldown] = useState(0);
 
-  const [newEmail, setNewEmail] = useState(user?.email ?? '');
-  const [savingEmail, setSavingEmail] = useState(false);
-  const [pendingEmailTarget, setPendingEmailTarget] = useState<string | null>(null);
-  const [emailOtpDigits, setEmailOtpDigits] = useState<string[]>(['', '', '', '', '', '']);
-  const [emailResendCooldown, setEmailResendCooldown] = useState(0);
-
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [deletingAccount, setDeletingAccount] = useState(false);
-
-  useEffect(() => {
-    if (user?.email && !pendingEmailTarget) setNewEmail(user.email);
-  }, [user?.email, pendingEmailTarget]);
 
   useEffect(() => {
     if (emailResendCooldown <= 0) return;
@@ -100,15 +104,26 @@ export function ProfilePage() {
   }, [passwordResendCooldown]);
 
   useEffect(() => {
-    if (!deleteModalOpen) return;
+    if (!avatarModalOpen && !emailModalOpen && !passwordModalOpen && !deleteModalOpen) return;
     const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape' && !deletingAccount) {
-        setDeleteModalOpen(false);
-      }
+      if (ev.key !== 'Escape') return;
+      if (avatarModalOpen && !savingProfile) setAvatarModalOpen(false);
+      else if (emailModalOpen && !savingEmail) setEmailModalOpen(false);
+      else if (passwordModalOpen && !savingPassword) setPasswordModalOpen(false);
+      else if (deleteModalOpen && !deletingAccount) setDeleteModalOpen(false);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [deleteModalOpen, deletingAccount]);
+  }, [
+    avatarModalOpen,
+    savingProfile,
+    emailModalOpen,
+    savingEmail,
+    passwordModalOpen,
+    savingPassword,
+    deleteModalOpen,
+    deletingAccount,
+  ]);
 
   const [friendSearch, setFriendSearch] = useState('');
   const [searchResults, setSearchResults] = useState<
@@ -117,7 +132,6 @@ export function ProfilePage() {
 
   useEffect(() => {
     if (memberQuery.data?.profile) {
-      setUsername(memberQuery.data.profile.username);
       setAvatar(memberQuery.data.profile.avatar);
     }
   }, [memberQuery.data?.profile]);
@@ -139,14 +153,43 @@ export function ProfilePage() {
     return () => window.clearTimeout(timer);
   }, [friendSearch, user?.id]);
 
-  async function saveProfile(e: React.FormEvent) {
+  const activeProfile = memberQuery.data?.profile ?? user;
+  const displayUsername = activeProfile?.username ?? '';
+  const nextEmailChangeAt = activeProfile?.nextEmailChangeAt ?? null;
+  const emailChangeLocked = Boolean(
+    nextEmailChangeAt && new Date(nextEmailChangeAt).getTime() > Date.now()
+  );
+
+  function openAvatarModal() {
+    setDraftAvatar(avatar);
+    setAvatarModalOpen(true);
+  }
+
+  function openEmailModal() {
+    setPendingEmailTarget(null);
+    setEmailOtpDigits(['', '', '', '', '', '']);
+    setNewEmail('');
+    setEmailModalOpen(true);
+  }
+
+  function openPasswordModal() {
+    setPendingPasswordEmail(null);
+    setPasswordOtpDigits(['', '', '', '', '', '']);
+    setNewPassword('');
+    setConfirmNewPassword('');
+    setPasswordModalOpen(true);
+  }
+
+  async function saveAvatar(e: React.FormEvent) {
     e.preventDefault();
     setSavingProfile(true);
     try {
-      await api.updateProfile(username.trim(), avatar);
+      await api.updateProfile(draftAvatar);
+      setAvatar(draftAvatar);
       await refreshUser();
       await queryClient.invalidateQueries({ queryKey: ['member'] });
-      toast.success('Profil et avatar enregistrés.');
+      setAvatarModalOpen(false);
+      toast.success('Avatar mis à jour.');
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Enregistrement impossible.');
     } finally {
@@ -191,6 +234,7 @@ export function ProfilePage() {
       setPasswordOtpDigits(['', '', '', '', '', '']);
       setNewPassword('');
       setConfirmNewPassword('');
+      setPasswordModalOpen(false);
       toast.success(res.message);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Code invalide ou expiré.');
@@ -246,7 +290,8 @@ export function ProfilePage() {
       const res = await api.verifyEmailChangeCode(code);
       setPendingEmailTarget(null);
       setEmailOtpDigits(['', '', '', '', '', '']);
-      setNewEmail(res.profile.email);
+      setNewEmail('');
+      setEmailModalOpen(false);
       await refreshUser();
       await queryClient.invalidateQueries({ queryKey: ['member'] });
       toast.success(res.message);
@@ -323,7 +368,7 @@ export function ProfilePage() {
           <UserAvatar
             avatar={avatar}
             seed={user?.id}
-            username={username || user?.username}
+            username={displayUsername}
             isPro={isPro}
             size="lg"
           />
@@ -421,278 +466,141 @@ export function ProfilePage() {
       )}
 
       <div className="grid gap-6 md:grid-cols-2">
-        {/* Identity & Random/Pickable Avatar */}
-        <section className="rounded-xl border border-border bg-card p-6">
-          <h2 className="mb-4 font-display text-xl font-semibold text-foreground">
-            Identité & Avatar
-          </h2>
-
-          <form onSubmit={saveProfile} className="space-y-5">
-            <div className="flex items-center gap-4">
-              <UserAvatar
-                avatar={avatar}
-                seed={user?.id}
-                username={username || user?.username}
-                isPro={isPro}
-                size="xl"
-              />
-
-              <div className="space-y-2">
-                <button
-                  type="button"
-                  onClick={() => setAvatar(getRandomAvatarId(avatar))}
-                  className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-3.5 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-accent"
-                >
-                  <Shuffle className="size-3.5 text-primary" />
-                  <span>Avatar aléatoire</span>
-                </button>
-                <p className="text-xs text-muted-foreground">
-                  {isPro
-                    ? 'Votre couronne dorée Pro accompagne votre avatar.'
-                    : 'Choisissez un avatar ci-dessous ou tirez-en un au hasard.'}
+        {/* Identity & Avatar (Modal selection, immutable pseudo) */}
+        <section className="flex flex-col justify-between rounded-xl border border-border bg-card p-6 space-y-5">
+          <div className="space-y-5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="font-display text-xl font-semibold text-foreground">
+                  Identité & Avatar
+                </h2>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  Votre pseudo public est définitif et votre avatar s’affiche sur vos commentaires.
                 </p>
               </div>
             </div>
 
+            <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-background p-4">
+              <div className="flex items-center gap-4 min-w-0">
+                <UserAvatar
+                  avatar={avatar}
+                  seed={user?.id}
+                  username={displayUsername}
+                  isPro={isPro}
+                  size="xl"
+                />
+                <div className="min-w-0">
+                  <p className="text-xs text-muted-foreground">Avatar du profil</p>
+                  <p className="mt-0.5 truncate text-sm font-semibold text-foreground">
+                    {isPro ? 'Avatar avec couronne Pro' : 'Collection StreamWall'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={openAvatarModal}
+                className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3.5 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-accent whitespace-nowrap shrink-0"
+              >
+                <Pencil className="size-3.5 text-primary" />
+                <span>Modifier l’avatar</span>
+              </button>
+            </div>
+
+            <div className="rounded-lg border border-border bg-background px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-xs font-medium text-muted-foreground">Pseudo public</span>
+                <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                  <Lock className="size-3" />
+                  <span>Non modifiable</span>
+                </span>
+              </div>
+              <p className="mt-1 truncate font-display text-base font-semibold text-foreground">
+                @{displayUsername || 'membre'}
+              </p>
+            </div>
+          </div>
+
+          <p className="text-xs text-muted-foreground">
+            Le pseudo choisi lors de l’inscription reste unique et permanent sur l’ensemble de la plateforme.
+          </p>
+        </section>
+
+        {/* Security & Email Change (Modal triggers + 1/month rule) */}
+        <section className="flex flex-col justify-between rounded-xl border border-border bg-card p-6 space-y-5">
+          <div className="space-y-4">
             <div>
-              <p className="mb-2.5 text-xs text-muted-foreground">Collection d’avatars StreamWall</p>
-              <div className="grid grid-cols-6 gap-2.5">
-                {AVATAR_PRESETS.map((preset) => {
-                  const selected = avatar === preset.id;
-                  return (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      title={preset.label}
-                      aria-label={`Choisir l’avatar ${preset.label}`}
-                      onClick={() => setAvatar(preset.id)}
-                      className={`group relative aspect-square overflow-hidden rounded-full border-2 p-0.5 transition-transform hover:scale-105 ${
-                        selected ? 'border-primary ring-2 ring-primary/30' : 'border-transparent'
-                      }`}
-                    >
-                      <AvatarArtwork preset={preset} className="size-full rounded-full" />
-                    </button>
-                  );
-                })}
+              <h2 className="font-display text-xl font-semibold text-foreground">
+                Adresse email & Sécurité
+              </h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                Chaque modification sensible est confirmée par un code à 6 chiffres envoyé par email.
+              </p>
+            </div>
+
+            {/* Email row */}
+            <div className="rounded-lg border border-border bg-background p-4 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Mail className="size-3.5 text-primary" />
+                    <span>Adresse email</span>
+                  </div>
+                  <p className="mt-1 truncate text-sm font-semibold text-foreground">
+                    {activeProfile?.email || user?.email}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={emailChangeLocked}
+                  onClick={openEmailModal}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3.5 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50 whitespace-nowrap shrink-0"
+                >
+                  <Pencil className="size-3.5 text-primary" />
+                  <span>Modifier l’email</span>
+                </button>
+              </div>
+
+              <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground tabular-nums">
+                <CalendarClock className="size-3.5 shrink-0 text-primary" />
+                {emailChangeLocked && nextEmailChangeAt ? (
+                  <span>
+                    Modification limitée à 1 fois par mois · Prochaine modification possible le{' '}
+                    <strong className="text-foreground">
+                      {new Date(nextEmailChangeAt).toLocaleDateString('fr-FR')}
+                    </strong>
+                  </span>
+                ) : (
+                  <span>Modification autorisée 1 fois par mois.</span>
+                )}
               </div>
             </div>
 
-            <label className="block text-sm font-medium text-foreground">
-              Pseudo public
-              <input
-                required
-                maxLength={60}
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
-              />
-            </label>
-
-            <button
-              type="submit"
-              disabled={savingProfile}
-              className="rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
-            >
-              {savingProfile ? 'Enregistrement…' : 'Enregistrer le profil'}
-            </button>
-          </form>
-        </section>
-
-        {/* Security & Email Change */}
-        <section className="rounded-xl border border-border bg-card p-6 space-y-6">
-          <div>
-            <h2 className="mb-2 font-display text-xl font-semibold text-foreground">
-              Adresse email & Sécurité
-            </h2>
-            <p className="text-sm text-muted-foreground">
-              Chaque modification d’email ou de mot de passe est protégée par un code de vérification à 6 chiffres envoyé par email.
-            </p>
+            {/* Password row */}
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background p-4">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <KeyRound className="size-3.5 text-primary" />
+                  <span>Mot de passe</span>
+                </div>
+                <p className="mt-1 font-mono text-sm tracking-widest text-foreground">••••••••••</p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  Vérification requise via votre adresse email actuelle.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={openPasswordModal}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3.5 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-accent whitespace-nowrap shrink-0"
+              >
+                <Pencil className="size-3.5 text-primary" />
+                <span>Modifier</span>
+              </button>
+            </div>
           </div>
 
-          {pendingEmailTarget ? (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                void verifyEmailCode();
-              }}
-              className="space-y-4 rounded-lg border border-primary/30 bg-background/70 p-4"
-            >
-              <div className="flex items-start gap-2.5 text-xs text-muted-foreground">
-                <MailCheck className="mt-0.5 size-4 shrink-0 text-primary" />
-                <span>
-                  Code à 6 chiffres envoyé à <strong className="text-foreground">{pendingEmailTarget}</strong>. Saisissez-le ci-dessous pour confirmer la nouvelle adresse.
-                </span>
-              </div>
-
-              <OtpCodeInput
-                digits={emailOtpDigits}
-                onChange={setEmailOtpDigits}
-                onComplete={(joined) => void verifyEmailCode(joined)}
-                disabled={savingEmail}
-              />
-
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <button
-                  type="submit"
-                  disabled={savingEmail || emailOtpDigits.join('').length !== 6}
-                  className="rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
-                >
-                  {savingEmail ? 'Vérification…' : 'Valider le changement d’email'}
-                </button>
-                <div className="flex items-center gap-3 text-xs">
-                  <button
-                    type="button"
-                    disabled={savingEmail || emailResendCooldown > 0}
-                    onClick={() => void resendEmailCode()}
-                    className="inline-flex items-center gap-1 font-medium text-primary hover:underline disabled:opacity-50"
-                  >
-                    <RefreshCw className="size-3" />
-                    <span>
-                      {emailResendCooldown > 0 ? `Renvoyer (${emailResendCooldown}s)` : 'Renvoyer'}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={savingEmail}
-                    onClick={() => {
-                      setPendingEmailTarget(null);
-                      setEmailOtpDigits(['', '', '', '', '', '']);
-                    }}
-                    className="text-muted-foreground hover:text-foreground"
-                  >
-                    Annuler
-                  </button>
-                </div>
-              </div>
-            </form>
-          ) : (
-            <form onSubmit={requestEmailCode} className="space-y-3 border-b border-border pb-6">
-              <label className="block text-sm font-medium text-foreground">
-                Adresse email du compte
-                <input
-                  type="email"
-                  required
-                  value={newEmail}
-                  onChange={(e) => setNewEmail(e.target.value)}
-                  placeholder="mail@mail.fr"
-                  className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
-                />
-              </label>
-              <button
-                type="submit"
-                disabled={
-                  savingEmail ||
-                  !newEmail.trim() ||
-                  newEmail.trim().toLowerCase() === (user?.email ?? '').toLowerCase()
-                }
-                className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap"
-              >
-                {savingEmail ? 'Envoi du code…' : 'Recevoir le code pour modifier l’email'}
-              </button>
-            </form>
-          )}
-
-          {pendingPasswordEmail ? (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                void verifyPasswordCode();
-              }}
-              className="space-y-4 rounded-lg border border-primary/30 bg-background/70 p-4"
-            >
-              <div className="flex items-start gap-2.5 text-xs text-muted-foreground">
-                <MailCheck className="mt-0.5 size-4 shrink-0 text-primary" />
-                <span>
-                  Code à 6 chiffres envoyé à <strong className="text-foreground">{pendingPasswordEmail}</strong> pour confirmer votre nouveau mot de passe.
-                </span>
-              </div>
-
-              <OtpCodeInput
-                digits={passwordOtpDigits}
-                onChange={setPasswordOtpDigits}
-                onComplete={(joined) => void verifyPasswordCode(joined)}
-                disabled={savingPassword}
-              />
-
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <button
-                  type="submit"
-                  disabled={savingPassword || passwordOtpDigits.join('').length !== 6}
-                  className="rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
-                >
-                  {savingPassword ? 'Validation…' : 'Valider le nouveau mot de passe'}
-                </button>
-                <div className="flex items-center gap-3 text-xs">
-                  <button
-                    type="button"
-                    disabled={savingPassword || passwordResendCooldown > 0}
-                    onClick={() => void resendPasswordCode()}
-                    className="inline-flex items-center gap-1 font-medium text-primary hover:underline disabled:opacity-50"
-                  >
-                    <RefreshCw className="size-3" />
-                    <span>
-                      {passwordResendCooldown > 0
-                        ? `Renvoyer (${passwordResendCooldown}s)`
-                        : 'Renvoyer'}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={savingPassword}
-                    onClick={() => {
-                      setPendingPasswordEmail(null);
-                      setPasswordOtpDigits(['', '', '', '', '', '']);
-                    }}
-                    className="text-muted-foreground hover:text-foreground"
-                  >
-                    Annuler
-                  </button>
-                </div>
-              </div>
-            </form>
-          ) : (
-            <form onSubmit={requestPasswordCode} className="space-y-4">
-              <label className="block text-sm font-medium text-foreground">
-                Nouveau mot de passe (8 caractères min.)
-                <input
-                  type="password"
-                  minLength={8}
-                  required
-                  autoComplete="new-password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
-                />
-              </label>
-              <label className="block text-sm font-medium text-foreground">
-                Confirmer le nouveau mot de passe
-                <input
-                  type="password"
-                  minLength={8}
-                  required
-                  autoComplete="new-password"
-                  value={confirmNewPassword}
-                  onChange={(e) => setConfirmNewPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
-                />
-              </label>
-              <button
-                type="submit"
-                disabled={
-                  savingPassword ||
-                  newPassword.length < 8 ||
-                  newPassword !== confirmNewPassword
-                }
-                className="rounded-lg border border-border bg-background px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-50"
-              >
-                {savingPassword
-                  ? 'Envoi du code…'
-                  : 'Recevoir le code pour changer le mot de passe'}
-              </button>
-            </form>
-          )}
+          <p className="text-xs text-muted-foreground">
+            Utilisez un mot de passe d’au moins 8 caractères propre à votre compte.
+          </p>
         </section>
       </div>
 
@@ -1020,6 +928,424 @@ export function ProfilePage() {
           </button>
         </div>
       </section>
+
+      {avatarModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="avatar-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
+          onClick={() => {
+            if (!savingProfile) setAvatarModalOpen(false);
+          }}
+        >
+          <div
+            className="w-full max-w-lg rounded-xl border border-border bg-card p-6 shadow-2xl space-y-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 id="avatar-modal-title" className="font-display text-lg font-bold text-foreground">
+                  Choisir votre avatar
+                </h3>
+                <p className="text-xs text-muted-foreground">
+                  Sélectionnez un avatar dans la collection ou tirez-en un au hasard.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={savingProfile}
+                onClick={() => setAvatarModalOpen(false)}
+                aria-label="Fermer"
+                className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            <form onSubmit={saveAvatar} className="space-y-5">
+              <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-background p-4">
+                <div className="flex items-center gap-3.5">
+                  <UserAvatar
+                    avatar={draftAvatar}
+                    seed={user?.id}
+                    username={displayUsername}
+                    isPro={isPro}
+                    size="xl"
+                  />
+                  <div>
+                    <p className="text-sm font-semibold text-foreground">Aperçu actuel</p>
+                    <p className="text-xs text-muted-foreground">
+                      {isPro
+                        ? 'Votre couronne dorée Pro accompagne votre avatar.'
+                        : 'Visible sur vos commentaires et votre profil.'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDraftAvatar(getRandomAvatarId(draftAvatar))}
+                  className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-accent whitespace-nowrap shrink-0"
+                >
+                  <Shuffle className="size-3.5 text-primary" />
+                  <span>Aléatoire</span>
+                </button>
+              </div>
+
+              <div>
+                <p className="mb-2.5 text-xs font-medium text-muted-foreground">
+                  Collection d’avatars
+                </p>
+                <div className="grid grid-cols-6 gap-2.5">
+                  {AVATAR_PRESETS.map((preset) => {
+                    const selected = draftAvatar === preset.id;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        title={preset.label}
+                        aria-label={`Choisir l’avatar ${preset.label}`}
+                        onClick={() => setDraftAvatar(preset.id)}
+                        className={`group relative aspect-square overflow-hidden rounded-full border-2 p-0.5 transition-transform hover:scale-105 ${
+                          selected ? 'border-primary ring-2 ring-primary/30' : 'border-transparent'
+                        }`}
+                      >
+                        <AvatarArtwork preset={preset} className="size-full rounded-full" />
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-1">
+                <button
+                  type="button"
+                  disabled={savingProfile}
+                  onClick={() => setAvatarModalOpen(false)}
+                  className="rounded-lg border border-border bg-background px-4 py-2 text-xs font-medium text-foreground hover:bg-accent disabled:opacity-50"
+                >
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingProfile}
+                  className="rounded-lg bg-primary px-5 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                >
+                  {savingProfile ? 'Enregistrement…' : 'Enregistrer l’avatar'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {emailModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="email-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
+          onClick={() => {
+            if (!savingEmail) setEmailModalOpen(false);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-2xl space-y-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 shrink-0 place-items-center rounded-lg border border-border bg-background text-primary">
+                  <Mail className="size-4" />
+                </div>
+                <div>
+                  <h3 id="email-modal-title" className="font-display text-lg font-bold text-foreground">
+                    Modifier l’adresse email
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    Autorisé 1 fois par mois · Validation par code à 6 chiffres
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={savingEmail}
+                onClick={() => setEmailModalOpen(false)}
+                aria-label="Fermer"
+                className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            {pendingEmailTarget ? (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void verifyEmailCode();
+                }}
+                className="space-y-4"
+              >
+                <div className="flex items-start gap-2.5 rounded-lg border border-primary/30 bg-background p-3.5 text-xs text-muted-foreground">
+                  <MailCheck className="mt-0.5 size-4 shrink-0 text-primary" />
+                  <span>
+                    Code à 6 chiffres envoyé à{' '}
+                    <strong className="text-foreground">{pendingEmailTarget}</strong>. Saisissez-le ci-dessous pour confirmer la nouvelle adresse.
+                  </span>
+                </div>
+
+                <OtpCodeInput
+                  digits={emailOtpDigits}
+                  onChange={setEmailOtpDigits}
+                  onComplete={(joined) => void verifyEmailCode(joined)}
+                  disabled={savingEmail}
+                />
+
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                  <button
+                    type="button"
+                    disabled={savingEmail || emailResendCooldown > 0}
+                    onClick={() => void resendEmailCode()}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline disabled:opacity-50"
+                  >
+                    <RefreshCw className="size-3" />
+                    <span>
+                      {emailResendCooldown > 0
+                        ? `Renvoyer (${emailResendCooldown}s)`
+                        : 'Renvoyer le code'}
+                    </span>
+                  </button>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={savingEmail}
+                      onClick={() => {
+                        setPendingEmailTarget(null);
+                        setEmailOtpDigits(['', '', '', '', '', '']);
+                      }}
+                      className="rounded-lg border border-border bg-background px-3.5 py-2 text-xs font-medium text-foreground hover:bg-accent"
+                    >
+                      Retour
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={savingEmail || emailOtpDigits.join('').length !== 6}
+                      className="rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                    >
+                      {savingEmail ? 'Vérification…' : 'Confirmer'}
+                    </button>
+                  </div>
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={requestEmailCode} className="space-y-4">
+                <div className="rounded-lg border border-border bg-background px-3.5 py-2.5 text-xs">
+                  <span className="text-muted-foreground">Adresse actuelle : </span>
+                  <strong className="text-foreground">{activeProfile?.email || user?.email}</strong>
+                </div>
+
+                <label className="block text-sm font-medium text-foreground">
+                  Nouvelle adresse email
+                  <input
+                    type="email"
+                    required
+                    autoFocus
+                    value={newEmail}
+                    onChange={(e) => setNewEmail(e.target.value)}
+                    placeholder="nouvel-email@mail.fr"
+                    className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
+                  />
+                </label>
+
+                <p className="text-xs text-muted-foreground">
+                  Une fois validée, votre adresse email ne pourra plus être modifiée pendant 30 jours.
+                </p>
+
+                <div className="flex items-center justify-end gap-2.5 pt-1">
+                  <button
+                    type="button"
+                    disabled={savingEmail}
+                    onClick={() => setEmailModalOpen(false)}
+                    className="rounded-lg border border-border bg-background px-4 py-2 text-xs font-medium text-foreground hover:bg-accent disabled:opacity-50"
+                  >
+                    Annuler
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={
+                      savingEmail ||
+                      emailChangeLocked ||
+                      !newEmail.trim() ||
+                      newEmail.trim().toLowerCase() === (user?.email ?? '').toLowerCase()
+                    }
+                    className="rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap"
+                  >
+                    {savingEmail ? 'Envoi du code…' : 'Recevoir le code à 6 chiffres'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      {passwordModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="password-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
+          onClick={() => {
+            if (!savingPassword) setPasswordModalOpen(false);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-2xl space-y-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="grid size-9 shrink-0 place-items-center rounded-lg border border-border bg-background text-primary">
+                  <KeyRound className="size-4" />
+                </div>
+                <div>
+                  <h3 id="password-modal-title" className="font-display text-lg font-bold text-foreground">
+                    Modifier le mot de passe
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    Confirmation par code à 6 chiffres envoyé par email
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={savingPassword}
+                onClick={() => setPasswordModalOpen(false)}
+                aria-label="Fermer"
+                className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            {pendingPasswordEmail ? (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void verifyPasswordCode();
+                }}
+                className="space-y-4"
+              >
+                <div className="flex items-start gap-2.5 rounded-lg border border-primary/30 bg-background p-3.5 text-xs text-muted-foreground">
+                  <MailCheck className="mt-0.5 size-4 shrink-0 text-primary" />
+                  <span>
+                    Code à 6 chiffres envoyé à{' '}
+                    <strong className="text-foreground">{pendingPasswordEmail}</strong> pour confirmer votre nouveau mot de passe.
+                  </span>
+                </div>
+
+                <OtpCodeInput
+                  digits={passwordOtpDigits}
+                  onChange={setPasswordOtpDigits}
+                  onComplete={(joined) => void verifyPasswordCode(joined)}
+                  disabled={savingPassword}
+                />
+
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                  <button
+                    type="button"
+                    disabled={savingPassword || passwordResendCooldown > 0}
+                    onClick={() => void resendPasswordCode()}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline disabled:opacity-50"
+                  >
+                    <RefreshCw className="size-3" />
+                    <span>
+                      {passwordResendCooldown > 0
+                        ? `Renvoyer (${passwordResendCooldown}s)`
+                        : 'Renvoyer le code'}
+                    </span>
+                  </button>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={savingPassword}
+                      onClick={() => {
+                        setPendingPasswordEmail(null);
+                        setPasswordOtpDigits(['', '', '', '', '', '']);
+                      }}
+                      className="rounded-lg border border-border bg-background px-3.5 py-2 text-xs font-medium text-foreground hover:bg-accent"
+                    >
+                      Retour
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={savingPassword || passwordOtpDigits.join('').length !== 6}
+                      className="rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                    >
+                      {savingPassword ? 'Validation…' : 'Confirmer'}
+                    </button>
+                  </div>
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={requestPasswordCode} className="space-y-4">
+                <label className="block text-sm font-medium text-foreground">
+                  Nouveau mot de passe (8 caractères min.)
+                  <input
+                    type="password"
+                    minLength={8}
+                    required
+                    autoFocus
+                    autoComplete="new-password"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
+                  />
+                </label>
+
+                <label className="block text-sm font-medium text-foreground">
+                  Confirmer le nouveau mot de passe
+                  <input
+                    type="password"
+                    minLength={8}
+                    required
+                    autoComplete="new-password"
+                    value={confirmNewPassword}
+                    onChange={(e) => setConfirmNewPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="mt-1.5 w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
+                  />
+                </label>
+
+                <div className="flex items-center justify-end gap-2.5 pt-1">
+                  <button
+                    type="button"
+                    disabled={savingPassword}
+                    onClick={() => setPasswordModalOpen(false)}
+                    className="rounded-lg border border-border bg-background px-4 py-2 text-xs font-medium text-foreground hover:bg-accent disabled:opacity-50"
+                  >
+                    Annuler
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={
+                      savingPassword ||
+                      newPassword.length < 8 ||
+                      newPassword !== confirmNewPassword
+                    }
+                    className="rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap"
+                  >
+                    {savingPassword ? 'Envoi du code…' : 'Recevoir le code à 6 chiffres'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
 
       {deleteModalOpen && (
         <div

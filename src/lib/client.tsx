@@ -214,10 +214,10 @@ export const api = {
       { method: 'DELETE' }
     ),
   clearHistory: () => apiRequest<{ ok: boolean }>('/api/history', { method: 'DELETE' }),
-  updateProfile: (username: string, avatar?: string | null) =>
+  updateProfile: (avatar: string | null) =>
     apiRequest<{ profile: UserProfile }>('/api/profile', {
       method: 'PUT',
-      body: JSON.stringify({ username, avatar }),
+      body: JSON.stringify({ avatar }),
     }),
   updateEmail: (email: string) =>
     apiRequest<{

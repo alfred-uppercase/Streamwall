@@ -413,6 +413,8 @@ export interface UserProfile {
   theme?: UserThemePreference | null;
   banned?: boolean;
   banReason?: string | null;
+  lastEmailChangedAt?: string | null;
+  nextEmailChangeAt?: string | null;
 }
 
 export interface CommentRecord {

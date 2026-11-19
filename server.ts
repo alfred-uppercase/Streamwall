@@ -349,6 +349,79 @@ function cleanupUserOtpChallenges(userId: string, email?: string): void {
   if (dirty) saveOtpChallenges();
 }
 
+const EMAIL_COOLDOWNS_FILE = path.join(DATA_DIR, 'tapenaka-email-cooldowns.json');
+const EMAIL_CHANGE_COOLDOWN_MS = 30 * 86_400_000;
+
+function loadEmailCooldowns(): Record<string, string> {
+  try {
+    if (fs.existsSync(EMAIL_COOLDOWNS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(EMAIL_COOLDOWNS_FILE, 'utf-8')) as Record<
+        string,
+        string
+      >;
+      if (parsed && typeof parsed === 'object') return parsed;
+    }
+  } catch {
+    // Ignore read error
+  }
+  return {};
+}
+
+const emailChangeTimestamps: Record<string, string> = loadEmailCooldowns();
+
+function saveEmailCooldowns(): void {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(EMAIL_COOLDOWNS_FILE, JSON.stringify(emailChangeTimestamps, null, 2), 'utf-8');
+  } catch {
+    // Non-fatal
+  }
+}
+
+function getUserEmailChangeStatus(userId: string): {
+  lastEmailChangedAt: string | null;
+  nextEmailChangeAt: string | null;
+  blocked: boolean;
+  remainingDays: number;
+} {
+  const lastIso = emailChangeTimestamps[userId] || null;
+  if (!lastIso) {
+    return { lastEmailChangedAt: null, nextEmailChangeAt: null, blocked: false, remainingDays: 0 };
+  }
+  const lastMs = new Date(lastIso).getTime();
+  if (!Number.isFinite(lastMs)) {
+    return { lastEmailChangedAt: null, nextEmailChangeAt: null, blocked: false, remainingDays: 0 };
+  }
+  const nextMs = lastMs + EMAIL_CHANGE_COOLDOWN_MS;
+  const now = Date.now();
+  if (nextMs > now) {
+    return {
+      lastEmailChangedAt: lastIso,
+      nextEmailChangeAt: new Date(nextMs).toISOString(),
+      blocked: true,
+      remainingDays: Math.max(1, Math.ceil((nextMs - now) / 86_400_000)),
+    };
+  }
+  return {
+    lastEmailChangedAt: lastIso,
+    nextEmailChangeAt: null,
+    blocked: false,
+    remainingDays: 0,
+  };
+}
+
+function recordUserEmailChanged(userId: string): void {
+  emailChangeTimestamps[userId] = new Date().toISOString();
+  saveEmailCooldowns();
+}
+
+function cleanupUserEmailCooldown(userId: string): void {
+  if (emailChangeTimestamps[userId]) {
+    delete emailChangeTimestamps[userId];
+    saveEmailCooldowns();
+  }
+}
+
 function validateUsernameFormat(raw: string): { valid: boolean; clean: string; error?: string } {
   const clean = raw.trim();
   if (clean.length < 3) {
@@ -953,6 +1026,7 @@ function enrichUserProfile(user: UserProfile): UserProfile {
   registerUserDirectoryEntry(user.id, user.email, user.username);
   const subscription = getUserSubscription(user.id);
   const ban = getUserBanInfo(user.id);
+  const emailCooldown = getUserEmailChangeStatus(user.id);
   return {
     ...user,
     avatar: resolveUserAvatar(user.id, user.avatar),
@@ -961,6 +1035,8 @@ function enrichUserProfile(user: UserProfile): UserProfile {
     theme: getUserTheme(user.id),
     banned: Boolean(ban),
     banReason: ban?.reason || null,
+    lastEmailChangedAt: emailCooldown.lastEmailChangedAt,
+    nextEmailChangeAt: emailCooldown.nextEmailChangeAt,
   };
 }
 
@@ -1021,6 +1097,157 @@ function computeLocalRankings(days: number): RankingEntry[] {
     .map((r) => ({ item: r.item, viewers: r.viewers.size, plays: r.plays }));
 }
 
+interface IndexedCatalogEntry {
+  id: string;
+  titre: string;
+  poster: string | null;
+  backdrop: string | null;
+  descr: string | null;
+  trailer: string | null;
+  genre: string | null;
+  annee: number | null;
+  langue: string | null;
+  qualite: string | null;
+  tmdbId: string | null;
+  item_type: ItemType;
+  source: 'films' | 'series';
+}
+
+const catalogIndex = new Map<string, IndexedCatalogEntry>();
+
+function indexCatalogEntry(entry: IndexedCatalogEntry): void {
+  if (!entry.id) return;
+  if (catalogIndex.size > 10_000) {
+    const oldest = catalogIndex.keys().next().value;
+    if (oldest) catalogIndex.delete(oldest);
+  }
+  catalogIndex.set(`${entry.item_type}:${entry.id}`, entry);
+  const endpointKey = `${entry.source === 'films' ? 'film' : 'serie'}:${entry.id}`;
+  if (!catalogIndex.has(endpointKey)) {
+    catalogIndex.set(endpointKey, entry);
+  }
+}
+
+function getIndexedCatalogEntry(type: ItemType, id: string): IndexedCatalogEntry | null {
+  return (
+    catalogIndex.get(`${type}:${id}`) ??
+    (type === 'anime'
+      ? catalogIndex.get(`serie:${id}`) ?? catalogIndex.get(`film:${id}`)
+      : null) ??
+    catalogIndex.get(`film:${id}`) ??
+    catalogIndex.get(`serie:${id}`) ??
+    null
+  );
+}
+
+function parseKorotokoRow(r: Record<string, unknown>): IndexedCatalogEntry {
+  const genre = (r.genre as string) || null;
+  const categorie = String(r.categorie ?? '').toLowerCase();
+  const isFilm = r.source === 'films' || r.type === 'film' || categorie === 'film';
+  const itemType: ItemType = isFilm
+    ? 'film'
+    : categorie === 'anime' || /anim/i.test(genre ?? '')
+      ? 'anime'
+      : 'serie';
+  const entry: IndexedCatalogEntry = {
+    id: String(r.id ?? ''),
+    titre: String(r.titre ?? ''),
+    poster: (r.poster as string) || null,
+    backdrop: (r.backdrop as string) || (r.baggio as string) || null,
+    descr: ((r.description as string) || (r.descr as string) || null)?.trim() || null,
+    trailer: (r.trailer as string) || null,
+    genre,
+    annee: r.annee ? Number(r.annee) : null,
+    langue: (r.langue as string) || null,
+    qualite: (r.qualite as string) || null,
+    tmdbId: r.tmdbId ? String(r.tmdbId) : null,
+    item_type: itemType,
+    source: r.source === 'series' ? 'series' : isFilm ? 'films' : 'series',
+  };
+  indexCatalogEntry(entry);
+  return entry;
+}
+
+async function fetchKorotokoPageRaw(
+  origin: string,
+  categorie: string,
+  page: number,
+  limit = 50
+): Promise<{ pages: number; entries: IndexedCatalogEntry[] }> {
+  const p = new URLSearchParams({
+    tri: 'recent',
+    limit: String(limit),
+    page: String(page),
+  });
+  if (categorie) p.set('categorie', categorie);
+  const res = await fetch(`${origin}/api/korotoko.php?${p.toString()}`, {
+    signal: AbortSignal.timeout(9_000),
+    headers: { 'user-agent': 'Mozilla/5.0 (Tapenaka StreamWall)' },
+  });
+  if (!res.ok) return { pages: 1, entries: [] };
+  const json = (await res.json()) as {
+    pages?: number;
+    data?: Array<Record<string, unknown>>;
+  };
+  const entries = (json.data ?? []).map(parseKorotokoRow);
+  return { pages: Math.max(1, Number(json.pages) || 1), entries };
+}
+
+async function findCatalogEntryById(
+  origin: string,
+  type: ItemType,
+  id: string
+): Promise<IndexedCatalogEntry | null> {
+  const existing = getIndexedCatalogEntry(type, id);
+  if (existing) return existing;
+
+  const targetNum = Number(id);
+  const categoriesToTry =
+    type === 'anime' ? ['anime', 'film', 'serie'] : [type === 'film' ? 'film' : 'serie'];
+
+  for (const cat of categoriesToTry) {
+    try {
+      const p1 = await fetchKorotokoPageRaw(origin, cat, 1, 50);
+      const hit1 = p1.entries.find((e) => e.id === id);
+      if (hit1) return hit1;
+
+      if (!Number.isFinite(targetNum) || targetNum <= 0 || p1.pages <= 1 || p1.entries.length === 0) {
+        continue;
+      }
+
+      const minPage1Id = Number(p1.entries[p1.entries.length - 1]?.id ?? 0);
+      if (minPage1Id > 0 && targetNum > minPage1Id) {
+        continue;
+      }
+
+      let low = 2;
+      let high = p1.pages;
+      let steps = 0;
+      while (low <= high && steps < 12) {
+        steps += 1;
+        const mid = Math.floor((low + high) / 2);
+        const pageData = await fetchKorotokoPageRaw(origin, cat, mid, 50);
+        const hit = pageData.entries.find((e) => e.id === id);
+        if (hit) return hit;
+        if (pageData.entries.length === 0) break;
+
+        const firstId = Number(pageData.entries[0]?.id ?? 0);
+        const lastId = Number(pageData.entries[pageData.entries.length - 1]?.id ?? 0);
+        if (firstId > 0 && targetNum > firstId) {
+          high = mid - 1;
+        } else if (lastId > 0 && targetNum < lastId) {
+          low = mid + 1;
+        } else {
+          break;
+        }
+      }
+    } catch {
+      // Try next category
+    }
+  }
+  return getIndexedCatalogEntry(type, id);
+}
+
 async function fetchUpstreamSlider(): Promise<{ items: Slide[]; live: boolean }> {
   const origin = await getOrigin();
   const cacheKey = `slider:${origin}`;
@@ -1037,7 +1264,7 @@ async function fetchUpstreamSlider(): Promise<{ items: Slide[]; live: boolean }>
     const items: Slide[] = (json.items ?? []).slice(0, 8).map((r) => {
       const genre = (r.genre as string) || null;
       const t: ItemType = r.type === 'film' ? 'film' : /anim/i.test(genre ?? '') ? 'anime' : 'serie';
-      return {
+      const slide: Slide = {
         id: String(r.id ?? ''),
         titre: String(r.titre ?? ''),
         poster: (r.poster as string) || null,
@@ -1052,6 +1279,22 @@ async function fetchUpstreamSlider(): Promise<{ items: Slide[]; live: boolean }>
         backdrop: (r.backdrop as string) || (r.baggio as string) || null,
         trailer: (r.trailer as string) || null,
       };
+      indexCatalogEntry({
+        id: slide.id,
+        titre: slide.titre,
+        poster: slide.poster ?? null,
+        backdrop: slide.backdrop ?? null,
+        descr: slide.descr ?? null,
+        trailer: slide.trailer ?? null,
+        genre: slide.genre ?? null,
+        annee: slide.annee ?? null,
+        langue: slide.langue ?? null,
+        qualite: slide.qualite ?? null,
+        tmdbId: slide.tmdbId ?? null,
+        item_type: slide.item_type,
+        source: slide.item_type === 'film' ? 'films' : 'series',
+      });
+      return slide;
     });
     if (items.length > 0) {
       return setCached(cacheKey, { items, live: true }, 120_000);
@@ -1099,25 +1342,18 @@ async function fetchUpstreamCatalogue(filters: CatalogueFilters): Promise<Catalo
       data?: Array<Record<string, unknown>>;
     };
     let items: Item[] = (json.data ?? []).map((r) => {
-      const genre = (r.genre as string) || null;
-      const categorie = String(r.categorie ?? '').toLowerCase();
-      const isFilm = r.source === 'films' || r.type === 'film' || categorie === 'film';
-      const itemType: ItemType = isFilm
-        ? 'film'
-        : categorie === 'anime' || /anim/i.test(genre ?? '')
-          ? 'anime'
-          : 'serie';
+      const entry = parseKorotokoRow(r);
       return {
-        id: String(r.id ?? ''),
-        titre: String(r.titre ?? ''),
-        poster: (r.poster as string) || null,
-        qualite: (r.qualite as string) || null,
-        langue: (r.langue as string) || null,
-        item_type: itemType,
+        id: entry.id,
+        titre: entry.titre,
+        poster: entry.poster,
+        qualite: entry.qualite,
+        langue: entry.langue,
+        item_type: entry.item_type,
         saison: null,
-        genre,
-        annee: r.annee ? Number(r.annee) : null,
-        tmdbId: r.tmdbId ? String(r.tmdbId) : null,
+        genre: entry.genre,
+        annee: entry.annee,
+        tmdbId: entry.tmdbId,
       };
     });
 
@@ -1196,6 +1432,29 @@ async function fetchUpstreamGenres(): Promise<string[]> {
   return FALLBACK_GENRES;
 }
 
+interface RawUpstreamDetailJson {
+  item?: Record<string, unknown>;
+  cast?: Array<Record<string, unknown>>;
+  related?: Array<Record<string, unknown>>;
+  episodes?: Array<Record<string, unknown>>;
+}
+
+async function queryDetailsApi(
+  origin: string,
+  lookupId: string,
+  endpointType: 'film' | 'serie'
+): Promise<RawUpstreamDetailJson | null> {
+  const res = await fetch(
+    `${origin}/details_api.php?id=${encodeURIComponent(lookupId)}&type=${encodeURIComponent(endpointType)}`,
+    {
+      signal: AbortSignal.timeout(10_000),
+      headers: { 'user-agent': 'Mozilla/5.0 (Tapenaka StreamWall)' },
+    }
+  );
+  if (!res.ok) return null;
+  return (await res.json().catch(() => null)) as RawUpstreamDetailJson | null;
+}
+
 async function fetchUpstreamDetail(
   type: ItemType,
   id: string
@@ -1208,7 +1467,7 @@ async function fetchUpstreamDetail(
 }> {
   const origin = await getOrigin();
   let usedEndpointType: 'film' | 'serie' = type === 'film' ? 'film' : 'serie';
-  const cacheKey = `detail:${origin}:${type}:${id}`;
+  const cacheKey = `detail:v2:${origin}:${type}:${id}`;
   const cached = getCached<{
     item: DetailItem | null;
     cast: CastMember[];
@@ -1219,93 +1478,142 @@ async function fetchUpstreamDetail(
   if (cached) return cached;
 
   try {
-    const res = await fetch(
-      `${origin}/details_api.php?id=${encodeURIComponent(id)}&type=${encodeURIComponent(usedEndpointType)}`,
-      {
-        signal: AbortSignal.timeout(10_000),
-        headers: { 'user-agent': 'Mozilla/5.0 (Tapenaka StreamWall)' },
+    let json = await queryDetailsApi(origin, id, usedEndpointType);
+
+    if ((!json?.item || String(json.item.id ?? '') !== id) && type === 'anime') {
+      const filmJson = await queryDetailsApi(origin, id, 'film');
+      if (filmJson?.item && String(filmJson.item.id ?? '') === id) {
+        json = filmJson;
+        usedEndpointType = 'film';
       }
-    );
-    let json = (res.ok || (type === 'anime' && res.status === 404)
-      ? await res.json().catch(() => ({}))
-      : null) as {
-      item?: Record<string, unknown>;
-      cast?: Array<Record<string, unknown>>;
-      related?: Array<Record<string, unknown>>;
-      episodes?: Array<Record<string, unknown>>;
-    } | null;
+    }
 
-    if (!json) throw new Error(`HTTP ${res.status}`);
+    let matchedByExactId = Boolean(json?.item && String(json.item.id ?? '') === id);
+    let indexedFallback: IndexedCatalogEntry | null = null;
 
-    if (!json.item && type === 'anime') {
-      const filmRes = await fetch(
-        `${origin}/details_api.php?id=${encodeURIComponent(id)}&type=film`,
-        {
-          signal: AbortSignal.timeout(10_000),
-          headers: { 'user-agent': 'Mozilla/5.0 (Tapenaka StreamWall)' },
-        }
-      );
-      if (filmRes.ok) {
-        const filmJson = (await filmRes.json()) as typeof json;
-        if (filmJson?.item) {
-          json = filmJson;
-          usedEndpointType = 'film';
+    // Upstream details_api.php queries tmdbId BEFORE id; if another title's tmdbId matches our requested id,
+    // recover the true catalog entry by its exact id instead of returning the collided title.
+    if (!matchedByExactId) {
+      indexedFallback = await findCatalogEntryById(origin, type, id);
+      if (indexedFallback) {
+        usedEndpointType = indexedFallback.source === 'films' ? 'film' : 'serie';
+        if (indexedFallback.tmdbId) {
+          const viaTmdb = await queryDetailsApi(origin, indexedFallback.tmdbId, usedEndpointType);
+          if (viaTmdb?.item && String(viaTmdb.item.id ?? '') === id) {
+            json = viaTmdb;
+            matchedByExactId = true;
+          } else if (
+            viaTmdb?.item &&
+            String(viaTmdb.item.tmdbId ?? '') === String(indexedFallback.tmdbId)
+          ) {
+            // Two catalog items share the same tmdbId: keep metadata from indexedFallback and cast/episodes from viaTmdb
+            json = viaTmdb;
+          }
         }
       }
     }
-    if (!json.item) {
+
+    if (!matchedByExactId && !indexedFallback) {
       return { item: null, cast: [], related: [], episodes: [], live: true };
     }
-    const raw = json.item;
-    const genre = (raw.genre as string) || null;
-    const resolvedType: ItemType =
-      usedEndpointType === 'film' || raw.type === 'film'
+
+    const raw = matchedByExactId ? json?.item : undefined;
+    const genre = (raw?.genre as string) || indexedFallback?.genre || null;
+    const resolvedType: ItemType = indexedFallback
+      ? indexedFallback.item_type
+      : usedEndpointType === 'film' || raw?.type === 'film'
         ? 'film'
-        : type === 'anime' || raw.type === 'anime' || /anim/i.test(genre ?? '')
+        : type === 'anime' || raw?.type === 'anime' || /anim/i.test(genre ?? '')
           ? 'anime'
           : 'serie';
-    const synopsis = ((raw.descr as string) || (raw.description as string) || null)?.trim() || null;
+    const synopsis =
+      ((raw?.descr as string) ||
+        (raw?.description as string) ||
+        indexedFallback?.descr ||
+        null)?.trim() || null;
 
     const item: DetailItem = {
-      id: String(raw.id ?? id),
-      titre: String(raw.titre ?? ''),
+      id: String(id),
+      titre: matchedByExactId
+        ? String(raw?.titre ?? indexedFallback?.titre ?? '')
+        : String(indexedFallback?.titre ?? ''),
       descr: synopsis,
-      qualite: (raw.qualite as string) || null,
-      langue: (raw.langue as string) || null,
+      qualite: (matchedByExactId ? (raw?.qualite as string) : indexedFallback?.qualite) || null,
+      langue: (matchedByExactId ? (raw?.langue as string) : indexedFallback?.langue) || null,
       type: resolvedType,
-      tmdbId: raw.tmdbId ? String(raw.tmdbId) : null,
-      poster: (raw.poster as string) || null,
-      trailer: (raw.trailer as string) || null,
-      backdrop: (raw.backdrop as string) || (raw.baggio as string) || null,
+      tmdbId:
+        (matchedByExactId && raw?.tmdbId ? String(raw.tmdbId) : indexedFallback?.tmdbId) || null,
+      poster:
+        (matchedByExactId ? (raw?.poster as string) : null) || indexedFallback?.poster || null,
+      trailer:
+        (matchedByExactId ? (raw?.trailer as string) : null) || indexedFallback?.trailer || null,
+      backdrop:
+        (matchedByExactId ? ((raw?.backdrop as string) || (raw?.baggio as string)) : null) ||
+        indexedFallback?.backdrop ||
+        null,
       genre,
-      annee: raw.annee ? Number(raw.annee) : null,
-      saison: (raw.saison as string | number | null) ?? null,
+      annee:
+        matchedByExactId && raw?.annee
+          ? Number(raw.annee)
+          : indexedFallback?.annee ?? null,
+      saison: (raw?.saison as string | number | null) ?? null,
     };
 
-    const cast: CastMember[] = (json.cast ?? []).slice(0, 18).map((c) => ({
-      nom: String(c.nom ?? ''),
-      photo: (c.photo as string) || null,
-      role: (c.role as string) || null,
-    }));
+    const allowExtrasFromJson = Boolean(
+      json?.item &&
+        (String(json.item.id ?? '') === id ||
+          (indexedFallback?.tmdbId &&
+            String(json.item.tmdbId ?? '') === String(indexedFallback.tmdbId)))
+    );
 
-    const related: Item[] = (json.related ?? []).slice(0, 12).map((r) => ({
-      id: String(r.id ?? ''),
-      titre: String(r.titre ?? ''),
-      poster: (r.poster as string) || null,
-      qualite: null,
-      langue: null,
-      item_type: resolvedType,
-      saison: null,
-      annee: r.annee ? Number(r.annee) : null,
-      tmdbId: r.tmdbId ? String(r.tmdbId) : null,
-    }));
+    const cast: CastMember[] = allowExtrasFromJson
+      ? (json?.cast ?? []).slice(0, 18).map((c) => ({
+          nom: String(c.nom ?? ''),
+          photo: (c.photo as string) || null,
+          role: (c.role as string) || null,
+        }))
+      : [];
 
-    const episodes: Episode[] = (json.episodes ?? []).map((e, idx) => ({
-      saison: Number(e.saison) || 1,
-      episode: Number(e.episode) || idx + 1,
-      titre: (e.titre as string) || `Épisode ${Number(e.episode) || idx + 1}`,
-      url: (e.url as string) || null,
-    }));
+    const related: Item[] = allowExtrasFromJson
+      ? (json?.related ?? []).slice(0, 12).map((r) => {
+          const relItem: Item = {
+            id: String(r.id ?? ''),
+            titre: String(r.titre ?? ''),
+            poster: (r.poster as string) || null,
+            qualite: null,
+            langue: null,
+            item_type: resolvedType,
+            saison: null,
+            annee: r.annee ? Number(r.annee) : null,
+            tmdbId: r.tmdbId ? String(r.tmdbId) : null,
+          };
+          indexCatalogEntry({
+            id: relItem.id,
+            titre: relItem.titre,
+            poster: relItem.poster,
+            backdrop: null,
+            descr: null,
+            trailer: null,
+            genre: null,
+            annee: relItem.annee ?? null,
+            langue: null,
+            qualite: null,
+            tmdbId: relItem.tmdbId ?? null,
+            item_type: resolvedType,
+            source: resolvedType === 'film' ? 'films' : 'series',
+          });
+          return relItem;
+        })
+      : [];
+
+    const episodes: Episode[] = allowExtrasFromJson
+      ? (json?.episodes ?? []).map((e, idx) => ({
+          saison: Number(e.saison) || 1,
+          episode: Number(e.episode) || idx + 1,
+          titre: (e.titre as string) || `Épisode ${Number(e.episode) || idx + 1}`,
+          url: (e.url as string) || null,
+        }))
+      : [];
 
     const result = { item, cast, related, episodes, live: true };
     return setCached(cacheKey, result, 180_000);
@@ -2866,15 +3174,14 @@ async function startServer() {
       res.status(401).json({ error: 'Connexion requise' });
       return;
     }
-    const usernameCheck = validateUsernameFormat(String(req.body?.username ?? ''));
-    if (!usernameCheck.valid) {
-      res.status(400).json({ error: usernameCheck.error || 'Le pseudo ne peut pas être vide.' });
-      return;
-    }
-    const username = usernameCheck.clean;
 
-    if (await isUsernameTaken(username, auth.user.id)) {
-      res.status(409).json({ error: 'Ce pseudo est déjà utilisé par un autre membre.' });
+    // Username is immutable once created
+    if (
+      typeof req.body?.username === 'string' &&
+      req.body.username.trim() &&
+      req.body.username.trim().toLowerCase() !== auth.user.username.toLowerCase()
+    ) {
+      res.status(403).json({ error: 'Le pseudo est définitif et ne peut plus être modifié.' });
       return;
     }
 
@@ -2884,30 +3191,10 @@ async function startServer() {
     const chosenAvatar = setUserAvatarChoice(auth.user.id, requestedAvatar);
 
     if (isSupabaseEnabled() && auth.sbClient) {
-      const adminSb = createAdminClient();
-      const { error } = await (adminSb ?? auth.sbClient)
-        .from('profiles')
-        .update({ username })
-        .eq('id', auth.user.id);
-      if (error) {
-        const mapped = mapSupabaseSignupError(error.message);
-        res.status(mapped.status).json({ error: mapped.message });
-        return;
-      }
-      if (adminSb) {
-        try {
-          await adminSb.auth.admin.updateUserById(auth.user.id, {
-            user_metadata: { username, full_name: username, display_name: username },
-          });
-        } catch {
-          // Non-fatal
-        }
-      }
-      registerUserDirectoryEntry(auth.user.id, auth.user.email, username);
       const refreshed = await sbResolveUser(auth.token);
       res.json({
         profile: enrichUserProfile(
-          refreshed?.user ?? { ...auth.user, username, avatar: chosenAvatar }
+          refreshed?.user ?? { ...auth.user, avatar: chosenAvatar }
         ),
       });
       return;
@@ -2918,11 +3205,9 @@ async function startServer() {
       res.status(404).json({ error: 'Utilisateur introuvable' });
       return;
     }
-    user.username = username;
     user.avatar = chosenAvatar;
     for (const c of db.comments) {
       if (c.userId === user.id) {
-        c.username = user.username;
         c.avatar = chosenAvatar;
       }
     }
@@ -2939,10 +3224,25 @@ async function startServer() {
     });
   });
 
+  function formatEmailCooldownError(status: ReturnType<typeof getUserEmailChangeStatus>): string {
+    const lastStr = status.lastEmailChangedAt
+      ? new Date(status.lastEmailChangedAt).toLocaleDateString('fr-FR')
+      : '';
+    const nextStr = status.nextEmailChangeAt
+      ? new Date(status.nextEmailChangeAt).toLocaleDateString('fr-FR')
+      : '';
+    return `Vous avez déjà modifié votre adresse email${lastStr ? ` le ${lastStr}` : ''}. Une seule modification par mois est autorisée${nextStr ? ` (prochaine modification possible le ${nextStr}, dans ${status.remainingDays} jour${status.remainingDays > 1 ? 's' : ''})` : ''}.`;
+  }
+
   async function handleEmailChangeCodeRequest(req: express.Request, res: express.Response) {
     const auth = await resolveAuth(req);
     if (!auth) {
       res.status(401).json({ error: 'Connexion requise' });
+      return;
+    }
+    const cooldown = getUserEmailChangeStatus(auth.user.id);
+    if (cooldown.blocked) {
+      res.status(429).json({ error: formatEmailCooldownError(cooldown) });
       return;
     }
     const newEmail = String(req.body?.email ?? '').trim().toLowerCase();
@@ -3018,6 +3318,11 @@ async function startServer() {
       res.status(401).json({ error: 'Connexion requise' });
       return;
     }
+    const cooldown = getUserEmailChangeStatus(auth.user.id);
+    if (cooldown.blocked) {
+      res.status(429).json({ error: formatEmailCooldownError(cooldown) });
+      return;
+    }
     const key = `email_change:${auth.user.id}`;
     const challenge = otpChallenges[key];
     if (!challenge || challenge.expiresAt <= Date.now() || !challenge.newEmail) {
@@ -3063,6 +3368,11 @@ async function startServer() {
     const auth = await resolveAuth(req);
     if (!auth) {
       res.status(401).json({ error: 'Connexion requise' });
+      return;
+    }
+    const cooldown = getUserEmailChangeStatus(auth.user.id);
+    if (cooldown.blocked) {
+      res.status(429).json({ error: formatEmailCooldownError(cooldown) });
       return;
     }
     const code = String(req.body?.code ?? '').replace(/\D/g, '').slice(0, 6);
@@ -3114,7 +3424,7 @@ async function startServer() {
       return;
     }
 
-    let updatedProfile: UserProfile = { ...auth.user, email: newEmail };
+    let updatedBase: UserProfile = { ...auth.user, email: newEmail };
     if (isSupabaseEnabled() && auth.sbClient) {
       const adminSb = createAdminClient();
       if (!adminSb) {
@@ -3146,16 +3456,18 @@ async function startServer() {
       user.email = newEmail;
       saveDb(db);
       registerUserDirectoryEntry(user.id, newEmail, user.username);
-      updatedProfile = enrichUserProfile({
+      updatedBase = {
         id: user.id,
         email: user.email,
         username: user.username,
         avatar: user.avatar,
         role: user.role,
         createdAt: user.createdAt,
-      });
+      };
     }
 
+    recordUserEmailChanged(auth.user.id);
+    const updatedProfile = enrichUserProfile(updatedBase);
     delete otpChallenges[key];
     saveOtpChallenges();
     res.json({
@@ -3434,6 +3746,7 @@ async function startServer() {
     cleanupUserOtpChallenges(targetId, deletedEmail || undefined);
     cleanupUserBillingData(targetId, deletedEmail || undefined);
     cleanupUserNotifications(targetId);
+    cleanupUserEmailCooldown(targetId);
 
     res.clearCookie('tapenaka_session', { path: '/' });
     res.clearCookie('streamwall_watch', { path: '/api/public/watch' });
@@ -4149,6 +4462,7 @@ async function startServer() {
     cleanupUserOtpChallenges(targetId, deletedEmail || undefined);
     cleanupUserBillingData(targetId, deletedEmail || undefined);
     cleanupUserNotifications(targetId);
+    cleanupUserEmailCooldown(targetId);
     res.json({ ok: true });
   });
 
