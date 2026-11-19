@@ -253,7 +253,7 @@ export function CataloguePage() {
         </div>
       ) : items.length > 0 ? (
         <div
-          className={`grid grid-cols-2 gap-5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 transition-opacity duration-150 ${
+          className={`grid grid-cols-3 gap-2.5 sm:gap-5 md:grid-cols-4 lg:grid-cols-6 transition-opacity duration-150 ${
             catalogueQuery.isFetching ? 'opacity-65' : 'opacity-100'
           }`}
         >

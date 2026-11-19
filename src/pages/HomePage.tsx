@@ -45,23 +45,25 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       aria-label="Sélection à la une"
-      className="relative mb-12 overflow-hidden rounded-xl border border-border bg-card"
+      className="relative overflow-hidden border-b border-border bg-card"
     >
-      <div className="relative min-h-[24rem] sm:min-h-[27rem]">
+      <div className="relative flex min-h-[84dvh] flex-col justify-end sm:min-h-[32rem] sm:justify-center lg:min-h-[36rem]">
         <img
           key={`bg-${current.id}`}
           src={backdropSrc}
           alt=""
           referrerPolicy="no-referrer"
           onError={() => setFailedBackdrops((prev) => ({ ...prev, [current.id]: true }))}
-          className="absolute inset-0 h-full w-full object-cover opacity-90 brightness-110 transition-opacity duration-300"
+          className="absolute inset-0 h-full w-full object-cover opacity-90 brightness-105 transition-opacity duration-300"
         />
-        {/* Lighter multi-stop scrim keeping hero artwork bright while preserving text legibility */}
-        <div className="absolute inset-0 bg-gradient-to-r from-background/85 via-background/40 to-transparent" />
-        <div className="absolute inset-0 bg-gradient-to-t from-background/65 via-transparent to-transparent" />
+        {/* Top scrim ensures the transparent overlaid header always remains readable */}
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-black/80 via-black/40 to-transparent" />
+        {/* Side and bottom scrims preserving artwork vibrance and hero copy contrast */}
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-background/90 via-background/45 to-transparent" />
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-background via-background/60 to-transparent sm:from-background/85 sm:via-background/25" />
 
-        <div className="relative z-10 flex min-h-[24rem] sm:min-h-[27rem] items-center justify-between gap-8 px-6 py-10 sm:px-10 md:px-12">
-          <div className="max-w-2xl space-y-4">
+        <div className="relative z-10 mx-auto flex w-full max-w-7xl items-center justify-between gap-8 px-4 pt-24 pb-16 sm:px-6 sm:pt-28 sm:pb-16 md:pt-32">
+          <div className="max-w-2xl space-y-3 sm:space-y-4">
             <p className="text-xs font-medium text-primary tabular-nums drop-shadow-xs">
               {metaParts.join(' · ')}
             </p>
@@ -71,7 +73,7 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
             </h1>
 
             {current.genre && (
-              <p className="text-sm text-muted-foreground">{current.genre}</p>
+              <p className="text-xs sm:text-sm text-muted-foreground">{current.genre}</p>
             )}
 
             {current.descr && (
@@ -114,37 +116,41 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
         </div>
 
         {slides.length > 1 && (
-          <div className="absolute bottom-4 left-6 right-6 z-10 flex items-center justify-between sm:left-10 sm:right-10 md:left-12 md:right-12">
-            <div className="flex items-center gap-2">
-              {slides.map((s, idx) => (
+          <div className="pointer-events-none absolute inset-x-0 bottom-4 z-10">
+            <div className="pointer-events-auto mx-auto flex max-w-7xl items-center justify-between px-4 sm:px-6">
+              <div className="flex items-center gap-2">
+                {slides.map((s, idx) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    aria-label={`Afficher ${s.titre}`}
+                    onClick={() => setIndex(idx)}
+                    className={`h-1.5 rounded-full transition-all duration-200 ${
+                      idx === index
+                        ? 'w-8 bg-primary'
+                        : 'w-2.5 bg-muted-foreground/45 hover:bg-muted-foreground'
+                    }`}
+                  />
+                ))}
+              </div>
+              <div className="flex items-center gap-1.5">
                 <button
-                  key={s.id}
                   type="button"
-                  aria-label={`Afficher ${s.titre}`}
-                  onClick={() => setIndex(idx)}
-                  className={`h-1.5 rounded-full transition-all duration-200 ${
-                    idx === index ? 'w-8 bg-primary' : 'w-2.5 bg-muted-foreground/45 hover:bg-muted-foreground'
-                  }`}
-                />
-              ))}
-            </div>
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                aria-label="Titre précédent"
-                onClick={() => setIndex((prev) => (prev - 1 + slides.length) % slides.length)}
-                className="inline-flex size-8 items-center justify-center rounded-lg border border-border bg-background/80 text-foreground hover:bg-accent"
-              >
-                <ChevronLeft className="size-4" />
-              </button>
-              <button
-                type="button"
-                aria-label="Titre suivant"
-                onClick={() => setIndex((prev) => (prev + 1) % slides.length)}
-                className="inline-flex size-8 items-center justify-center rounded-lg border border-border bg-background/80 text-foreground hover:bg-accent"
-              >
-                <ChevronRight className="size-4" />
-              </button>
+                  aria-label="Titre précédent"
+                  onClick={() => setIndex((prev) => (prev - 1 + slides.length) % slides.length)}
+                  className="inline-flex size-8 items-center justify-center rounded-lg border border-border bg-background/80 text-foreground hover:bg-accent"
+                >
+                  <ChevronLeft className="size-4" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Titre suivant"
+                  onClick={() => setIndex((prev) => (prev + 1) % slides.length)}
+                  className="inline-flex size-8 items-center justify-center rounded-lg border border-border bg-background/80 text-foreground hover:bg-accent"
+                >
+                  <ChevronRight className="size-4" />
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -252,65 +258,74 @@ export function HomePage() {
   });
 
   const data = homeQuery.data;
+  const heroSlides = data
+    ? data.slider.length > 0
+      ? data.slider
+      : data.latest.slice(0, 5).map((item) => ({ ...item, descr: null, backdrop: null }))
+    : [];
+  const hasHero = homeQuery.isLoading || heroSlides.length > 0;
 
   return (
-    <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-10">
-      {data && (data.slider.length > 0 || data.latest.length > 0) && (
-        <HeroSlider
-          slides={
-            data.slider.length > 0
-              ? data.slider
-              : data.latest.slice(0, 5).map((item) => ({ ...item, descr: null, backdrop: null }))
-          }
-        />
+    <div>
+      {homeQuery.isLoading ? (
+        <section className="relative overflow-hidden border-b border-border bg-card">
+          <div className="min-h-[84dvh] sm:min-h-[32rem] lg:min-h-[36rem] animate-pulse bg-card/80 pt-24 pb-16" />
+        </section>
+      ) : (
+        heroSlides.length > 0 && <HeroSlider slides={heroSlides} />
       )}
 
-      {isMember && data && <ContinueWatchingSection items={data.continueWatching} />}
+      <main
+        className={`mx-auto max-w-7xl px-4 pb-8 sm:px-6 sm:pb-10 ${
+          hasHero ? 'pt-8 sm:pt-10' : 'pt-24 sm:pt-28'
+        }`}
+      >
+        {isMember && data && <ContinueWatchingSection items={data.continueWatching} />}
 
-      {/* Derniers ajouts */}
-      <section className="mb-14">
-        <div className="mb-5 flex items-baseline justify-between gap-4">
-          <h2 className="font-display text-2xl font-bold text-foreground">Derniers ajouts</h2>
-          <Link
-            to="/catalogue"
-            className="text-sm font-medium text-muted-foreground hover:text-primary whitespace-nowrap shrink-0"
-          >
-            Tout le catalogue →
-          </Link>
-        </div>
-        {homeQuery.isLoading ? (
-          <PosterSkeletonGrid count={12} />
-        ) : data?.latest.length ? (
-          <div className="grid grid-cols-2 gap-5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-            {data.latest.map((item) => (
-              <PosterCard key={`${item.item_type}:${item.id}`} item={item} />
-            ))}
-          </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">Aucun titre disponible pour le moment.</p>
-        )}
-      </section>
-
-      {/* Uniquement pour toi */}
-      {isMember && Boolean(data?.forYou.length) && (
+        {/* Derniers ajouts */}
         <section className="mb-14">
           <div className="mb-5 flex items-baseline justify-between gap-4">
-            <div>
-              <h2 className="font-display text-2xl font-bold text-foreground">
-                Uniquement pour toi
-              </h2>
-              <p className="mt-0.5 text-sm text-muted-foreground">
-                Recommandations basées sur vos derniers visionnages
-              </p>
+            <h2 className="font-display text-2xl font-bold text-foreground">Derniers ajouts</h2>
+            <Link
+              to="/catalogue"
+              className="text-sm font-medium text-muted-foreground hover:text-primary whitespace-nowrap shrink-0"
+            >
+              Tout le catalogue →
+            </Link>
+          </div>
+          {homeQuery.isLoading ? (
+            <PosterSkeletonGrid count={12} />
+          ) : data?.latest.length ? (
+            <div className="grid grid-cols-3 gap-2.5 sm:gap-5 md:grid-cols-4 lg:grid-cols-6">
+              {data.latest.map((item) => (
+                <PosterCard key={`${item.item_type}:${item.id}`} item={item} />
+              ))}
             </div>
-          </div>
-          <div className="grid grid-cols-2 gap-5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-            {data!.forYou.map((item) => (
-              <PosterCard key={`fy-${item.item_type}:${item.id}`} item={item} />
-            ))}
-          </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">Aucun titre disponible pour le moment.</p>
+          )}
         </section>
-      )}
+
+        {/* Uniquement pour toi */}
+        {isMember && Boolean(data?.forYou.length) && (
+          <section className="mb-14">
+            <div className="mb-5 flex items-baseline justify-between gap-4">
+              <div>
+                <h2 className="font-display text-2xl font-bold text-foreground">
+                  Uniquement pour toi
+                </h2>
+                <p className="mt-0.5 text-sm text-muted-foreground">
+                  Recommandations basées sur vos derniers visionnages
+                </p>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-2.5 sm:gap-5 md:grid-cols-4 lg:grid-cols-6">
+              {data!.forYou.map((item) => (
+                <PosterCard key={`fy-${item.item_type}:${item.id}`} item={item} />
+              ))}
+            </div>
+          </section>
+        )}
 
       {/* Activité des amis */}
       {isMember && Boolean(data?.friendsActivity.length) && (
@@ -376,7 +391,7 @@ export function HomePage() {
           </div>
         </div>
         {data?.week.length ? (
-          <div className="grid grid-cols-2 gap-5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+          <div className="grid grid-cols-3 gap-2.5 sm:gap-5 md:grid-cols-4 lg:grid-cols-6">
             {data.week.map((entry, idx) => (
               <PosterCard
                 key={`wk-${entry.item.item_type}:${entry.item.id}`}
@@ -400,6 +415,7 @@ export function HomePage() {
           </div>
         )}
       </section>
-    </main>
+      </main>
+    </div>
   );
 }

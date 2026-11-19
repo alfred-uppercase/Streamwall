@@ -3,7 +3,13 @@ import { Download, PlusSquare, Share, Smartphone, WifiOff, X } from 'lucide-reac
 import { useOnlineStatus, usePWAInstall } from '../hooks/usePWAInstall';
 import { useSiteConfig } from '../lib/siteConfig';
 
-export function PWAInstallButton({ compact = false }: { compact?: boolean }) {
+export function PWAInstallButton({
+  compact = false,
+  overMedia = false,
+}: {
+  compact?: boolean;
+  overMedia?: boolean;
+}) {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const { siteName } = useSiteConfig();
   const [showIOSGuide, setShowIOSGuide] = useState(false);
@@ -11,6 +17,10 @@ export function PWAInstallButton({ compact = false }: { compact?: boolean }) {
   if (isInstalled) {
     return null;
   }
+
+  const compactClass = overMedia
+    ? 'inline-flex h-10 items-center gap-1.5 rounded-full border border-white/25 bg-black/40 px-3 text-xs font-semibold text-white backdrop-blur-sm transition-colors hover:bg-black/60 whitespace-nowrap shrink-0'
+    : 'inline-flex h-10 items-center gap-1.5 rounded-full border border-primary/40 bg-primary/15 px-3 text-xs font-semibold text-primary transition-colors hover:bg-primary/25 whitespace-nowrap shrink-0';
 
   if (isInstallable) {
     return (
@@ -21,7 +31,7 @@ export function PWAInstallButton({ compact = false }: { compact?: boolean }) {
         title={`Installer ${siteName} sur votre appareil`}
         className={
           compact
-            ? 'inline-flex h-10 items-center gap-1.5 rounded-full border border-primary/40 bg-primary/15 px-3 text-xs font-semibold text-primary transition-colors hover:bg-primary/25 whitespace-nowrap shrink-0'
+            ? compactClass
             : 'inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 whitespace-nowrap shrink-0'
         }
       >
@@ -41,7 +51,7 @@ export function PWAInstallButton({ compact = false }: { compact?: boolean }) {
           title={`Ajouter ${siteName} à l’écran d’accueil`}
           className={
             compact
-              ? 'inline-flex h-10 items-center gap-1.5 rounded-full border border-primary/40 bg-primary/15 px-3 text-xs font-semibold text-primary transition-colors hover:bg-primary/25 whitespace-nowrap shrink-0'
+              ? compactClass
               : 'inline-flex items-center gap-2 rounded-lg border border-primary/40 bg-primary/15 px-3.5 py-2 text-xs font-semibold text-primary transition-colors hover:bg-primary/25 whitespace-nowrap shrink-0'
           }
         >

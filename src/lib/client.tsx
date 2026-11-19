@@ -302,11 +302,6 @@ export const api = {
       `/api/notifications${readOnly ? '?readOnly=1' : ''}`,
       { method: 'DELETE' }
     ),
-  rateItem: (itemType: string, itemId: string, score: number) =>
-    apiRequest<{ average: number; count: number; myScore: number }>('/api/ratings', {
-      method: 'POST',
-      body: JSON.stringify({ itemType, itemId, score }),
-    }),
   comments: (type: string, id: string) =>
     apiRequest<{ comments: CommentRecord[] }>(
       `/api/comments/${encodeURIComponent(type)}/${encodeURIComponent(id)}`

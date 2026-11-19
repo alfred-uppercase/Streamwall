@@ -69,6 +69,7 @@ export function Navbar() {
   const queryClient = useQueryClient();
 
   const [notifOpen, setNotifOpen] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
   const notifContainerRef = useRef<HTMLDivElement>(null);
   const [guestReadIds, setGuestReadIds] = useState<string[]>(() =>
     readIdList(GUEST_READ_STORAGE_KEY)
@@ -76,6 +77,19 @@ export function Navbar() {
   const [guestClearedIds, setGuestClearedIds] = useState<string[]>(() =>
     readIdList(GUEST_CLEARED_STORAGE_KEY)
   );
+
+  const isOverlayRoute =
+    location.pathname === '/' || /^\/(film|serie|anime)\/[^/]+$/.test(location.pathname);
+  const isTransparent = isOverlayRoute && !scrolled;
+
+  useEffect(() => {
+    const onScroll = () => {
+      setScrolled(window.scrollY > 24);
+    };
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, [location.pathname]);
 
   const billingPlansQuery = useQuery({
     queryKey: ['billing-plans'],
@@ -185,8 +199,8 @@ export function Navbar() {
 
   const mobileDockItems = [
     { to: '/', label: 'Accueil', icon: Home, exact: true },
-    { to: '/catalogue', label: 'Catalogue', icon: LayoutGrid, exact: false },
     { to: '/favoris', label: 'Favoris', icon: Heart, exact: false },
+    { to: '/catalogue', label: 'Catalogue', icon: LayoutGrid, exact: false },
     { to: '/suggestion', label: 'Suggestion', icon: Sparkles, exact: false },
     {
       to: isMember ? '/profil' : '/auth',
@@ -197,14 +211,28 @@ export function Navbar() {
     },
   ];
 
+  const headerClassName = isOverlayRoute
+    ? `fixed top-0 inset-x-0 z-40 transition-colors duration-200 ${
+        isTransparent
+          ? 'border-b border-transparent bg-transparent'
+          : 'border-b border-border bg-background/95 backdrop-blur-md shadow-sm'
+      }`
+    : 'sticky top-0 z-40 border-b border-border bg-background/95 backdrop-blur transition-colors duration-200';
+
+  const iconButtonClassName = isTransparent
+    ? 'relative inline-flex size-10 items-center justify-center rounded-full border border-white/25 bg-black/40 text-white backdrop-blur-sm transition-colors hover:bg-black/60 hover:text-primary'
+    : 'relative inline-flex size-10 items-center justify-center rounded-full border border-border bg-card text-foreground transition-colors hover:bg-accent hover:text-primary';
+
   return (
     <>
-      <header className="sticky top-0 z-40 border-b border-border bg-background/95 backdrop-blur">
+      <header className={headerClassName}>
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-6 px-4 py-3 sm:px-6">
           {/* Zone 1: Brand wordmark (links to Accueil "/") */}
           <Link
             to="/"
-            className="font-display text-xl font-bold tracking-tight text-foreground whitespace-nowrap shrink-0 sm:text-2xl"
+            className={`font-display text-xl font-bold tracking-tight whitespace-nowrap shrink-0 sm:text-2xl ${
+              isTransparent ? 'text-white drop-shadow-xs' : 'text-foreground'
+            }`}
           >
             {siteName === 'StreamWall' ? (
               <>
@@ -232,8 +260,12 @@ export function Navbar() {
                   className={() =>
                     `whitespace-nowrap shrink-0 py-1 transition-colors border-b-2 ${
                       isItemActive
-                        ? 'border-primary text-foreground font-semibold'
-                        : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
+                        ? isTransparent
+                          ? 'border-primary text-white font-semibold'
+                          : 'border-primary text-foreground font-semibold'
+                        : isTransparent
+                          ? 'border-transparent text-white/85 hover:text-white hover:border-white/40'
+                          : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
                     }`
                   }
                 >
@@ -245,7 +277,7 @@ export function Navbar() {
 
           {/* Zone 3: Right Icons — PWA Install, Notifications (members & guests), Loupe (Catalogue) & User Icon */}
           <div className="flex items-center gap-2 shrink-0">
-            <PWAInstallButton compact />
+            <PWAInstallButton compact overMedia={isTransparent} />
             <div ref={notifContainerRef} className="relative">
               <button
                 type="button"
@@ -253,7 +285,7 @@ export function Navbar() {
                 aria-expanded={notifOpen}
                 title="Notifications"
                 onClick={() => setNotifOpen((prev) => !prev)}
-                className="relative inline-flex size-10 items-center justify-center rounded-full border border-border bg-card text-foreground transition-colors hover:bg-accent hover:text-primary"
+                className={iconButtonClassName}
               >
                 <Bell className="size-4.5" />
                 {unreadCount > 0 && (
@@ -378,7 +410,7 @@ export function Navbar() {
               to="/catalogue"
               aria-label="Rechercher dans le catalogue"
               title="Rechercher dans le catalogue"
-              className="inline-flex size-10 items-center justify-center rounded-full border border-border bg-card text-foreground transition-colors hover:bg-accent hover:text-primary"
+              className={iconButtonClassName}
             >
               <Search className="size-4.5" />
             </Link>
@@ -389,7 +421,7 @@ export function Navbar() {
                   to="/auth"
                   aria-label="Se connecter"
                   title="Se connecter"
-                  className="inline-flex size-10 items-center justify-center rounded-full border border-border bg-card text-foreground transition-colors hover:bg-accent hover:text-primary"
+                  className={iconButtonClassName}
                 >
                   <UserRound className="size-4.5" />
                 </Link>

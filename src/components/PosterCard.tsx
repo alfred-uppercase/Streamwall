@@ -50,9 +50,9 @@ export function FavoriteButton({
           e.stopPropagation();
           mutation.mutate();
         }}
-        className="inline-flex size-9 items-center justify-center rounded-lg bg-background/85 text-foreground backdrop-blur transition-colors hover:bg-background focus-visible:outline-2 focus-visible:outline-ring"
+        className="inline-flex size-8 sm:size-9 items-center justify-center rounded-md sm:rounded-lg bg-background/85 text-foreground backdrop-blur transition-colors hover:bg-background focus-visible:outline-2 focus-visible:outline-ring"
       >
-        <Heart className={`size-4 ${saved ? 'fill-primary text-primary' : 'text-foreground'}`} />
+        <Heart className={`size-3.5 sm:size-4 ${saved ? 'fill-primary text-primary' : 'text-foreground'}`} />
       </button>
     );
   }
@@ -94,7 +94,7 @@ export function PosterCard({
   return (
     <div className="group relative flex flex-col">
       {typeof rankNumber === 'number' && (
-        <p className="mb-1.5 text-xs font-medium text-primary tabular-nums">
+        <p className="mb-1 sm:mb-1.5 text-[10px] sm:text-xs font-medium text-primary tabular-nums line-clamp-1">
           #{rankNumber}
           {subtitleOverride ? ` · ${subtitleOverride}` : ''}
         </p>
@@ -114,13 +114,13 @@ export function PosterCard({
               className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
             />
           ) : (
-            <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-gradient-to-b from-card to-background p-4 text-center">
+            <div className="flex h-full w-full flex-col items-center justify-center gap-2 sm:gap-3 bg-gradient-to-b from-card to-background p-2.5 sm:p-4 text-center">
               {item.item_type === 'film' ? (
-                <Film className="size-8 text-primary/70" />
+                <Film className="size-6 sm:size-8 text-primary/70" />
               ) : (
-                <Tv className="size-8 text-primary/70" />
+                <Tv className="size-6 sm:size-8 text-primary/70" />
               )}
-              <span className="line-clamp-3 font-display text-sm font-semibold text-foreground/90">
+              <span className="line-clamp-3 font-display text-[11px] sm:text-sm font-semibold text-foreground/90">
                 {item.titre}
               </span>
             </div>
@@ -128,25 +128,25 @@ export function PosterCard({
 
           {/* Hover play affordance */}
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/45 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
-            <span className="inline-flex size-11 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg">
-              <Play className="size-5 fill-current ml-0.5" />
+            <span className="inline-flex size-8 sm:size-11 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg">
+              <Play className="size-3.5 sm:size-5 fill-current ml-0.5" />
             </span>
           </div>
         </div>
 
-        <h3 className="mt-2.5 line-clamp-1 text-sm font-semibold text-foreground group-hover:text-primary transition-colors">
+        <h3 className="mt-1.5 sm:mt-2.5 line-clamp-1 text-xs sm:text-sm font-semibold text-foreground group-hover:text-primary transition-colors leading-tight">
           {item.titre}
         </h3>
 
         {/* Clean unboxed typographic metadata with · separators */}
-        <p className="mt-0.5 line-clamp-1 text-xs text-muted-foreground tabular-nums">
+        <p className="mt-0.5 line-clamp-1 text-[10px] sm:text-xs text-muted-foreground tabular-nums leading-tight">
           {typeof rankNumber !== 'number' && subtitleOverride
             ? subtitleOverride
             : metaParts.join(' · ')}
         </p>
       </Link>
 
-      <div className="absolute right-2 top-2 z-10">
+      <div className="absolute right-1.5 top-1.5 sm:right-2 sm:top-2 z-10">
         <FavoriteButton item={item} compact />
       </div>
     </div>
@@ -155,12 +155,12 @@ export function PosterCard({
 
 export function PosterSkeletonGrid({ count = 12 }: { count?: number }) {
   return (
-    <div className="grid grid-cols-2 gap-5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+    <div className="grid grid-cols-3 gap-2.5 sm:gap-5 md:grid-cols-4 lg:grid-cols-6">
       {Array.from({ length: count }).map((_, idx) => (
-        <div key={idx} className="space-y-2.5">
+        <div key={idx} className="space-y-1.5 sm:space-y-2.5">
           <div className="aspect-[2/3] w-full animate-pulse rounded-lg bg-card border border-border" />
-          <div className="h-4 w-3/4 animate-pulse rounded bg-card" />
-          <div className="h-3 w-1/2 animate-pulse rounded bg-card" />
+          <div className="h-3 sm:h-4 w-3/4 animate-pulse rounded bg-card" />
+          <div className="h-2.5 sm:h-3 w-1/2 animate-pulse rounded bg-card" />
         </div>
       ))}
     </div>

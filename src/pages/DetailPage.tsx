@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Check,
   ChevronDown,
@@ -269,15 +269,6 @@ export function DetailPage() {
     return () => window.removeEventListener('keydown', onKey);
   }, [modal, setWatchingItem]);
 
-  const rateMutation = useMutation({
-    mutationFn: (score: number) => api.rateItem(type, id, score),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['details', type, id] });
-      toast.success('Votre note a été enregistrée');
-    },
-    onError: () => toast.error('Connectez-vous pour noter ce titre.'),
-  });
-
   // Compute next AVAILABLE episode for quick "Épisode suivant" inside player modal
   const nextEpisode = useMemo(() => {
     if (episodes.length === 0) return null;
@@ -305,7 +296,7 @@ export function DetailPage() {
 
   if (detailQuery.isLoading) {
     return (
-      <main className="mx-auto max-w-7xl px-4 py-12 sm:px-6">
+      <main className="mx-auto max-w-7xl px-4 pt-24 pb-12 sm:px-6 sm:pt-28">
         <div className="h-96 animate-pulse rounded-xl border border-border bg-card" />
       </main>
     );
@@ -315,7 +306,7 @@ export function DetailPage() {
 
   if (detailQuery.isError || !detailData || !item || !normalizedItem) {
     return (
-      <main className="mx-auto max-w-7xl px-4 py-16 text-center sm:px-6">
+      <main className="mx-auto max-w-7xl px-4 pt-24 pb-16 text-center sm:px-6 sm:pt-28">
         <h1 className="font-display text-3xl font-bold text-foreground">Titre introuvable</h1>
         <p className="mt-2 mb-6 text-sm text-muted-foreground">
           Ce contenu n’existe pas ou le serveur de catalogue ne répond pas.
@@ -354,7 +345,6 @@ export function DetailPage() {
     item.langue || null,
   ].filter(Boolean);
 
-  const rating = detailData.rating;
   const tmdbRating = detailData.tmdbRating;
   const descrText = item.descr?.trim() || '';
   const isLongDescr = descrText.length > 220;
@@ -372,9 +362,11 @@ export function DetailPage() {
           onError={() => setBackdropFailed(true)}
           className="absolute inset-0 h-full w-full object-cover opacity-35"
         />
-        <div className="absolute inset-0 bg-gradient-to-t from-background via-background/85 to-background/45" />
+        {/* Top scrim for transparent overlaid header contrast */}
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-black/75 via-black/35 to-transparent" />
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-background via-background/85 to-background/45" />
 
-        <div className="relative z-10 mx-auto flex max-w-7xl flex-col gap-8 px-4 py-10 sm:px-6 md:flex-row md:items-end md:py-14">
+        <div className="relative z-10 mx-auto flex max-w-7xl flex-col gap-8 px-4 pt-24 pb-10 sm:px-6 sm:pt-28 md:flex-row md:items-end md:pt-32 md:pb-14">
           <div className="w-44 shrink-0 overflow-hidden rounded-xl border border-border bg-card shadow-2xl sm:w-56">
             {item.poster && !posterFailed ? (
               <img
@@ -402,9 +394,8 @@ export function DetailPage() {
 
             {item.genre && <p className="text-sm text-muted-foreground">{item.genre}</p>}
 
-            {/* TMDB Score + Community star rating */}
-            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
-              {tmdbRating && (
+            {tmdbRating && (
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
                 <div className="inline-flex items-center gap-1.5 text-sm font-semibold text-foreground tabular-nums">
                   <Star className="size-4 fill-amber-400 text-amber-400" />
                   <span>{tmdbRating.average.toFixed(1)}</span>
@@ -415,42 +406,8 @@ export function DetailPage() {
                     </span>
                   )}
                 </div>
-              )}
-
-              <div className="flex items-center gap-2.5">
-                <div className="flex items-center gap-1" role="group" aria-label="Noter ce titre">
-                  {[1, 2, 3, 4, 5].map((star) => {
-                    const active = (rating?.myScore ?? Math.round(rating?.average ?? 0)) >= star;
-                    return (
-                      <button
-                        key={star}
-                        type="button"
-                        aria-label={`Noter ${star} sur 5`}
-                        onClick={() => {
-                          if (!isMember) {
-                            toast.info('Connectez-vous pour enregistrer votre note.');
-                            return;
-                          }
-                          rateMutation.mutate(star);
-                        }}
-                        className="p-0.5 transition-transform hover:scale-110"
-                      >
-                        <Star
-                          className={`size-4 ${
-                            active ? 'fill-primary text-primary' : 'text-muted-foreground'
-                          }`}
-                        />
-                      </button>
-                    );
-                  })}
-                </div>
-                <span className="text-xs text-muted-foreground tabular-nums">
-                  {rating?.average
-                    ? `${rating.average} / 5 (${rating.count} avis)`
-                    : 'Soyez le premier à noter'}
-                </span>
               </div>
-            </div>
+            )}
 
             {descrText && (
               <div className="max-w-3xl space-y-1.5">
@@ -727,7 +684,7 @@ export function DetailPage() {
       {detailData.related.length > 0 && (
         <section className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
           <h2 className="mb-5 font-display text-2xl font-semibold text-foreground">À voir aussi</h2>
-          <div className="grid grid-cols-2 gap-5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+          <div className="grid grid-cols-3 gap-2.5 sm:gap-5 md:grid-cols-4 lg:grid-cols-6">
             {detailData.related.slice(0, 6).map((rel) => (
               <PosterCard key={`rel-${rel.id}`} item={rel} />
             ))}
@@ -741,7 +698,7 @@ export function DetailPage() {
           <h2 className="mb-5 font-display text-2xl font-semibold text-foreground">
             Dans le même genre
           </h2>
-          <div className="grid grid-cols-2 gap-5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+          <div className="grid grid-cols-3 gap-2.5 sm:gap-5 md:grid-cols-4 lg:grid-cols-6">
             {detailData.sameGenre.map((g) => (
               <PosterCard key={`genre-${g.id}`} item={g} />
             ))}

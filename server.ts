@@ -3756,37 +3756,8 @@ async function startServer() {
   app.delete('/api/profile', handleSelfAccountDelete);
   app.post('/api/profile/delete', handleSelfAccountDelete);
 
-  app.post('/api/ratings', async (req, res) => {
-    const auth = await resolveAuth(req);
-    if (!auth) {
-      res.status(401).json({ error: 'Connexion requise' });
-      return;
-    }
-    const itemType = String(req.body?.itemType ?? 'film');
-    const itemId = String(req.body?.itemId ?? '');
-    const score = Math.round(Number(req.body?.score));
-    if (!itemId || score < 1 || score > 5) {
-      res.status(400).json({ error: 'Note invalide (1 à 5).' });
-      return;
-    }
-    const itemKey = `${itemType}:${itemId}`;
-    const existing = db.ratings.find((r) => r.userId === auth.user.id && r.itemKey === itemKey);
-    if (existing) {
-      existing.score = score;
-      existing.updatedAt = new Date().toISOString();
-    } else {
-      db.ratings.push({
-        userId: auth.user.id,
-        itemKey,
-        score,
-        updatedAt: new Date().toISOString(),
-      });
-    }
-    saveDb(db);
-    const itemRatings = db.ratings.filter((r) => r.itemKey === itemKey);
-    const average =
-      Math.round((itemRatings.reduce((s, r) => s + r.score, 0) / itemRatings.length) * 10) / 10;
-    res.json({ average, count: itemRatings.length, myScore: score });
+  app.post('/api/ratings', (_req, res) => {
+    res.status(410).json({ error: 'La notation des titres a été désactivée.' });
   });
 
   app.get('/api/comments/:type/:id', async (req, res) => {
