@@ -6,9 +6,11 @@ import { createAdminClient, isSupabaseEnabled } from './supabaseAdapter.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const DATA_DIR = path.join(__dirname, '..', '..', '.data');
-export const SQLITE_FILE = path.join(DATA_DIR, 'tapenaka.sqlite');
+export const SQLITE_FILE = process.env.TAPENAKA_DB_FILE
+  ? path.resolve(process.env.TAPENAKA_DB_FILE)
+  : path.join(DATA_DIR, 'tapenaka.sqlite');
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(path.dirname(SQLITE_FILE), { recursive: true });
 
 const sqlite = new DatabaseSync(SQLITE_FILE);
 
@@ -80,6 +82,27 @@ sqlite.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user
     ON push_subscriptions (user_id);
+
+  CREATE TABLE IF NOT EXISTS error_logs (
+    id TEXT PRIMARY KEY,
+    level TEXT NOT NULL DEFAULT 'error',
+    source TEXT NOT NULL DEFAULT 'server',
+    message TEXT NOT NULL,
+    stack TEXT,
+    route TEXT,
+    method TEXT,
+    status_code INTEGER,
+    user_id TEXT,
+    user_agent TEXT,
+    context_json TEXT,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_error_logs_created
+    ON error_logs (created_at DESC);
+
+  CREATE INDEX IF NOT EXISTS idx_error_logs_level_source
+    ON error_logs (level, source, created_at DESC);
 `);
 
 const selectModuleStmt = sqlite.prepare(

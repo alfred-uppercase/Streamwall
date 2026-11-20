@@ -78,6 +78,11 @@ export function useWebPush() {
 
   useEffect(() => {
     void syncState();
+    const onPushUpdated = () => {
+      void syncState();
+    };
+    window.addEventListener('tapenaka:push-updated', onPushUpdated);
+    return () => window.removeEventListener('tapenaka:push-updated', onPushUpdated);
   }, [syncState]);
 
   const subscribe = useCallback(async (): Promise<{ ok: boolean; reason?: string }> => {
@@ -95,6 +100,7 @@ export function useWebPush() {
       const perm = await Notification.requestPermission();
       setPermission(perm);
       if (perm !== 'granted') {
+        window.dispatchEvent(new CustomEvent('tapenaka:push-updated'));
         return {
           ok: false,
           reason:
@@ -122,6 +128,7 @@ export function useWebPush() {
       await api.pushSubscribe(serialized);
       setIsSubscribed(true);
       setEndpoint(serialized.endpoint);
+      window.dispatchEvent(new CustomEvent('tapenaka:push-updated'));
       return { ok: true };
     } catch (err) {
       return {
@@ -146,6 +153,7 @@ export function useWebPush() {
       }
       setIsSubscribed(false);
       setEndpoint(null);
+      window.dispatchEvent(new CustomEvent('tapenaka:push-updated'));
       return true;
     } catch {
       return false;

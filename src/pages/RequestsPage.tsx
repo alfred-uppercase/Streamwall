@@ -7,6 +7,7 @@ import {
   ExternalLink,
   Film,
   Loader2,
+  Lock,
   Search,
   Send,
   Sparkles,
@@ -82,8 +83,13 @@ export function RequestsPage() {
   const [showDropdown, setShowDropdown] = useState(false);
   const [manualYear, setManualYear] = useState('');
   const [note, setNote] = useState('');
-  const [guestName, setGuestName] = useState('');
+  const [guestAuthAlertOpen, setGuestAuthAlertOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'added'>('all');
+
+  const promptGuestLogin = () => {
+    toast.error('Connecte-toi pour pouvoir demander ou signaler un contenu.');
+    setGuestAuthAlertOpen(true);
+  };
 
   const inputWrapperRef = useRef<HTMLDivElement>(null);
 
@@ -132,7 +138,6 @@ export function RequestsPage() {
         tmdbPosterUrl: selectedTmdb?.posterUrl ?? null,
         tmdbOverview: selectedTmdb?.overview ?? null,
         note: note.trim(),
-        guestName: !isMember ? guestName.trim() : undefined,
         visitorKey,
       }),
     onSuccess: (res) => {
@@ -158,7 +163,8 @@ export function RequestsPage() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['content-requests'] });
     },
-    onError: () => toast.error('Impossible d’enregistrer votre vote.'),
+    onError: (err) =>
+      toast.error(err instanceof Error ? err.message : 'Impossible d’enregistrer votre vote.'),
   });
 
   const suggestions = tmdbQuery.data?.results ?? [];
@@ -203,9 +209,28 @@ export function RequestsPage() {
 
       {/* Request Submission Card (NO file/photo upload) */}
       <section className="rounded-xl border border-border bg-card p-5 sm:p-6">
+        {!isMember && (
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/35 bg-amber-500/10 px-4 py-3">
+            <div className="flex items-center gap-2.5 text-sm font-medium text-amber-200">
+              <Lock className="size-4 shrink-0 text-amber-400" />
+              <span>Connecte-toi pour pouvoir demander ou signaler un contenu.</span>
+            </div>
+            <Link
+              to="/auth"
+              className="rounded-lg bg-primary px-3.5 py-1.5 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 whitespace-nowrap shrink-0"
+            >
+              Se connecter
+            </Link>
+          </div>
+        )}
+
         <form
           onSubmit={(e) => {
             e.preventDefault();
+            if (!isMember) {
+              promptGuestLogin();
+              return;
+            }
             submitMutation.mutate();
           }}
           className="space-y-5"
@@ -442,7 +467,7 @@ export function RequestsPage() {
             </div>
           )}
 
-          {/* Optional Year (for manual mode) + Optional Note + Optional Guest name */}
+          {/* Optional Year (for manual mode) + Optional Note */}
           <div className="grid gap-4 sm:grid-cols-3">
             {!selectedTmdb && (
               <label className="block text-sm">
@@ -461,23 +486,7 @@ export function RequestsPage() {
               </label>
             )}
 
-            {!isMember && (
-              <label className="block text-sm">
-                <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
-                  Votre pseudo (optionnel)
-                </span>
-                <input
-                  type="text"
-                  maxLength={50}
-                  value={guestName}
-                  onChange={(e) => setGuestName(e.target.value)}
-                  placeholder="Visiteur"
-                  className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground focus:border-primary focus:outline-none"
-                />
-              </label>
-            )}
-
-            <label className={`block text-sm ${selectedTmdb && isMember ? 'sm:col-span-3' : selectedTmdb || isMember ? 'sm:col-span-2' : ''}`}>
+            <label className={`block text-sm ${selectedTmdb ? 'sm:col-span-3' : 'sm:col-span-2'}`}>
               <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
                 Précisions (langue VF/VOSTFR, saison, remarque…) — optionnel
               </span>
@@ -497,8 +506,15 @@ export function RequestsPage() {
               Si ce titre a déjà été demandé, votre requête ajoutera automatiquement un vote de priorité (+1).
             </p>
             <button
-              type="submit"
-              disabled={submitMutation.isPending || titleInput.trim().length < 2}
+              type="button"
+              disabled={submitMutation.isPending || (isMember && titleInput.trim().length < 2)}
+              onClick={() => {
+                if (!isMember) {
+                  promptGuestLogin();
+                  return;
+                }
+                submitMutation.mutate();
+              }}
               className="inline-flex items-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap shrink-0"
             >
               <Send className="size-4" />
@@ -620,7 +636,13 @@ export function RequestsPage() {
                       <button
                         type="button"
                         disabled={voteMutation.isPending}
-                        onClick={() => voteMutation.mutate(req.id)}
+                        onClick={() => {
+                          if (!isMember) {
+                            promptGuestLogin();
+                            return;
+                          }
+                          voteMutation.mutate(req.id);
+                        }}
                         className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold transition-colors tabular-nums ${
                           req.hasVoted
                             ? 'border-primary/50 bg-primary/15 text-primary'
@@ -647,6 +669,51 @@ export function RequestsPage() {
           </div>
         )}
       </section>
+
+      {guestAuthAlertOpen && (
+        <div
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="guest-requests-alert-title"
+          aria-describedby="guest-requests-alert-desc"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-xs"
+          onClick={() => setGuestAuthAlertOpen(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl border border-border bg-card p-6 shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="grid size-10 shrink-0 place-items-center rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-400">
+                <Lock className="size-5" />
+              </div>
+              <div className="space-y-1">
+                <h2 id="guest-requests-alert-title" className="font-display text-base font-bold text-foreground">
+                  Connexion requise
+                </h2>
+                <p id="guest-requests-alert-desc" className="text-sm text-muted-foreground">
+                  Connecte-toi pour pouvoir demander ou signaler un contenu.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setGuestAuthAlertOpen(false)}
+                className="rounded-lg border border-border px-4 py-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+              >
+                Fermer
+              </button>
+              <Link
+                to="/auth"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90"
+              >
+                <span>Se connecter</span>
+              </Link>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

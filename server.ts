@@ -172,10 +172,25 @@ import {
   updateContentRequestStatus,
 } from './src/server/requestsStore.ts';
 import {
+  acceptFriendRequest,
+  cancelFriendRequest,
+  cleanupUserFriendRequests,
+  clearFriendRequestsBetween,
+  createOrMatchFriendRequest,
+  declineFriendRequest,
+  listUserFriendRequests,
+} from './src/server/friendsStore.ts';
+import {
   getPrivacyPageConfig,
   resetPrivacyPageConfig,
   updatePrivacyPageConfig,
 } from './src/server/privacyStore.ts';
+import {
+  clearErrorLogs,
+  installProcessErrorHandlers,
+  listErrorLogs,
+  recordErrorLog,
+} from './src/server/errorLogger.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3000;
@@ -1384,7 +1399,15 @@ async function fetchUpstreamCatalogue(filters: CatalogueFilters): Promise<Catalo
       items,
     };
     return setCached(cacheKey, pageData, 90_000);
-  } catch {
+  } catch (err) {
+    recordErrorLog({
+      level: 'warn',
+      source: 'upstream',
+      message: 'Échec de récupération du catalogue upstream (bascule fallback)',
+      route: '/api/catalogue',
+      context: { q: filters.q, type: filters.type, page: filters.page },
+      err,
+    });
     const qLower = filters.q.toLowerCase();
     let filtered = FALLBACK_ITEMS.filter((it) => {
       if (qLower && !it.titre.toLowerCase().includes(qLower)) return false;
@@ -1465,8 +1488,14 @@ async function fetchUpstreamGenres(): Promise<string[]> {
     if (sorted.length > 0) {
       return setCached(cacheKey, sorted, 6 * 3_600_000);
     }
-  } catch {
-    // Fallback below
+  } catch (err) {
+    recordErrorLog({
+      level: 'warn',
+      source: 'upstream',
+      message: 'Échec de récupération des genres TMDB (bascule fallback)',
+      route: '/api/catalogue/genres',
+      err,
+    });
   }
   return FALLBACK_GENRES;
 }
@@ -1656,14 +1685,43 @@ async function fetchUpstreamDetail(
 
     const result = { item, cast, related, episodes, live: true };
     return setCached(cacheKey, result, 180_000);
-  } catch {
+  } catch (err) {
+    recordErrorLog({
+      level: 'warn',
+      source: 'upstream',
+      message: `Échec de récupération fiche détail (${type}/${id})`,
+      route: `/api/details/${type}/${id}`,
+      err,
+    });
     const fb = buildFallbackDetail(type, id);
     return { ...fb, live: false };
   }
 }
 
-async function startServer() {
+const clientErrorRateMap = new Map<string, { count: number; resetAt: number }>();
+
+function allowClientErrorReport(ip: string): boolean {
+  const now = Date.now();
+  const entry = clientErrorRateMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    clientErrorRateMap.set(ip, { count: 1, resetAt: now + 60_000 });
+    return true;
+  }
+  if (entry.count >= 30) return false;
+  entry.count += 1;
+  return true;
+}
+
+export async function createApiApp(): Promise<express.Express> {
   const app = express();
+
+  app.get('/api/health', (_req, res) => {
+    res.json({
+      ok: true,
+      db: 'sqlite',
+      timestamp: new Date().toISOString(),
+    });
+  });
 
   // CryptoGate webhook MUST read raw request body before express.json() for HMAC-SHA256 verification
   app.post(
@@ -1688,6 +1746,71 @@ async function startServer() {
   );
 
   app.use(express.json({ limit: '4mb' }));
+
+  app.use('/api', (req, res, next) => {
+    res.on('finish', () => {
+      if (res.statusCode >= 500 && !res.locals.errorLogged) {
+        recordErrorLog({
+          level: 'error',
+          source: 'api',
+          message: `Réponse HTTP ${res.statusCode} sur ${req.method} ${req.originalUrl}`,
+          route: req.originalUrl,
+          method: req.method,
+          statusCode: res.statusCode,
+          userAgent: String(req.headers['user-agent'] ?? ''),
+        });
+      }
+    });
+    next();
+  });
+
+  app.post('/api/client-errors', async (req, res) => {
+    const ip = req.ip || 'unknown';
+    if (!allowClientErrorReport(ip)) {
+      res.status(429).json({ ok: false });
+      return;
+    }
+    const message = String(req.body?.message ?? '').trim();
+    if (!message) {
+      res.status(400).json({ error: 'Message d’erreur manquant.' });
+      return;
+    }
+    const auth = await resolveAuth(req).catch(() => null);
+    const entry = recordErrorLog({
+      level: req.body?.level === 'fatal' || req.body?.level === 'warn' ? req.body.level : 'error',
+      source: 'client',
+      message,
+      stack: typeof req.body?.stack === 'string' ? req.body.stack : null,
+      route: typeof req.body?.route === 'string' ? req.body.route : null,
+      userId: auth?.user.id ?? null,
+      userAgent: String(req.headers['user-agent'] ?? ''),
+      context:
+        req.body?.context && typeof req.body.context === 'object'
+          ? (req.body.context as Record<string, unknown>)
+          : null,
+    });
+    res.json({ ok: true, id: entry.id });
+  });
+
+  app.get('/api/admin/logs', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    res.json(
+      listErrorLogs({
+        level: typeof req.query.level === 'string' ? req.query.level : undefined,
+        source: typeof req.query.source === 'string' ? req.query.source : undefined,
+        q: typeof req.query.q === 'string' ? req.query.q : undefined,
+        limit: req.query.limit ? Number(req.query.limit) : undefined,
+      })
+    );
+  });
+
+  app.delete('/api/admin/logs', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const deleted = clearErrorLogs();
+    res.json({ ok: true, deleted });
+  });
 
   // ─────────────────────────────────────────────────────────────────────────
   // AUTH ROUTES (Online Supabase when configured, local store otherwise)
@@ -3079,6 +3202,26 @@ async function startServer() {
       .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
       .slice(0, 5);
 
+    const mapFriendRequests = (userId: string) => {
+      const { incoming, outgoing } = listUserFriendRequests(userId);
+      return {
+        incomingFriendRequests: incoming.map((r) => ({
+          ...r,
+          fromAvatar: resolveUserAvatar(r.fromUserId, r.fromAvatar),
+          fromIsPro: isUserPro(r.fromUserId),
+          toAvatar: resolveUserAvatar(r.toUserId, r.toAvatar),
+          toIsPro: isUserPro(r.toUserId),
+        })),
+        outgoingFriendRequests: outgoing.map((r) => ({
+          ...r,
+          fromAvatar: resolveUserAvatar(r.fromUserId, r.fromAvatar),
+          fromIsPro: isUserPro(r.fromUserId),
+          toAvatar: resolveUserAvatar(r.toUserId, r.toAvatar),
+          toIsPro: isUserPro(r.toUserId),
+        })),
+      };
+    };
+
     if (isSupabaseEnabled() && auth.sbClient) {
       const sbData = await sbGetMemberData(auth.sbClient, auth.user);
       const enrichedFriends = sbData.friends.map((f) => ({
@@ -3090,6 +3233,7 @@ async function startServer() {
         ...sbData,
         profile: auth.user,
         friends: enrichedFriends,
+        ...mapFriendRequests(auth.user.id),
         progress,
         history: dedupTop5History(sbData.history),
       });
@@ -3128,6 +3272,7 @@ async function startServer() {
       progress,
       history,
       friends,
+      ...mapFriendRequests(auth.user.id),
     });
   });
 
@@ -3777,6 +3922,7 @@ async function startServer() {
     cleanupUserOtpChallenges(targetId, deletedEmail || undefined);
     cleanupUserBillingData(targetId, deletedEmail || undefined);
     cleanupUserNotifications(targetId);
+    cleanupUserFriendRequests(targetId);
     deletePushSubscriptionsForUser(targetId);
     cleanupUserEmailCooldown(targetId);
 
@@ -4029,45 +4175,219 @@ async function startServer() {
     res.json({ members: matches });
   });
 
+  const ensureMutualFriendship = async (
+    userA: string,
+    userB: string,
+    sbClient?: import('@supabase/supabase-js').SupabaseClient | null
+  ) => {
+    if (isSupabaseEnabled() && sbClient) {
+      const adminSb = createAdminClient();
+      const writer = adminSb ?? sbClient;
+      await writer
+        .from('friendships')
+        .upsert(
+          [
+            { user_id: userA, friend_id: userB },
+            { user_id: userB, friend_id: userA },
+          ],
+          { onConflict: 'user_id,friend_id', ignoreDuplicates: true }
+        );
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    let changed = false;
+    if (!db.friendships.some((f) => f.userId === userA && f.friendId === userB)) {
+      db.friendships.push({ userId: userA, friendId: userB, createdAt: nowIso });
+      changed = true;
+    }
+    if (!db.friendships.some((f) => f.userId === userB && f.friendId === userA)) {
+      db.friendships.push({ userId: userB, friendId: userA, createdAt: nowIso });
+      changed = true;
+    }
+    if (changed) saveDb(db);
+  };
+
+  const removeMutualFriendship = async (
+    userA: string,
+    userB: string,
+    sbClient?: import('@supabase/supabase-js').SupabaseClient | null
+  ) => {
+    if (isSupabaseEnabled() && sbClient) {
+      const writer = createAdminClient() ?? sbClient;
+      await writer.from('friendships').delete().eq('user_id', userA).eq('friend_id', userB);
+      await writer.from('friendships').delete().eq('user_id', userB).eq('friend_id', userA);
+      clearFriendRequestsBetween(userA, userB);
+      return;
+    }
+
+    db.friendships = db.friendships.filter(
+      (f) => !((f.userId === userA && f.friendId === userB) || (f.userId === userB && f.friendId === userA))
+    );
+    saveDb(db);
+    clearFriendRequestsBetween(userA, userB);
+  };
+
   app.post('/api/friends', async (req, res) => {
     const auth = await resolveAuth(req);
     if (!auth) {
       res.status(401).json({ error: 'Connexion requise' });
       return;
     }
-    const friendId = String(req.body?.friendId ?? '');
+    const friendId = String(req.body?.friendId ?? '').trim();
     if (!friendId || friendId === auth.user.id) {
       res.status(400).json({ error: 'Membre invalide' });
       return;
     }
 
+    let targetStub: { id: string; username: string; avatar: string | null; isPro: boolean } | null = null;
+    let alreadyFriends = false;
+
     if (isSupabaseEnabled() && auth.sbClient) {
-      const { error } = await auth.sbClient
-        .from('friendships')
-        .insert({ user_id: auth.user.id, friend_id: friendId });
-      if (error && !error.message.includes('duplicate')) {
-        res.status(400).json({ error: error.message });
+      const reader = createAdminClient() ?? auth.sbClient;
+      const { data: targetProfile } = await reader
+        .from('profiles')
+        .select('id,username')
+        .eq('id', friendId)
+        .maybeSingle();
+      if (!targetProfile?.id) {
+        res.status(404).json({ error: 'Membre introuvable' });
         return;
       }
-      res.json({ ok: true });
+      targetStub = {
+        id: String(targetProfile.id),
+        username: String(targetProfile.username || 'Membre'),
+        avatar: resolveUserAvatar(String(targetProfile.id), null),
+        isPro: isUserPro(String(targetProfile.id)),
+      };
+      const { data: existingLink } = await auth.sbClient
+        .from('friendships')
+        .select('friend_id')
+        .eq('user_id', auth.user.id)
+        .eq('friend_id', friendId)
+        .maybeSingle();
+      alreadyFriends = Boolean(existingLink);
+    } else {
+      const fu = db.users.find((u) => u.id === friendId);
+      if (!fu) {
+        res.status(404).json({ error: 'Membre introuvable' });
+        return;
+      }
+      targetStub = {
+        id: fu.id,
+        username: fu.username,
+        avatar: resolveUserAvatar(fu.id, fu.avatar),
+        isPro: isUserPro(fu.id),
+      };
+      alreadyFriends = db.friendships.some(
+        (f) => f.userId === auth.user.id && f.friendId === friendId
+      );
+    }
+
+    const result = createOrMatchFriendRequest({
+      fromUser: {
+        id: auth.user.id,
+        username: auth.user.username,
+        avatar: resolveUserAvatar(auth.user.id, auth.user.avatar),
+        isPro: Boolean(auth.user.isPro),
+      },
+      toUser: targetStub,
+      alreadyFriends,
+    });
+
+    if (result.outcome === 'already_friends') {
+      res.json({ ok: true, status: 'already_friends', request: null });
       return;
     }
 
-    if (!db.users.some((u) => u.id === friendId)) {
-      res.status(400).json({ error: 'Membre introuvable' });
+    if (result.outcome === 'matched_accept') {
+      await ensureMutualFriendship(auth.user.id, targetStub.id, auth.sbClient);
+      createNotification({
+        userId: targetStub.id,
+        kind: 'friend_accepted',
+        title: 'Demande d’ami acceptée',
+        message: `@${auth.user.username} a accepté votre demande d’ami.`,
+        link: '/profil#amis',
+        dedupKey: `friend-acc:${result.request.id}`,
+      });
+      res.json({ ok: true, status: 'accepted', request: result.request });
       return;
     }
-    const exists = db.friendships.some(
-      (f) => f.userId === auth.user.id && f.friendId === friendId
-    );
-    if (!exists) {
-      db.friendships.push({
-        userId: auth.user.id,
-        friendId,
-        createdAt: new Date().toISOString(),
+
+    if (result.outcome === 'created') {
+      createNotification({
+        userId: targetStub.id,
+        kind: 'friend_request',
+        title: 'Nouvelle demande d’ami',
+        message: `@${auth.user.username} souhaite vous ajouter en ami.`,
+        link: '/profil#amis',
+        dedupKey: `friend-req:${result.request.id}`,
       });
-      saveDb(db);
     }
+
+    res.json({
+      ok: true,
+      status: 'pending',
+      alreadyPending: result.outcome === 'already_pending',
+      request: result.request,
+    });
+  });
+
+  app.post('/api/friends/requests/:requestId/accept', async (req, res) => {
+    const auth = await resolveAuth(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Connexion requise' });
+      return;
+    }
+
+    const outcome = acceptFriendRequest(req.params.requestId, auth.user.id);
+    if (outcome.ok === false) {
+      res.status(outcome.status).json({ error: outcome.error });
+      return;
+    }
+
+    await ensureMutualFriendship(outcome.request.fromUserId, auth.user.id, auth.sbClient);
+    createNotification({
+      userId: outcome.request.fromUserId,
+      kind: 'friend_accepted',
+      title: 'Demande d’ami acceptée',
+      message: `@${auth.user.username} a accepté votre demande d’ami.`,
+      link: '/profil#amis',
+      dedupKey: `friend-acc:${outcome.request.id}`,
+    });
+
+    res.json({ ok: true, request: outcome.request });
+  });
+
+  app.post('/api/friends/requests/:requestId/decline', async (req, res) => {
+    const auth = await resolveAuth(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Connexion requise' });
+      return;
+    }
+
+    const outcome = declineFriendRequest(req.params.requestId, auth.user.id);
+    if (outcome.ok === false) {
+      res.status(outcome.status).json({ error: outcome.error });
+      return;
+    }
+
+    res.json({ ok: true, request: outcome.request });
+  });
+
+  app.delete('/api/friends/requests/:requestId', async (req, res) => {
+    const auth = await resolveAuth(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Connexion requise' });
+      return;
+    }
+
+    const outcome = cancelFriendRequest(req.params.requestId, auth.user.id);
+    if (outcome.ok === false) {
+      res.status(outcome.status).json({ error: outcome.error });
+      return;
+    }
+
     res.json({ ok: true });
   });
 
@@ -4078,20 +4398,7 @@ async function startServer() {
       return;
     }
 
-    if (isSupabaseEnabled() && auth.sbClient) {
-      await auth.sbClient
-        .from('friendships')
-        .delete()
-        .eq('user_id', auth.user.id)
-        .eq('friend_id', req.params.friendId);
-      res.json({ ok: true });
-      return;
-    }
-
-    db.friendships = db.friendships.filter(
-      (f) => !(f.userId === auth.user.id && f.friendId === req.params.friendId)
-    );
-    saveDb(db);
+    await removeMutualFriendship(auth.user.id, req.params.friendId, auth.sbClient);
     res.json({ ok: true });
   });
 
@@ -4465,6 +4772,7 @@ async function startServer() {
     cleanupUserOtpChallenges(targetId, deletedEmail || undefined);
     cleanupUserBillingData(targetId, deletedEmail || undefined);
     cleanupUserNotifications(targetId);
+    cleanupUserFriendRequests(targetId);
     deletePushSubscriptionsForUser(targetId);
     cleanupUserEmailCooldown(targetId);
     res.json({ ok: true });
@@ -5637,7 +5945,14 @@ async function startServer() {
 
   app.post('/api/reports/broken', async (req, res) => {
     const auth = await resolveAuth(req);
-    const rateKey = auth ? `rep:u:${auth.user.id}` : `rep:ip:${req.ip || 'anon'}`;
+    if (!auth) {
+      res.status(401).json({
+        error: 'Connecte-toi pour pouvoir demander ou signaler un contenu.',
+      });
+      return;
+    }
+
+    const rateKey = `rep:u:${auth.user.id}`;
     if (!checkSubmissionRateLimit(rateKey, 10, 900_000)) {
       res.status(429).json({
         error: 'Trop de signalements envoyés récemment. Veuillez patienter quelques minutes.',
@@ -5662,7 +5977,6 @@ async function startServer() {
         ? Number(req.body.episode)
         : null;
 
-    const guestLabel = String(req.body?.guestName ?? '').trim();
     const report = createBrokenReport({
       itemType: req.body?.itemType,
       itemId,
@@ -5671,8 +5985,8 @@ async function startServer() {
       episode,
       reason,
       comment: String(req.body?.comment ?? ''),
-      userId: auth?.user.id ?? null,
-      username: auth ? auth.user.username : guestLabel || 'Visiteur',
+      userId: auth.user.id,
+      username: auth.user.username,
     });
 
     res.json({ ok: true, report });
@@ -5692,13 +6006,14 @@ async function startServer() {
 
   app.post('/api/requests', async (req, res) => {
     const auth = await resolveAuth(req);
-    const visitorKeyHeader = String(req.body?.visitorKey || req.headers['x-visitor-id'] || '').trim();
-    const viewerKey = auth
-      ? `u:${auth.user.id}`
-      : visitorKeyHeader
-        ? `v:${visitorKeyHeader}`
-        : `ip:${req.ip || 'anon'}`;
+    if (!auth) {
+      res.status(401).json({
+        error: 'Connecte-toi pour pouvoir demander ou signaler un contenu.',
+      });
+      return;
+    }
 
+    const viewerKey = `u:${auth.user.id}`;
     if (!checkSubmissionRateLimit(`req:${viewerKey}`, 12, 900_000)) {
       res.status(429).json({
         error: 'Vous avez envoyé plusieurs demandes récemment. Merci de patienter quelques minutes.',
@@ -5724,8 +6039,8 @@ async function startServer() {
       tmdbPosterUrl: req.body?.tmdbPosterUrl ? String(req.body.tmdbPosterUrl) : null,
       tmdbOverview: req.body?.tmdbOverview ? String(req.body.tmdbOverview) : null,
       note: String(req.body?.note ?? ''),
-      userId: auth?.user.id ?? null,
-      username: auth ? auth.user.username : String(req.body?.guestName ?? '').trim() || 'Visiteur',
+      userId: auth.user.id,
+      username: auth.user.username,
       viewerKey,
     });
 
@@ -5734,12 +6049,13 @@ async function startServer() {
 
   app.post('/api/requests/:id/vote', async (req, res) => {
     const auth = await resolveAuth(req);
-    const visitorKeyHeader = String(req.body?.visitorKey || req.headers['x-visitor-id'] || '').trim();
-    const viewerKey = auth
-      ? `u:${auth.user.id}`
-      : visitorKeyHeader
-        ? `v:${visitorKeyHeader}`
-        : `ip:${req.ip || 'anon'}`;
+    if (!auth) {
+      res.status(401).json({
+        error: 'Connecte-toi pour pouvoir demander ou signaler un contenu.',
+      });
+      return;
+    }
+    const viewerKey = `u:${auth.user.id}`;
     const updated = toggleVoteContentRequest(req.params.id, viewerKey);
     if (!updated) {
       res.status(404).json({ error: 'Demande introuvable.' });
@@ -5859,6 +6175,41 @@ async function startServer() {
 
   await hydrateModulesFromSupabase();
 
+  // Global API error middleware (captures uncaught Express route exceptions without leaking stack traces)
+  app.use(
+    '/api',
+    (
+      err: unknown,
+      req: express.Request,
+      res: express.Response,
+      _next: express.NextFunction
+    ) => {
+      res.locals.errorLogged = true;
+      recordErrorLog({
+        level: 'fatal',
+        source: 'api',
+        message: err instanceof Error ? err.message : 'Erreur interne non interceptée',
+        stack: err instanceof Error ? err.stack ?? null : null,
+        route: req.originalUrl,
+        method: req.method,
+        statusCode: 500,
+        userAgent: String(req.headers['user-agent'] ?? ''),
+        context: req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : null,
+        err,
+      });
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Erreur interne du serveur.' });
+      }
+    }
+  );
+
+  return app;
+}
+
+async function startServer() {
+  installProcessErrorHandlers();
+  const app = await createApiApp();
+
   // ─────────────────────────────────────────────────────────────────────────
   // FRONTEND SERVING
   // ─────────────────────────────────────────────────────────────────────────
@@ -5891,4 +6242,6 @@ async function startServer() {
   });
 }
 
-startServer();
+if (process.env.TAPENAKA_DISABLE_AUTOSTART !== '1') {
+  startServer();
+}

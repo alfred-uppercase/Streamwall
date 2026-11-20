@@ -296,6 +296,8 @@ export interface UserThemePreference {
 export type NotificationKind =
   | 'comment_reply'
   | 'comment_mention'
+  | 'friend_request'
+  | 'friend_accepted'
   | 'pro_activated'
   | 'pro_expiring_soon'
   | 'pro_expired'
@@ -439,6 +441,23 @@ export interface FriendRecord {
   online: boolean;
   currentItem: Item | null;
   recentWatch: { item: Item; viewedAt: string } | null;
+}
+
+export type FriendRequestStatus = 'pending' | 'accepted' | 'declined';
+
+export interface FriendRequestRecord {
+  id: string;
+  fromUserId: string;
+  fromUsername: string;
+  fromAvatar: string | null;
+  fromIsPro?: boolean;
+  toUserId: string;
+  toUsername: string;
+  toAvatar: string | null;
+  toIsPro?: boolean;
+  status: FriendRequestStatus;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface RankingEntry {
@@ -685,5 +704,43 @@ export interface PrivacyPageConfig {
   updatedAt: string;
   sections: PrivacySection[];
 }
+
+export type ErrorLogLevel = 'warn' | 'error' | 'fatal';
+
+export type ErrorLogSource =
+  | 'server'
+  | 'client'
+  | 'api'
+  | 'upstream'
+  | 'auth'
+  | 'billing'
+  | 'push'
+  | 'mail';
+
+export interface ErrorLogRecord {
+  id: string;
+  level: ErrorLogLevel;
+  source: ErrorLogSource;
+  message: string;
+  stack: string | null;
+  route: string | null;
+  method: string | null;
+  statusCode: number | null;
+  userId: string | null;
+  userAgent: string | null;
+  context: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface ErrorLogListResponse {
+  logs: ErrorLogRecord[];
+  counts: {
+    total: number;
+    fatal: number;
+    error: number;
+    warn: number;
+  };
+}
+
 
 

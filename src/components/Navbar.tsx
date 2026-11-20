@@ -9,7 +9,6 @@ import {
   CheckCheck,
   Clock,
   Crown,
-  Flag,
   Heart,
   Home,
   LayoutGrid,
@@ -19,6 +18,8 @@ import {
   Shield,
   Sparkles,
   Trash2,
+  UserCheck,
+  UserPlus,
   UserRound,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -31,6 +32,10 @@ import { PWAInstallButton } from './PWAInstallButton';
 
 function renderNotificationIcon(kind: NotificationRecord['kind']) {
   switch (kind) {
+    case 'friend_request':
+      return <UserPlus className="size-4 text-primary" />;
+    case 'friend_accepted':
+      return <UserCheck className="size-4 text-emerald-400" />;
     case 'pro_activated':
       return <Crown className="size-4 fill-amber-400 text-amber-400" />;
     case 'pro_expiring_soon':
@@ -198,7 +203,6 @@ export function Navbar() {
   const desktopNavItems = [
     { to: '/catalogue', label: 'Catalogue', icon: LayoutGrid, exact: false },
     { to: '/suggestion', label: 'Suggestion', icon: Sparkles, exact: false },
-    { to: '/demandes', label: 'Demandes', icon: Flag, exact: false },
     ...(isMember ? [{ to: '/favoris', label: 'Ma liste', icon: Heart, exact: false }] : []),
     ...(showProMenu ? [{ to: '/abonnement', label: 'Devenir Pro', icon: Crown, exact: false }] : []),
     ...(isAdmin ? [{ to: '/admin', label: 'Admin', icon: Shield, exact: false }] : []),

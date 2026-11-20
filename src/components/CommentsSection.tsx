@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CornerDownRight, MessageSquare, Trash2, UserPlus } from 'lucide-react';
+import { Check, Clock, CornerDownRight, MessageSquare, Trash2, UserPlus } from 'lucide-react';
 import { toast } from 'sonner';
 import type { CommentRecord } from '../shared/types';
 import { api, useAuth } from '../lib/client';
@@ -149,14 +149,42 @@ export function CommentsSection({
   });
 
   const friendIds = new Set((memberQuery.data?.friends ?? []).map((f) => f.id));
+  const incomingBySender = new Map(
+    (memberQuery.data?.incomingFriendRequests ?? []).map((r) => [r.fromUserId, r])
+  );
+  const outgoingTargetIds = new Set(
+    (memberQuery.data?.outgoingFriendRequests ?? []).map((r) => r.toUserId)
+  );
 
   const addFriendMutation = useMutation({
     mutationFn: (friendId: string) => api.addFriend(friendId),
-    onSuccess: () => {
-      toast.success('Membre ajouté à vos amis');
+    onSuccess: (res) => {
+      if (res.status === 'accepted') {
+        toast.success('Demande mutuelle acceptée : vous êtes maintenant amis !');
+      } else if (res.alreadyPending) {
+        toast.info('Demande d’ami déjà envoyée, en attente de réponse.');
+      } else if (res.status === 'already_friends') {
+        toast.info('Vous êtes déjà amis.');
+      } else {
+        toast.success('Demande d’ami envoyée !');
+      }
       void queryClient.invalidateQueries({ queryKey: ['member'] });
+      void queryClient.invalidateQueries({ queryKey: ['home'] });
     },
-    onError: () => toast.error("Impossible d'ajouter cet ami."),
+    onError: (err) =>
+      toast.error(err instanceof Error ? err.message : "Impossible d'envoyer la demande d'ami."),
+  });
+
+  const acceptFriendMutation = useMutation({
+    mutationFn: (requestId: string) => api.acceptFriendRequest(requestId),
+    onSuccess: () => {
+      toast.success('Demande d’ami acceptée !');
+      void queryClient.invalidateQueries({ queryKey: ['member'] });
+      void queryClient.invalidateQueries({ queryKey: ['home'] });
+      void queryClient.invalidateQueries({ queryKey: ['notifications'] });
+    },
+    onError: (err) =>
+      toast.error(err instanceof Error ? err.message : "Impossible d'accepter la demande."),
   });
 
   async function handlePost(body: string, parentId: string | null) {
@@ -186,8 +214,13 @@ export function CommentsSection({
 
   const renderCard = (c: CommentRecord, isReply = false) => {
     const canDelete = Boolean(user && (user.id === c.userId || isAdmin));
-    const canAddFriend = Boolean(user && c.userId !== user.id && !friendIds.has(c.userId));
+    const isSelf = Boolean(user && c.userId === user.id);
     const isFriend = Boolean(user && friendIds.has(c.userId));
+    const incomingReq = user ? incomingBySender.get(c.userId) : undefined;
+    const outgoingPending = Boolean(user && outgoingTargetIds.has(c.userId));
+    const canSendFriendRequest = Boolean(
+      user && !isSelf && !isFriend && !incomingReq && !outgoingPending
+    );
 
     return (
       <div
@@ -225,14 +258,32 @@ export function CommentsSection({
           </div>
 
           <div className="flex items-center gap-3 text-xs">
-            {canAddFriend && (
+            {incomingReq && (
               <button
                 type="button"
+                disabled={acceptFriendMutation.isPending}
+                onClick={() => acceptFriendMutation.mutate(incomingReq.id)}
+                className="inline-flex items-center gap-1 rounded-md bg-primary/15 px-2 py-0.5 font-semibold text-primary hover:bg-primary/25 whitespace-nowrap shrink-0"
+              >
+                <Check className="size-3.5" />
+                <span>Accepter la demande</span>
+              </button>
+            )}
+            {outgoingPending && (
+              <span className="inline-flex items-center gap-1 text-muted-foreground whitespace-nowrap shrink-0">
+                <Clock className="size-3.5" />
+                <span>Demande envoyée</span>
+              </span>
+            )}
+            {canSendFriendRequest && (
+              <button
+                type="button"
+                disabled={addFriendMutation.isPending}
                 onClick={() => addFriendMutation.mutate(c.userId)}
                 className="inline-flex items-center gap-1 font-medium text-primary hover:underline whitespace-nowrap shrink-0"
               >
                 <UserPlus className="size-3.5" />
-                <span>Ajouter en ami</span>
+                <span>Demander en ami</span>
               </button>
             )}
             {!isReply && isMember && (

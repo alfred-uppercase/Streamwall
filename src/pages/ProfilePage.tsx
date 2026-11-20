@@ -1,12 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
-  BellOff,
-  BellRing,
   CalendarClock,
   Check,
+  Clock,
   Crown,
   KeyRound,
   Lock,
@@ -21,9 +20,9 @@ import {
   Search,
   Shield,
   Shuffle,
-  Smartphone,
   Sun,
   Trash2,
+  UserCheck,
   UserPlus,
   X,
 } from 'lucide-react';
@@ -31,7 +30,6 @@ import { toast } from 'sonner';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
 import { THEME_PRESETS, useTheme } from '../lib/theme';
-import { useWebPush } from '../hooks/useWebPush';
 import { OtpCodeInput } from '../components/OtpCodeInput';
 import {
   AVATAR_PRESETS,
@@ -45,6 +43,7 @@ export function ProfilePage() {
   useDocumentTitle('Mon profil');
   const { user, isAdmin, isPro, refreshUser, signOut } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
 
   const memberQuery = useQuery({
@@ -52,8 +51,14 @@ export function ProfilePage() {
     queryFn: () => api.member(),
   });
 
+  useEffect(() => {
+    if (location.hash === '#amis') {
+      const el = document.getElementById('amis');
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [location.hash, memberQuery.isSuccess]);
+
   const { theme, applyAndSaveTheme, resetTheme } = useTheme();
-  const webPush = useWebPush();
   const [customHex, setCustomHex] = useState(theme.accentHex);
 
   useEffect(() => {
@@ -345,13 +350,55 @@ export function ProfilePage() {
 
   const addFriendMutation = useMutation({
     mutationFn: (friendId: string) => api.addFriend(friendId),
-    onSuccess: () => {
+    onSuccess: (res) => {
       setFriendSearch('');
       setSearchResults([]);
       void queryClient.invalidateQueries({ queryKey: ['member'] });
       void queryClient.invalidateQueries({ queryKey: ['home'] });
-      toast.success('Ami ajouté');
+      if (res.status === 'accepted') {
+        toast.success('Demande mutuelle acceptée : vous êtes maintenant amis !');
+      } else if (res.alreadyPending) {
+        toast.info('Une demande d’ami est déjà en attente pour ce membre.');
+      } else if (res.status === 'already_friends') {
+        toast.info('Vous êtes déjà amis.');
+      } else {
+        toast.success('Demande d’ami envoyée !');
+      }
     },
+    onError: (err) =>
+      toast.error(err instanceof Error ? err.message : 'Impossible d’envoyer la demande.'),
+  });
+
+  const acceptFriendMutation = useMutation({
+    mutationFn: (requestId: string) => api.acceptFriendRequest(requestId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['member'] });
+      void queryClient.invalidateQueries({ queryKey: ['home'] });
+      void queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      toast.success('Demande d’ami acceptée !');
+    },
+    onError: (err) =>
+      toast.error(err instanceof Error ? err.message : 'Impossible d’accepter la demande.'),
+  });
+
+  const declineFriendMutation = useMutation({
+    mutationFn: (requestId: string) => api.declineFriendRequest(requestId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['member'] });
+      toast.info('Demande d’ami refusée.');
+    },
+    onError: (err) =>
+      toast.error(err instanceof Error ? err.message : 'Impossible de refuser la demande.'),
+  });
+
+  const cancelFriendRequestMutation = useMutation({
+    mutationFn: (requestId: string) => api.cancelFriendRequest(requestId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['member'] });
+      toast.info('Demande d’ami annulée.');
+    },
+    onError: (err) =>
+      toast.error(err instanceof Error ? err.message : 'Impossible d’annuler la demande.'),
   });
 
   const removeFriendMutation = useMutation({
@@ -365,6 +412,10 @@ export function ProfilePage() {
 
   const friends = memberQuery.data?.friends ?? [];
   const friendIds = new Set(friends.map((f) => f.id));
+  const incomingRequests = memberQuery.data?.incomingFriendRequests ?? [];
+  const outgoingRequests = memberQuery.data?.outgoingFriendRequests ?? [];
+  const incomingBySender = new Map(incomingRequests.map((r) => [r.fromUserId, r]));
+  const outgoingTargetIds = new Set(outgoingRequests.map((r) => r.toUserId));
   const subscription = memberQuery.data?.profile.subscription ?? user?.subscription;
 
   return (
@@ -603,97 +654,6 @@ export function ProfilePage() {
         </section>
       </div>
 
-      {/* Web Push Notifications (PWA) */}
-      <section className="rounded-xl border border-border bg-card p-6">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-start gap-3.5">
-            <div
-              className={`grid size-10 shrink-0 place-items-center rounded-xl border ${
-                webPush.isSubscribed
-                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
-                  : 'border-border bg-background text-primary'
-              }`}
-            >
-              {webPush.isSubscribed ? (
-                <BellRing className="size-5" />
-              ) : (
-                <Smartphone className="size-5" />
-              )}
-            </div>
-            <div>
-              <h2 className="font-display text-lg font-semibold text-foreground">
-                Notifications Push Web (PWA)
-              </h2>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                {!webPush.supported
-                  ? webPush.iosNeedsInstall
-                    ? 'Sur iPhone/iPad, installez d’abord l’application sur l’écran d’accueil (Partager → Sur l’écran d’accueil) pour activer les notifications Push.'
-                    : 'Votre navigateur actuel ne prend pas en charge les notifications Push Web.'
-                  : webPush.permission === 'denied'
-                    ? 'Les notifications sont actuellement bloquées dans les réglages de votre navigateur pour ce site.'
-                    : webPush.isSubscribed
-                      ? 'Cet appareil reçoit les alertes en temps réel (nouvelles sorties, réponses à vos commentaires, demandes et abonnement).'
-                      : 'Activez les notifications Push pour être prévenu directement sur votre appareil, même lorsque le site est fermé.'}
-              </p>
-            </div>
-          </div>
-
-          {webPush.supported && webPush.permission !== 'denied' && (
-            <div className="flex flex-wrap items-center gap-2">
-              {webPush.isSubscribed ? (
-                <>
-                  <button
-                    type="button"
-                    disabled={webPush.testing || webPush.loading}
-                    onClick={async () => {
-                      const res = await webPush.sendTest();
-                      if (res.ok) {
-                        toast.success('Notification Push de test envoyée !');
-                      } else {
-                        toast.error(res.error || 'Échec du test Push.');
-                      }
-                    }}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-background px-3.5 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-accent disabled:opacity-50 whitespace-nowrap shrink-0"
-                  >
-                    <BellRing className="size-3.5 text-primary" />
-                    <span>{webPush.testing ? 'Envoi…' : 'Tester sur cet appareil'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={webPush.loading}
-                    onClick={async () => {
-                      const ok = await webPush.unsubscribe();
-                      if (ok) toast.success('Notifications Push désactivées sur cet appareil.');
-                    }}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3.5 py-2 text-xs font-medium text-muted-foreground transition-colors hover:text-destructive disabled:opacity-50 whitespace-nowrap shrink-0"
-                  >
-                    <BellOff className="size-3.5" />
-                    <span>Désactiver</span>
-                  </button>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  disabled={webPush.loading}
-                  onClick={async () => {
-                    const res = await webPush.subscribe();
-                    if (res.ok) {
-                      toast.success('Notifications Push Web activées sur cet appareil !');
-                    } else if (res.reason) {
-                      toast.error(res.reason);
-                    }
-                  }}
-                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap shrink-0"
-                >
-                  <BellRing className="size-3.5" />
-                  <span>{webPush.loading ? 'Activation…' : 'Activer les notifications Push'}</span>
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-      </section>
-
       {/* Theme Colors Customization */}
       <section className="rounded-xl border border-border bg-card p-6 space-y-5">
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-4">
@@ -864,19 +824,130 @@ export function ProfilePage() {
       </section>
 
       {/* Friends Network */}
-      <section className="rounded-xl border border-border bg-card p-6">
+      <section id="amis" className="scroll-mt-24 rounded-xl border border-border bg-card p-6">
         <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
           <div>
             <h2 className="font-display text-xl font-semibold text-foreground tabular-nums">
               Mes amis ({friends.length})
             </h2>
             <p className="mt-0.5 text-sm text-muted-foreground">
-              Ajoutez des membres pour voir leurs découvertes récentes sur l’accueil et les identifier avec @.
+              Envoyez une demande d’ami : dès qu’elle est acceptée, vous voyez mutuellement vos découvertes récentes et mentions @.
             </p>
           </div>
+          {incomingRequests.length > 0 && (
+            <span className="inline-flex items-center gap-1.5 rounded-md border border-primary/40 bg-primary/10 px-3 py-1 text-xs font-semibold text-primary tabular-nums">
+              <UserCheck className="size-3.5" />
+              <span>
+                {incomingRequests.length} demande{incomingRequests.length > 1 ? 's' : ''} en attente
+              </span>
+            </span>
+          )}
         </div>
 
-        {/* Search & Add Friend */}
+        {/* Incoming Friend Requests */}
+        {incomingRequests.length > 0 && (
+          <div className="mb-6 space-y-2.5 rounded-xl border border-primary/35 bg-primary/5 p-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-primary">
+              Demandes reçues ({incomingRequests.length})
+            </h3>
+            <ul className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-background">
+              {incomingRequests.map((reqItem) => (
+                <li
+                  key={reqItem.id}
+                  className="flex flex-wrap items-center justify-between gap-3 px-4 py-3"
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <UserAvatar
+                      avatar={reqItem.fromAvatar}
+                      seed={reqItem.fromUserId}
+                      username={reqItem.fromUsername}
+                      isPro={reqItem.fromIsPro}
+                      size="sm"
+                    />
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="truncate text-sm font-semibold text-foreground">
+                          @{reqItem.fromUsername}
+                        </p>
+                        {reqItem.fromIsPro && <ProCrownBadge />}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Souhaite vous ajouter en ami ·{' '}
+                        {new Date(reqItem.createdAt).toLocaleDateString('fr-FR')}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      disabled={acceptFriendMutation.isPending || declineFriendMutation.isPending}
+                      onClick={() => acceptFriendMutation.mutate(reqItem.id)}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap"
+                    >
+                      <Check className="size-3.5" />
+                      <span>Accepter</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={acceptFriendMutation.isPending || declineFriendMutation.isPending}
+                      onClick={() => declineFriendMutation.mutate(reqItem.id)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-destructive disabled:opacity-50 whitespace-nowrap"
+                    >
+                      <X className="size-3.5" />
+                      <span>Refuser</span>
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Outgoing Pending Requests */}
+        {outgoingRequests.length > 0 && (
+          <div className="mb-6 space-y-2.5 rounded-xl border border-border bg-background/60 p-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Demandes envoyées ({outgoingRequests.length})
+            </h3>
+            <ul className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-background">
+              {outgoingRequests.map((reqItem) => (
+                <li
+                  key={reqItem.id}
+                  className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5"
+                >
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <UserAvatar
+                      avatar={reqItem.toAvatar}
+                      seed={reqItem.toUserId}
+                      username={reqItem.toUsername}
+                      isPro={reqItem.toIsPro}
+                      size="xs"
+                    />
+                    <span className="truncate text-sm font-medium text-foreground">
+                      @{reqItem.toUsername}
+                    </span>
+                    {reqItem.toIsPro && <ProCrownBadge />}
+                    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                      <Clock className="size-3" />
+                      <span>En attente de confirmation</span>
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={cancelFriendRequestMutation.isPending}
+                    onClick={() => cancelFriendRequestMutation.mutate(reqItem.id)}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-destructive"
+                  >
+                    <X className="size-3.5" />
+                    <span>Annuler</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Search & Request Friend */}
         <div className="relative mb-6 max-w-md">
           <Search className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <input
@@ -890,6 +961,8 @@ export function ProfilePage() {
             <ul className="mt-1.5 divide-y divide-border overflow-hidden rounded-lg border border-border bg-popover shadow-lg">
               {searchResults.map((candidate) => {
                 const already = friendIds.has(candidate.id);
+                const incomingFromCandidate = incomingBySender.get(candidate.id);
+                const outgoingPending = outgoingTargetIds.has(candidate.id);
                 return (
                   <li
                     key={candidate.id}
@@ -908,14 +981,34 @@ export function ProfilePage() {
                     </div>
                     {already ? (
                       <span className="text-xs text-muted-foreground">Déjà ami</span>
+                    ) : incomingFromCandidate ? (
+                      <button
+                        type="button"
+                        disabled={acceptFriendMutation.isPending}
+                        onClick={() => {
+                          setFriendSearch('');
+                          setSearchResults([]);
+                          acceptFriendMutation.mutate(incomingFromCandidate.id);
+                        }}
+                        className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-xs font-semibold text-primary-foreground"
+                      >
+                        <Check className="size-3.5" />
+                        <span>Accepter</span>
+                      </button>
+                    ) : outgoingPending ? (
+                      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                        <Clock className="size-3.5" />
+                        <span>En attente</span>
+                      </span>
                     ) : (
                       <button
                         type="button"
+                        disabled={addFriendMutation.isPending}
                         onClick={() => addFriendMutation.mutate(candidate.id)}
                         className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-xs font-semibold text-primary-foreground"
                       >
                         <UserPlus className="size-3.5" />
-                        <span>Ajouter</span>
+                        <span>Demander</span>
                       </button>
                     )}
                   </li>
@@ -983,7 +1076,7 @@ export function ProfilePage() {
           </ul>
         ) : (
           <p className="text-sm text-muted-foreground">
-            Vous n’avez pas encore ajouté d’amis. Recherchez un membre ci-dessus ou cliquez sur « Ajouter en ami » dans les commentaires.
+            Vous n’avez pas encore ajouté d’amis. Recherchez un membre ci-dessus ou cliquez sur « Demander en ami » dans les commentaires.
           </p>
         )}
       </section>

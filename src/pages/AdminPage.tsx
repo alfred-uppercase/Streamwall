@@ -3,6 +3,7 @@ import { Link, Navigate, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Activity,
+  AlertTriangle,
   BarChart3,
   Bell,
   CheckCircle2,
@@ -41,6 +42,7 @@ import { AdminEmailsTab } from '../components/AdminEmailsTab';
 import { AdminPopupsTab } from '../components/AdminPopupsTab';
 import { AdminRequestsTab } from '../components/AdminRequestsTab';
 import { AdminPrivacyTab } from '../components/AdminPrivacyTab';
+import { AdminErrorsTab } from '../components/AdminErrorsTab';
 import { ProCrownBadge } from '../components/UserAvatar';
 
 const PLAYER_FIELDS: { key: PlayerKey; label: string; hint: string }[] = [
@@ -65,6 +67,7 @@ type AdminTab =
   | 'popups'
   | 'emails'
   | 'privacy'
+  | 'logs'
   | 'api'
   | 'players'
   | 'comments';
@@ -78,6 +81,7 @@ const VALID_TABS: AdminTab[] = [
   'popups',
   'emails',
   'privacy',
+  'logs',
   'api',
   'players',
   'comments',
@@ -92,6 +96,7 @@ const TAB_TITLE_MAP: Record<AdminTab, string> = {
   popups: 'Administration · Popups',
   emails: 'Administration · Emails & Logs',
   privacy: 'Administration · Confidentialité',
+  logs: 'Administration · Journaux d’erreurs',
   api: 'Administration · Configuration & API',
   players: 'Administration · Lecteurs',
   comments: 'Administration · Modération',
@@ -349,6 +354,7 @@ export function AdminPage() {
             ['popups', 'Popups', Layers],
             ['emails', 'Emails & Logs', Mail],
             ['privacy', 'Confidentialité', ShieldCheck],
+            ['logs', 'Journaux', AlertTriangle],
             ['api', 'Configuration & API', Globe],
             ['players', 'Lecteurs', null],
             ['comments', 'Modération', null],
@@ -429,6 +435,9 @@ export function AdminPage() {
 
       {/* TAB: PRIVACY PAGE EDITOR */}
       {tab === 'privacy' && <AdminPrivacyTab />}
+
+      {/* TAB: ERROR LOGS */}
+      {tab === 'logs' && <AdminErrorsTab />}
 
       {/* TAB: SITE CONFIG, API ORIGIN & EMAIL */}
       {tab === 'api' && (

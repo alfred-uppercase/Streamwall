@@ -142,11 +142,11 @@ export function DetailPage() {
   const [preparingPlayer, setPreparingPlayer] = useState(false);
 
   const [reportModalOpen, setReportModalOpen] = useState(false);
+  const [guestAuthAlertOpen, setGuestAuthAlertOpen] = useState(false);
   const [reportReason, setReportReason] = useState<string>('Lien mort / ne charge pas');
   const [reportSeason, setReportSeason] = useState<number>(1);
   const [reportEpisode, setReportEpisode] = useState<number>(1);
   const [reportDetails, setReportDetails] = useState('');
-  const [reportGuestName, setReportGuestName] = useState('');
   const [reportSubmitting, setReportSubmitting] = useState(false);
 
   useEffect(() => {
@@ -291,9 +291,13 @@ export function DetailPage() {
 
   // Close modals on Escape
   useEffect(() => {
-    if (!modal && !reportModalOpen) return;
+    if (!modal && !reportModalOpen && !guestAuthAlertOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (guestAuthAlertOpen) {
+          setGuestAuthAlertOpen(false);
+          return;
+        }
         if (reportModalOpen) {
           setReportModalOpen(false);
           return;
@@ -304,9 +308,14 @@ export function DetailPage() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [modal, reportModalOpen, setWatchingItem]);
+  }, [modal, reportModalOpen, guestAuthAlertOpen, setWatchingItem]);
 
   function openReportModal(seasonOverride?: number, episodeOverride?: number) {
+    if (!isMember) {
+      toast.error('Connecte-toi pour pouvoir demander ou signaler un contenu.');
+      setGuestAuthAlertOpen(true);
+      return;
+    }
     setReportReason('Lien mort / ne charge pas');
     setReportSeason(seasonOverride || selectedSeason || 1);
     setReportEpisode(episodeOverride || activeEpisode.episode || 1);
@@ -317,6 +326,12 @@ export function DetailPage() {
   async function handleSubmitReport(e: React.FormEvent) {
     e.preventDefault();
     if (!item || reportSubmitting) return;
+    if (!isMember) {
+      setReportModalOpen(false);
+      setGuestAuthAlertOpen(true);
+      toast.error('Connecte-toi pour pouvoir demander ou signaler un contenu.');
+      return;
+    }
     setReportSubmitting(true);
     try {
       await api.reportBrokenStream({
@@ -327,7 +342,6 @@ export function DetailPage() {
         episode: effectiveType !== 'film' ? reportEpisode : undefined,
         reason: reportReason,
         comment: reportDetails.trim(),
-        guestName: !isMember ? reportGuestName.trim() : undefined,
       });
       toast.success('Merci ! Votre signalement a bien été transmis à l’équipe.');
       setReportModalOpen(false);
@@ -1004,22 +1018,6 @@ export function DetailPage() {
                 </div>
               )}
 
-              {!isMember && (
-                <label className="block text-xs">
-                  <span className="mb-1 block font-medium text-muted-foreground">
-                    Votre pseudo (optionnel)
-                  </span>
-                  <input
-                    type="text"
-                    maxLength={50}
-                    value={reportGuestName}
-                    onChange={(e) => setReportGuestName(e.target.value)}
-                    placeholder="Visiteur"
-                    className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground focus:border-primary focus:outline-none"
-                  />
-                </label>
-              )}
-
               <label className="block text-xs">
                 <span className="mb-1 block font-medium text-muted-foreground">
                   Détails complémentaires (optionnel)
@@ -1052,6 +1050,52 @@ export function DetailPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Guest Auth Alert Dialog */}
+      {guestAuthAlertOpen && (
+        <div
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="guest-report-alert-title"
+          aria-describedby="guest-report-alert-desc"
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/80 p-4 backdrop-blur-xs"
+          onClick={() => setGuestAuthAlertOpen(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl border border-border bg-card p-6 shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="grid size-10 shrink-0 place-items-center rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-400">
+                <Lock className="size-5" />
+              </div>
+              <div className="space-y-1">
+                <h2 id="guest-report-alert-title" className="font-display text-base font-bold text-foreground">
+                  Connexion requise
+                </h2>
+                <p id="guest-report-alert-desc" className="text-sm text-muted-foreground">
+                  Connecte-toi pour pouvoir demander ou signaler un contenu.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setGuestAuthAlertOpen(false)}
+                className="rounded-lg border border-border px-4 py-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+              >
+                Fermer
+              </button>
+              <Link
+                to="/auth"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90"
+              >
+                <span>Se connecter</span>
+              </Link>
+            </div>
           </div>
         </div>
       )}

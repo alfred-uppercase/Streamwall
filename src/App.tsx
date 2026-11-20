@@ -27,6 +27,8 @@ import { AuthPage, ResetPasswordPage } from './pages/AuthPage';
 import { AnalyticsTracker } from './components/AnalyticsTracker';
 import { OfflineIndicator } from './components/PWAInstallButton';
 import { PopupManager } from './components/PopupManager';
+import { WebPushAutoPrompt } from './components/WebPushAutoPrompt';
+import { AppErrorBoundary } from './components/ErrorBoundary';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -89,6 +91,7 @@ function AppShell() {
       <ScrollToTop />
       <AnalyticsTracker />
       <OfflineIndicator />
+      <WebPushAutoPrompt />
       <PopupManager />
       <Navbar />
       <div className="flex-1">
@@ -184,16 +187,18 @@ function AppWithTheme() {
 
 export default function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AuthProvider>
-          <SiteConfigProvider>
-            <ThemeProvider>
-              <AppWithTheme />
-            </ThemeProvider>
-          </SiteConfigProvider>
-        </AuthProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
+    <AppErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <AuthProvider>
+            <SiteConfigProvider>
+              <ThemeProvider>
+                <AppWithTheme />
+              </ThemeProvider>
+            </SiteConfigProvider>
+          </AuthProvider>
+        </BrowserRouter>
+      </QueryClientProvider>
+    </AppErrorBoundary>
   );
 }

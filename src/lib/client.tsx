@@ -21,7 +21,9 @@ import type {
   DetailResponse,
   EmailTemplateConfig,
   EmailTemplateKey,
+  ErrorLogListResponse,
   FriendRecord,
+  FriendRequestRecord,
   HomePayload,
   Item,
   MailLogEntry,
@@ -103,6 +105,8 @@ export interface MemberPayload {
   progress: WatchProgress[];
   history: WatchEventRecord[];
   friends: FriendRecord[];
+  incomingFriendRequests?: FriendRequestRecord[];
+  outgoingFriendRequests?: FriendRequestRecord[];
 }
 
 export const api = {
@@ -334,9 +338,28 @@ export const api = {
       `/api/members/search?q=${encodeURIComponent(q)}`
     ),
   addFriend: (friendId: string) =>
-    apiRequest<{ ok: boolean }>('/api/friends', {
+    apiRequest<{
+      ok: boolean;
+      status?: 'pending' | 'accepted' | 'already_friends';
+      alreadyPending?: boolean;
+      request?: FriendRequestRecord | null;
+    }>('/api/friends', {
       method: 'POST',
       body: JSON.stringify({ friendId }),
+    }),
+  acceptFriendRequest: (requestId: string) =>
+    apiRequest<{ ok: boolean; request: FriendRequestRecord }>(
+      `/api/friends/requests/${encodeURIComponent(requestId)}/accept`,
+      { method: 'POST' }
+    ),
+  declineFriendRequest: (requestId: string) =>
+    apiRequest<{ ok: boolean; request: FriendRequestRecord }>(
+      `/api/friends/requests/${encodeURIComponent(requestId)}/decline`,
+      { method: 'POST' }
+    ),
+  cancelFriendRequest: (requestId: string) =>
+    apiRequest<{ ok: boolean }>(`/api/friends/requests/${encodeURIComponent(requestId)}`, {
+      method: 'DELETE',
     }),
   removeFriend: (friendId: string) =>
     apiRequest<{ ok: boolean }>(`/api/friends/${encodeURIComponent(friendId)}`, {
@@ -461,6 +484,18 @@ export const api = {
   adminResetPrivacy: () =>
     apiRequest<{ privacy: PrivacyPageConfig }>('/api/admin/privacy/reset', {
       method: 'POST',
+    }),
+  adminErrorLogs: (params?: { level?: string; source?: string; q?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.level) qs.set('level', params.level);
+    if (params?.source) qs.set('source', params.source);
+    if (params?.q) qs.set('q', params.q);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiRequest<ErrorLogListResponse>(`/api/admin/logs${suffix}`);
+  },
+  adminClearErrorLogs: () =>
+    apiRequest<{ ok: boolean; deleted: number }>('/api/admin/logs', {
+      method: 'DELETE',
     }),
   adminSaveOrigin: (origin: string) =>
     apiRequest<{ origin: string }>('/api/admin/settings/origin', {
