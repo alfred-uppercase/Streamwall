@@ -135,6 +135,17 @@ import {
   recordAdminBroadcast,
 } from './src/server/notificationsStore.ts';
 import {
+  deletePushSubscriptionsForUser,
+  getPushStats,
+  getVapidPublicKey,
+  removePushSubscription,
+  sendPushToAll,
+  sendPushToEndpoint,
+  sendPushToGuests,
+  sendPushToUsers,
+  upsertPushSubscription,
+} from './src/server/webPushStore.ts';
+import {
   deletePopup,
   listActivePopups,
   listAllPopups,
@@ -160,6 +171,11 @@ import {
   updateBrokenReportStatus,
   updateContentRequestStatus,
 } from './src/server/requestsStore.ts';
+import {
+  getPrivacyPageConfig,
+  resetPrivacyPageConfig,
+  updatePrivacyPageConfig,
+} from './src/server/privacyStore.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3000;
@@ -1402,24 +1418,55 @@ async function fetchUpstreamCatalogue(filters: CatalogueFilters): Promise<Catalo
 }
 
 async function fetchUpstreamGenres(): Promise<string[]> {
-  const origin = await getOrigin();
-  const cacheKey = `genres:${origin}`;
+  const apiKey = (await getTmdbApiKey()).trim();
+  if (!apiKey) {
+    return FALLBACK_GENRES;
+  }
+
+  const cacheKey = `tmdb-genres:fr-FR:${apiKey.slice(0, 6)}`;
   const cached = getCached<string[]>(cacheKey);
-  if (cached) return cached;
+  if (cached && cached.length > 0) return cached;
 
   try {
-    const res = await fetch(`${origin}/api/korotoko.php?filtres=1`, {
-      signal: AbortSignal.timeout(8_000),
-      headers: { 'user-agent': 'Mozilla/5.0 (Tapenaka StreamWall)' },
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = (await res.json()) as { genres?: string[] };
-    const genres = (json.genres ?? []).filter((g) => /^[\p{L} &'-]{3,30}$/u.test(g));
-    if (genres.length > 0) {
-      return setCached(cacheKey, genres, 600_000);
+    const [movieRes, tvRes] = await Promise.all([
+      fetch(
+        `https://api.themoviedb.org/3/genre/movie/list?language=fr-FR&api_key=${encodeURIComponent(apiKey)}`,
+        {
+          signal: AbortSignal.timeout(7_000),
+          headers: { accept: 'application/json' },
+        }
+      ),
+      fetch(
+        `https://api.themoviedb.org/3/genre/tv/list?language=fr-FR&api_key=${encodeURIComponent(apiKey)}`,
+        {
+          signal: AbortSignal.timeout(7_000),
+          headers: { accept: 'application/json' },
+        }
+      ),
+    ]);
+
+    const merged = new Set<string>();
+    if (movieRes.ok) {
+      const movieJson = (await movieRes.json()) as { genres?: Array<{ id: number; name?: string }> };
+      for (const g of movieJson.genres ?? []) {
+        const name = String(g.name ?? '').trim();
+        if (name) merged.add(name);
+      }
+    }
+    if (tvRes.ok) {
+      const tvJson = (await tvRes.json()) as { genres?: Array<{ id: number; name?: string }> };
+      for (const g of tvJson.genres ?? []) {
+        const name = String(g.name ?? '').trim();
+        if (name) merged.add(name);
+      }
+    }
+
+    const sorted = [...merged].sort((a, b) => a.localeCompare(b, 'fr'));
+    if (sorted.length > 0) {
+      return setCached(cacheKey, sorted, 6 * 3_600_000);
     }
   } catch {
-    // Fallback
+    // Fallback below
   }
   return FALLBACK_GENRES;
 }
@@ -3672,6 +3719,13 @@ async function startServer() {
       return;
     }
 
+    if (auth.user.role === 'admin') {
+      res.status(403).json({
+        error: 'Un compte administrateur ne peut pas être supprimé.',
+      });
+      return;
+    }
+
     const targetId = auth.user.id;
     const deletedEmail = auth.user.email.trim().toLowerCase();
 
@@ -3685,20 +3739,6 @@ async function startServer() {
         return;
       }
 
-      if (auth.user.role === 'admin') {
-        const { data: admins } = await adminSb
-          .from('user_roles')
-          .select('user_id')
-          .eq('role', 'admin');
-        if ((admins?.length ?? 0) <= 1) {
-          res.status(400).json({
-            error:
-              'Vous êtes le dernier administrateur. Nommez un autre administrateur avant de supprimer votre compte.',
-          });
-          return;
-        }
-      }
-
       const delRes = await deleteSupabaseUserAndRelations(adminSb, targetId);
       if (!delRes.ok) {
         res.status(400).json({ error: delRes.error || 'Suppression du compte impossible.' });
@@ -3710,10 +3750,9 @@ async function startServer() {
         res.status(404).json({ error: 'Compte introuvable.' });
         return;
       }
-      if (targetUser.role === 'admin' && db.users.filter((u) => u.role === 'admin').length <= 1) {
-        res.status(400).json({
-          error:
-            'Vous êtes le dernier administrateur. Nommez un autre administrateur avant de supprimer votre compte.',
+      if (targetUser.role === 'admin') {
+        res.status(403).json({
+          error: 'Un compte administrateur ne peut pas être supprimé.',
         });
         return;
       }
@@ -3738,6 +3777,7 @@ async function startServer() {
     cleanupUserOtpChallenges(targetId, deletedEmail || undefined);
     cleanupUserBillingData(targetId, deletedEmail || undefined);
     cleanupUserNotifications(targetId);
+    deletePushSubscriptionsForUser(targetId);
     cleanupUserEmailCooldown(targetId);
 
     res.clearCookie('tapenaka_session', { path: '/' });
@@ -4425,6 +4465,7 @@ async function startServer() {
     cleanupUserOtpChallenges(targetId, deletedEmail || undefined);
     cleanupUserBillingData(targetId, deletedEmail || undefined);
     cleanupUserNotifications(targetId);
+    deletePushSubscriptionsForUser(targetId);
     cleanupUserEmailCooldown(targetId);
     res.json({ ok: true });
   });
@@ -4565,6 +4606,7 @@ async function startServer() {
     res.json({
       broadcasts: listAdminBroadcasts(),
       guestNotifications: listGuestNotifications(),
+      pushStats: getPushStats(),
     });
   });
 
@@ -4597,7 +4639,10 @@ async function startServer() {
       return;
     }
 
+    const sendPush = req.body?.sendPush !== false;
     let sentCount = 0;
+    let pushRecipientIds: string[] = [];
+
     if (target === 'guest') {
       createGuestNotification({
         kind: 'admin_announcement',
@@ -4647,6 +4692,8 @@ async function startServer() {
         recipientIds = knownUserIds;
       }
 
+      pushRecipientIds = recipientIds;
+
       for (const userId of recipientIds) {
         const created = createNotification({
           userId,
@@ -4654,6 +4701,7 @@ async function startServer() {
           title,
           message,
           link,
+          skipPush: true,
         });
         if (created) sentCount += 1;
       }
@@ -4668,6 +4716,23 @@ async function startServer() {
       }
     }
 
+    let pushResult = { attempted: 0, sent: 0, failed: 0, removed: 0 };
+    if (sendPush) {
+      const pushPayload = {
+        title,
+        body: message,
+        url: link,
+        tag: `admin-${target}-${Date.now()}`,
+      };
+      if (target === 'all') {
+        pushResult = await sendPushToAll(pushPayload);
+      } else if (target === 'guest') {
+        pushResult = await sendPushToGuests(pushPayload);
+      } else {
+        pushResult = await sendPushToUsers(pushRecipientIds, pushPayload);
+      }
+    }
+
     const broadcast = recordAdminBroadcast({
       target,
       recipientCount: sentCount,
@@ -4676,7 +4741,7 @@ async function startServer() {
       link,
     });
 
-    res.json({ ok: true, sentCount, broadcast });
+    res.json({ ok: true, sentCount, broadcast, pushResult, pushStats: getPushStats() });
   });
 
   app.put('/api/admin/settings/smtp', async (req, res) => {
@@ -5175,6 +5240,99 @@ async function startServer() {
     const onlyRead = req.query.readOnly === '1';
     clearUserNotifications(auth.user.id, onlyRead);
     res.json(listUserNotifications(auth.user.id));
+  });
+
+  app.get('/api/push/vapid-public-key', (_req, res) => {
+    res.json({ publicKey: getVapidPublicKey() });
+  });
+
+  app.post('/api/push/subscribe', async (req, res) => {
+    const auth = await resolveAuth(req);
+    const endpoint = String(req.body?.endpoint ?? '').trim();
+    const p256dh = String(req.body?.keys?.p256dh ?? '').trim();
+    const authKey = String(req.body?.keys?.auth ?? '').trim();
+
+    if (!/^https:\/\/.+/i.test(endpoint) || !p256dh || !authKey) {
+      res.status(400).json({ error: 'Abonnement Push Web invalide.' });
+      return;
+    }
+
+    const userId = auth?.user.id ?? null;
+    const isPro = userId ? isUserPro(userId) : false;
+    upsertPushSubscription({
+      endpoint,
+      p256dh,
+      auth: authKey,
+      userId,
+      isPro,
+      userAgent: String(req.headers['user-agent'] ?? ''),
+    });
+
+    res.json({ ok: true });
+  });
+
+  app.post('/api/push/unsubscribe', (req, res) => {
+    const endpoint = String(req.body?.endpoint ?? '').trim();
+    if (!endpoint) {
+      res.status(400).json({ error: 'Endpoint manquant.' });
+      return;
+    }
+    removePushSubscription(endpoint);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/push/test', async (req, res) => {
+    const auth = await resolveAuth(req);
+    const endpoint = String(req.body?.endpoint ?? '').trim();
+    const site = await getSiteConfig();
+    const payload = {
+      title: `${site.siteName} · Test Push PWA`,
+      body: 'Les notifications Push Web sont bien activées sur cet appareil !',
+      url: auth ? '/profil' : '/',
+      tag: `test-push-${Date.now()}`,
+    };
+
+    if (endpoint) {
+      const result = await sendPushToEndpoint(endpoint, payload);
+      if (result.attempted === 0) {
+        res.status(404).json({ error: 'Abonnement introuvable pour cet appareil. Réactivez les notifications.' });
+        return;
+      }
+      res.json({ ok: result.sent > 0, ...result });
+      return;
+    }
+
+    if (auth) {
+      const result = await sendPushToUsers([auth.user.id], payload);
+      res.json({ ok: result.sent > 0, ...result });
+      return;
+    }
+
+    res.status(400).json({ error: 'Aucun appareil ciblé pour le test Push.' });
+  });
+
+  app.get('/api/privacy', (_req, res) => {
+    res.json({ privacy: getPrivacyPageConfig() });
+  });
+
+  app.get('/api/admin/privacy', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    res.json({ privacy: getPrivacyPageConfig() });
+  });
+
+  app.put('/api/admin/privacy', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const privacy = updatePrivacyPageConfig(req.body);
+    res.json({ privacy });
+  });
+
+  app.post('/api/admin/privacy/reset', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const privacy = resetPrivacyPageConfig();
+    res.json({ privacy });
   });
 
   app.get('/api/admin/billing', async (req, res) => {

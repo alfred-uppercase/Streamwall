@@ -45,7 +45,7 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       aria-label="Sélection à la une"
-      className="relative overflow-hidden border-b border-border bg-card"
+      className="relative overflow-hidden border-b border-border bg-zinc-950 dark:bg-card"
     >
       <div className="relative flex min-h-[84dvh] flex-col justify-end sm:min-h-[32rem] sm:justify-center lg:min-h-[36rem]">
         <img
@@ -57,10 +57,10 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
           className="absolute inset-0 h-full w-full object-cover opacity-90 brightness-105 transition-opacity duration-300"
         />
         {/* Top scrim ensures the transparent overlaid header always remains readable */}
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-black/80 via-black/40 to-transparent" />
-        {/* Side and bottom scrims preserving artwork vibrance and hero copy contrast */}
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-background/90 via-background/45 to-transparent" />
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-background via-background/60 to-transparent sm:from-background/85 sm:via-background/25" />
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/75 via-black/35 to-transparent" />
+        {/* Side and bottom scrims: black gradient in light mode, theme background gradient in dark mode */}
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-black/90 via-black/50 to-transparent dark:from-background/90 dark:via-background/45" />
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/95 via-black/55 to-transparent sm:from-black/85 sm:via-black/30 dark:from-background dark:via-background/60 dark:sm:from-background/85 dark:sm:via-background/25" />
 
         <div className="relative z-10 mx-auto flex w-full max-w-7xl items-center justify-between gap-8 px-4 pt-24 pb-16 sm:px-6 sm:pt-28 sm:pb-16 md:pt-32">
           <div className="min-w-0 max-w-2xl space-y-3 sm:space-y-4">
@@ -68,16 +68,16 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
               {metaParts.join(' · ')}
             </p>
 
-            <h1 className="font-display text-3xl font-bold tracking-tight text-foreground drop-shadow-sm sm:text-4xl md:text-5xl">
+            <h1 className="font-display text-3xl font-bold tracking-tight text-white dark:text-foreground drop-shadow-sm sm:text-4xl md:text-5xl">
               {current.titre}
             </h1>
 
             {current.genre && (
-              <p className="text-xs sm:text-sm text-muted-foreground">{current.genre}</p>
+              <p className="text-xs sm:text-sm text-white/75 dark:text-muted-foreground">{current.genre}</p>
             )}
 
             {current.descr && (
-              <p className="line-clamp-3 max-w-xl text-sm leading-relaxed text-foreground/90 sm:text-base">
+              <p className="line-clamp-3 max-w-xl text-sm leading-relaxed text-white/90 dark:text-foreground/90 sm:text-base">
                 {current.descr}
               </p>
             )}
@@ -92,7 +92,7 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
               </Link>
               <Link
                 to="/catalogue"
-                className="inline-flex items-center gap-2 rounded-lg border border-border bg-background/80 px-4 py-2.5 text-sm font-medium text-foreground backdrop-blur transition-colors hover:bg-accent whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-2 rounded-lg border border-white/25 bg-black/45 px-4 py-2.5 text-sm font-medium text-white backdrop-blur transition-colors hover:bg-black/65 dark:border-border dark:bg-background/80 dark:text-foreground dark:hover:bg-accent whitespace-nowrap shrink-0"
               >
                 <span>Explorer le catalogue</span>
                 <ArrowRight className="size-4" />
@@ -103,7 +103,7 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
           {current.poster && (
             <Link
               to={`/${current.item_type}/${current.id}`}
-              className="hidden lg:block shrink-0 overflow-hidden rounded-xl border border-border shadow-2xl transition-transform duration-200 hover:scale-[1.02]"
+              className="hidden lg:block shrink-0 overflow-hidden rounded-xl border border-white/15 dark:border-border shadow-2xl transition-transform duration-200 hover:scale-[1.02]"
             >
               <img
                 src={current.poster}
@@ -128,7 +128,7 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
                     className={`h-1.5 rounded-full transition-all duration-200 ${
                       idx === index
                         ? 'w-8 bg-primary'
-                        : 'w-2.5 bg-muted-foreground/45 hover:bg-muted-foreground'
+                        : 'w-2.5 bg-white/40 hover:bg-white/75 dark:bg-muted-foreground/45 dark:hover:bg-muted-foreground'
                     }`}
                   />
                 ))}
@@ -138,7 +138,7 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
                   type="button"
                   aria-label="Titre précédent"
                   onClick={() => setIndex((prev) => (prev - 1 + slides.length) % slides.length)}
-                  className="inline-flex size-8 items-center justify-center rounded-lg border border-border bg-background/80 text-foreground hover:bg-accent"
+                  className="inline-flex size-8 items-center justify-center rounded-lg border border-white/25 bg-black/50 text-white hover:bg-black/70 dark:border-border dark:bg-background/80 dark:text-foreground dark:hover:bg-accent"
                 >
                   <ChevronLeft className="size-4" />
                 </button>
@@ -146,7 +146,7 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
                   type="button"
                   aria-label="Titre suivant"
                   onClick={() => setIndex((prev) => (prev + 1) % slides.length)}
-                  className="inline-flex size-8 items-center justify-center rounded-lg border border-border bg-background/80 text-foreground hover:bg-accent"
+                  className="inline-flex size-8 items-center justify-center rounded-lg border border-white/25 bg-black/50 text-white hover:bg-black/70 dark:border-border dark:bg-background/80 dark:text-foreground dark:hover:bg-accent"
                 >
                   <ChevronRight className="size-4" />
                 </button>

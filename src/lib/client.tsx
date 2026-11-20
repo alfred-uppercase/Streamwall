@@ -30,6 +30,9 @@ import type {
   PlanTier,
   PlayerTemplates,
   PopupConfig,
+  PrivacyPageConfig,
+  PushDispatchResult,
+  PushStats,
   SiteConfig,
   SubscriptionPlan,
   TmdbSearchSuggestion,
@@ -401,9 +404,11 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   adminNotificationHistory: () =>
-    apiRequest<{ broadcasts: AdminBroadcastRecord[]; guestNotifications?: NotificationRecord[] }>(
-      '/api/admin/notifications'
-    ),
+    apiRequest<{
+      broadcasts: AdminBroadcastRecord[];
+      guestNotifications?: NotificationRecord[];
+      pushStats?: PushStats;
+    }>('/api/admin/notifications'),
   adminDeleteGuestNotification: (id: string) =>
     apiRequest<{ ok: boolean; guestNotifications: NotificationRecord[] }>(
       `/api/admin/notifications/guest/${encodeURIComponent(id)}`,
@@ -415,14 +420,48 @@ export const api = {
     title: string;
     message: string;
     link?: string;
+    sendPush?: boolean;
   }) =>
-    apiRequest<{ ok: boolean; sentCount: number; broadcast: AdminBroadcastRecord }>(
-      '/api/admin/notifications',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }
-    ),
+    apiRequest<{
+      ok: boolean;
+      sentCount: number;
+      broadcast: AdminBroadcastRecord;
+      pushResult?: PushDispatchResult;
+      pushStats?: PushStats;
+    }>('/api/admin/notifications', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  pushVapidKey: () => apiRequest<{ publicKey: string }>('/api/push/vapid-public-key'),
+  pushSubscribe: (sub: {
+    endpoint: string;
+    keys: { p256dh: string; auth: string };
+  }) =>
+    apiRequest<{ ok: boolean }>('/api/push/subscribe', {
+      method: 'POST',
+      body: JSON.stringify(sub),
+    }),
+  pushUnsubscribe: (endpoint: string) =>
+    apiRequest<{ ok: boolean }>('/api/push/unsubscribe', {
+      method: 'POST',
+      body: JSON.stringify({ endpoint }),
+    }),
+  pushTest: (endpoint?: string | null) =>
+    apiRequest<{ ok: boolean; attempted: number; sent: number; failed: number }>('/api/push/test', {
+      method: 'POST',
+      body: JSON.stringify({ endpoint: endpoint || undefined }),
+    }),
+  privacy: () => apiRequest<{ privacy: PrivacyPageConfig }>('/api/privacy'),
+  adminPrivacy: () => apiRequest<{ privacy: PrivacyPageConfig }>('/api/admin/privacy'),
+  adminSavePrivacy: (payload: PrivacyPageConfig) =>
+    apiRequest<{ privacy: PrivacyPageConfig }>('/api/admin/privacy', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  adminResetPrivacy: () =>
+    apiRequest<{ privacy: PrivacyPageConfig }>('/api/admin/privacy/reset', {
+      method: 'POST',
+    }),
   adminSaveOrigin: (origin: string) =>
     apiRequest<{ origin: string }>('/api/admin/settings/origin', {
       method: 'PUT',

@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
+  ExternalLink,
   Film,
   Flag,
   Lock,
@@ -26,6 +27,29 @@ import { FavoriteButton, PosterCard } from '../components/PosterCard';
 import { CommentsSection } from '../components/CommentsSection';
 
 const FALLBACK_CINEMA_BACKDROP = '/src/assets/images/cinema_hero_backdrop_1794922115112.jpg';
+
+function extractYouTubeVideoId(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) return trimmed;
+  try {
+    const normalized = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    const url = new URL(normalized);
+    const vParam = url.searchParams.get('v');
+    if (vParam && /^[a-zA-Z0-9_-]{11}$/.test(vParam)) return vParam;
+    const pathMatch = url.pathname.match(/(?:embed|shorts|v|live)\/([a-zA-Z0-9_-]{11})/i);
+    if (pathMatch?.[1]) return pathMatch[1];
+    if (url.hostname.includes('youtu.be')) {
+      const slug = url.pathname.replace(/^\/+/, '').split('/')[0];
+      if (slug && /^[a-zA-Z0-9_-]{11}$/.test(slug)) return slug;
+    }
+  } catch {
+    const fallbackMatch = trimmed.match(/([a-zA-Z0-9_-]{11})/);
+    if (fallbackMatch?.[1]) return fallbackMatch[1];
+  }
+  return null;
+}
 
 function CastCard({ member }: { member: CastMember }) {
   const [failed, setFailed] = useState(false);
@@ -399,20 +423,22 @@ export function DetailPage() {
   return (
     <div>
       {/* Hero section */}
-      <section className="relative overflow-hidden border-b border-border bg-card">
+      <section className="relative overflow-hidden border-b border-border bg-zinc-950 dark:bg-card">
         <img
           src={backdropUrl}
           alt=""
           referrerPolicy="no-referrer"
           onError={() => setBackdropFailed(true)}
-          className="absolute inset-0 h-full w-full object-cover opacity-35"
+          className="absolute inset-0 h-full w-full object-cover opacity-75 brightness-105 transition-opacity duration-300"
         />
         {/* Top scrim for transparent overlaid header contrast */}
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-black/75 via-black/35 to-transparent" />
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-background via-background/85 to-background/45" />
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/65 via-black/25 to-transparent" />
+        {/* Side & bottom gradients: black gradient in light mode, theme background in dark mode (lighter so banner isn't too dark) */}
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-black/80 via-black/35 to-transparent dark:from-background/85 dark:via-background/30" />
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/90 via-black/45 to-transparent dark:from-background dark:via-background/50" />
 
         <div className="relative z-10 mx-auto flex max-w-7xl flex-col gap-8 px-4 pt-24 pb-10 sm:px-6 sm:pt-28 md:flex-row md:items-end md:pt-32 md:pb-14">
-          <div className="w-44 shrink-0 overflow-hidden rounded-xl border border-border bg-card shadow-2xl sm:w-56">
+          <div className="w-44 shrink-0 overflow-hidden rounded-xl border border-white/15 dark:border-border bg-card shadow-2xl sm:w-56">
             {item.poster && !posterFailed ? (
               <img
                 src={item.poster}
@@ -429,24 +455,24 @@ export function DetailPage() {
           </div>
 
           <div className="min-w-0 flex-1 space-y-4">
-            <p className="text-xs font-medium text-primary tabular-nums">
+            <p className="text-xs font-medium text-primary tabular-nums drop-shadow-xs">
               {metaLine.join(' · ')}
             </p>
 
-            <h1 className="font-display text-3xl font-bold tracking-tight text-foreground sm:text-5xl">
+            <h1 className="font-display text-3xl font-bold tracking-tight text-white dark:text-foreground drop-shadow-sm sm:text-5xl">
               {item.titre}
             </h1>
 
-            {item.genre && <p className="text-sm text-muted-foreground">{item.genre}</p>}
+            {item.genre && <p className="text-sm text-white/75 dark:text-muted-foreground">{item.genre}</p>}
 
             {tmdbRating && (
               <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
-                <div className="inline-flex items-center gap-1.5 text-sm font-semibold text-foreground tabular-nums">
+                <div className="inline-flex items-center gap-1.5 text-sm font-semibold text-white dark:text-foreground tabular-nums">
                   <Star className="size-4 fill-amber-400 text-amber-400" />
                   <span>{tmdbRating.average.toFixed(1)}</span>
-                  <span className="text-xs font-normal text-muted-foreground">/ 10 TMDB</span>
+                  <span className="text-xs font-normal text-white/70 dark:text-muted-foreground">/ 10 TMDB</span>
                   {tmdbRating.count > 0 && (
-                    <span className="text-xs font-normal text-muted-foreground">
+                    <span className="text-xs font-normal text-white/70 dark:text-muted-foreground">
                       ({tmdbRating.count.toLocaleString('fr-FR')} votes)
                     </span>
                   )}
@@ -457,7 +483,7 @@ export function DetailPage() {
             {descrText && (
               <div className="max-w-3xl space-y-1.5">
                 <p
-                  className={`text-sm leading-relaxed text-foreground/90 sm:text-base ${
+                  className={`text-sm leading-relaxed text-white/90 dark:text-foreground/90 sm:text-base ${
                     !descExpanded && isLongDescr ? 'line-clamp-3' : ''
                   }`}
                 >
@@ -498,7 +524,7 @@ export function DetailPage() {
                 </span>
               </button>
 
-              {item.trailer && (
+              {extractYouTubeVideoId(item.trailer) && (
                 <button
                   type="button"
                   onClick={() => setModal('trailer')}
@@ -514,7 +540,7 @@ export function DetailPage() {
               ) : (
                 <Link
                   to="/auth"
-                  className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-accent whitespace-nowrap shrink-0"
+                  className="inline-flex items-center gap-2 rounded-lg border border-white/25 bg-black/45 px-4 py-2.5 text-sm font-medium text-white backdrop-blur transition-colors hover:bg-black/65 dark:border-border dark:bg-card dark:text-foreground dark:hover:bg-accent whitespace-nowrap shrink-0"
                 >
                   <span>Se connecter pour ma liste</span>
                 </Link>
@@ -523,7 +549,7 @@ export function DetailPage() {
               <button
                 type="button"
                 onClick={() => openReportModal(selectedSeason, defaultEpisode)}
-                className="inline-flex items-center gap-2 rounded-lg border border-border bg-card/85 px-4 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:border-amber-500/40 hover:bg-accent hover:text-amber-400 whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-2 rounded-lg border border-white/25 bg-black/45 px-4 py-2.5 text-sm font-medium text-white/90 backdrop-blur transition-colors hover:border-amber-400/50 hover:bg-black/65 hover:text-amber-300 dark:border-border dark:bg-card/85 dark:text-muted-foreground dark:hover:border-amber-500/40 dark:hover:bg-accent dark:hover:text-amber-400 whitespace-nowrap shrink-0"
               >
                 <Flag className="size-4" />
                 <span>Signaler un problème</span>
@@ -531,7 +557,7 @@ export function DetailPage() {
             </div>
 
             {!isMember && (
-              <p className="text-xs text-muted-foreground">
+              <p className="text-xs text-white/75 dark:text-muted-foreground">
                 Mode invité : lecteur standard avec publicité.{' '}
                 <Link to="/auth" className="font-medium text-primary underline">
                   Connectez-vous
@@ -833,40 +859,62 @@ export function DetailPage() {
       )}
 
       {/* Trailer Modal */}
-      {modal === 'trailer' && item.trailer && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label={`Bande-annonce de ${item.titre}`}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-xs"
-          onClick={() => setModal(null)}
-        >
-          <div className="w-full max-w-4xl space-y-3" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between gap-4">
-              <h2 className="truncate font-display text-lg font-semibold text-white">
-                Bande-annonce — {item.titre}
-              </h2>
-              <button
-                type="button"
-                onClick={() => setModal(null)}
-                className="inline-flex items-center gap-1 rounded-lg border border-white/15 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800"
-              >
-                <X className="size-4" />
-                <span>Fermer</span>
-              </button>
-            </div>
-            <div className="aspect-video w-full overflow-hidden rounded-xl border border-border bg-black shadow-2xl">
-              <iframe
-                src={`https://www.youtube.com/embed/${item.trailer}?autoplay=1`}
-                title={`Bande-annonce — ${item.titre}`}
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowFullScreen
-                className="h-full w-full border-0"
-              />
+      {modal === 'trailer' && (() => {
+        const youtubeId = extractYouTubeVideoId(item.trailer);
+        if (!youtubeId) return null;
+        const originParam =
+          typeof window !== 'undefined' && window.location?.origin
+            ? `&origin=${encodeURIComponent(window.location.origin)}`
+            : '';
+        const embedSrc = `https://www.youtube.com/embed/${youtubeId}?autoplay=1&rel=0&playsinline=1&enablejsapi=1${originParam}`;
+        const externalUrl = `https://www.youtube.com/watch?v=${youtubeId}`;
+        return (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Bande-annonce de ${item.titre}`}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-xs"
+            onClick={() => setModal(null)}
+          >
+            <div className="w-full max-w-4xl space-y-3" onClick={(e) => e.stopPropagation()}>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 className="truncate font-display text-lg font-semibold text-white">
+                  Bande-annonce — {item.titre}
+                </h2>
+                <div className="flex items-center gap-2 shrink-0">
+                  <a
+                    href={externalUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 whitespace-nowrap"
+                  >
+                    <ExternalLink className="size-3.5" />
+                    <span>Ouvrir sur YouTube</span>
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => setModal(null)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-white/15 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 whitespace-nowrap"
+                  >
+                    <X className="size-4" />
+                    <span>Fermer</span>
+                  </button>
+                </div>
+              </div>
+              <div className="aspect-video w-full overflow-hidden rounded-xl border border-border bg-black shadow-2xl">
+                <iframe
+                  src={embedSrc}
+                  title={`Bande-annonce — ${item.titre}`}
+                  referrerPolicy="strict-origin-when-cross-origin"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  allowFullScreen
+                  className="h-full w-full border-0"
+                />
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Broken Stream / Wrong Episode Report Modal */}
       {reportModalOpen && (

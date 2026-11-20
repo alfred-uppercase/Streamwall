@@ -4,6 +4,8 @@ import { useIsFetching, useMutation, useQuery, useQueryClient } from '@tanstack/
 import {
   AlertTriangle,
   Bell,
+  BellOff,
+  BellRing,
   CheckCheck,
   Clock,
   Crown,
@@ -19,9 +21,11 @@ import {
   Trash2,
   UserRound,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import type { NotificationRecord } from '../shared/types';
 import { api, useAuth } from '../lib/client';
 import { useSiteConfig } from '../lib/siteConfig';
+import { useWebPush } from '../hooks/useWebPush';
 import { UserAvatar } from './UserAvatar';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -68,6 +72,7 @@ export function Navbar() {
   const location = useLocation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const webPush = useWebPush();
 
   const [notifOpen, setNotifOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
@@ -345,11 +350,64 @@ export function Navbar() {
                     </div>
                   </div>
 
+                  {webPush.supported && (
+                    <div className="flex items-center justify-between gap-2 border-b border-border bg-background/60 px-4 py-2 text-[11px]">
+                      {webPush.isSubscribed ? (
+                        <>
+                          <span className="inline-flex items-center gap-1.5 font-medium text-emerald-400">
+                            <BellRing className="size-3.5 shrink-0" />
+                            <span>Notifications Push PWA actives</span>
+                          </span>
+                          <button
+                            type="button"
+                            disabled={webPush.loading}
+                            onClick={async () => {
+                              const ok = await webPush.unsubscribe();
+                              if (ok) toast.success('Notifications Push désactivées sur cet appareil.');
+                            }}
+                            className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                          >
+                            <BellOff className="size-3" />
+                            <span>Désactiver</span>
+                          </button>
+                        </>
+                      ) : webPush.iosNeedsInstall ? (
+                        <span className="text-muted-foreground">
+                          Sur iPhone/iPad, installez l’app sur l’écran d’accueil pour activer le Push.
+                        </span>
+                      ) : webPush.permission === 'denied' ? (
+                        <span className="text-muted-foreground">
+                          Notifications Push bloquées dans les réglages du navigateur.
+                        </span>
+                      ) : (
+                        <>
+                          <span className="text-muted-foreground truncate">
+                            Alertes temps réel sur cet appareil
+                          </span>
+                          <button
+                            type="button"
+                            disabled={webPush.loading}
+                            onClick={async () => {
+                              const res = await webPush.subscribe();
+                              if (res.ok) {
+                                toast.success('Notifications Push PWA activées !');
+                              } else if (res.reason) {
+                                toast.error(res.reason);
+                              }
+                            }}
+                            className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap shrink-0"
+                          >
+                            <BellRing className="size-3" />
+                            <span>{webPush.loading ? 'Activation…' : 'Activer Push'}</span>
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+
                   {notifications.length === 0 ? (
                     <div className="px-4 py-8 text-center text-xs text-muted-foreground">
-                      {isMember
-                        ? 'Aucune notification pour le moment. Vous serez alerté des réponses à vos commentaires, mentions et changements d’offre Pro.'
-                        : 'Aucune notification pour le moment. Les annonces et nouveautés importantes apparaîtront ici.'}
+                      Aucune notification pour le moment.
                     </div>
                   ) : (
                     <ul className="max-h-80 divide-y divide-border overflow-y-auto">

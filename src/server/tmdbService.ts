@@ -50,11 +50,21 @@ async function fetchTmdbJson<T>(endpoint: string, apiKey: string): Promise<T | n
   }
 }
 
+interface TmdbVideoEntry {
+  key?: string;
+  site?: string;
+  type?: string;
+  official?: boolean;
+}
+
 interface TmdbShowResponse {
   id: number;
   overview?: string;
   vote_average?: number;
   vote_count?: number;
+  videos?: {
+    results?: TmdbVideoEntry[];
+  };
   seasons?: Array<{
     season_number: number;
     name: string;
@@ -62,6 +72,23 @@ interface TmdbShowResponse {
     air_date: string | null;
     poster_path: string | null;
   }>;
+}
+
+function pickBestTmdbYouTubeKey(videos: TmdbVideoEntry[] | undefined): string | null {
+  if (!Array.isArray(videos) || videos.length === 0) return null;
+  const ytVideos = videos.filter(
+    (v) =>
+      v.site?.toLowerCase() === 'youtube' &&
+      typeof v.key === 'string' &&
+      /^[a-zA-Z0-9_-]{6,20}$/.test(v.key.trim())
+  );
+  if (ytVideos.length === 0) return null;
+  const ranked = [...ytVideos].sort((a, b) => {
+    const score = (v: TmdbVideoEntry) =>
+      (v.type === 'Trailer' ? 4 : v.type === 'Teaser' ? 2 : 0) + (v.official ? 1 : 0);
+    return score(b) - score(a);
+  });
+  return ranked[0]?.key?.trim() ?? null;
 }
 
 interface TmdbSeasonResponse {
@@ -153,7 +180,7 @@ export async function enrichDetailWithTmdb(params: {
   }
 
   const showData = await fetchTmdbJson<TmdbShowResponse>(
-    `/${tmdbKind}/${tmdbId}?language=fr-FR`,
+    `/${tmdbKind}/${tmdbId}?language=fr-FR&append_to_response=videos`,
     apiKey
   );
 
@@ -164,6 +191,18 @@ export async function enrichDetailWithTmdb(params: {
       seasonsMeta: fallbackMeta,
       tmdbRating: null,
     };
+  }
+
+  let resolvedTrailer = item.trailer?.trim() || null;
+  if (!resolvedTrailer) {
+    resolvedTrailer = pickBestTmdbYouTubeKey(showData.videos?.results);
+    if (!resolvedTrailer) {
+      const fallbackEn = await fetchTmdbJson<{ results?: TmdbVideoEntry[] }>(
+        `/${tmdbKind}/${tmdbId}/videos?language=en-US`,
+        apiKey
+      );
+      resolvedTrailer = pickBestTmdbYouTubeKey(fallbackEn?.results);
+    }
   }
 
   const tmdbRating =
@@ -177,6 +216,7 @@ export async function enrichDetailWithTmdb(params: {
   const enrichedItem: DetailItem = {
     ...item,
     tmdbId,
+    trailer: resolvedTrailer,
     descr: item.descr || showData.overview?.trim() || null,
   };
 

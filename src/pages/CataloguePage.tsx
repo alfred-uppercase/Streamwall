@@ -7,8 +7,9 @@ import { api } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
 import { PosterCard, PosterSkeletonGrid } from '../components/PosterCard';
 
-const CURRENT_YEAR = new Date().getFullYear();
-const YEARS = Array.from({ length: CURRENT_YEAR - 1950 + 1 }, (_, i) => String(CURRENT_YEAR - i));
+const MAX_YEAR = Math.max(2026, new Date().getFullYear());
+const MIN_YEAR = 1900;
+const YEARS = Array.from({ length: MAX_YEAR - MIN_YEAR + 1 }, (_, i) => String(MAX_YEAR - i));
 
 const TYPE_OPTIONS = [
   { value: 'all', label: 'Tout' },

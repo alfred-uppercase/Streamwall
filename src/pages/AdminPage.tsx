@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Activity,
@@ -14,6 +14,7 @@ import {
   Mail,
   RefreshCw,
   RotateCcw,
+  ShieldCheck,
   Trash2,
   Upload,
   Users,
@@ -39,6 +40,7 @@ import { AdminNotificationsTab } from '../components/AdminNotificationsTab';
 import { AdminEmailsTab } from '../components/AdminEmailsTab';
 import { AdminPopupsTab } from '../components/AdminPopupsTab';
 import { AdminRequestsTab } from '../components/AdminRequestsTab';
+import { AdminPrivacyTab } from '../components/AdminPrivacyTab';
 import { ProCrownBadge } from '../components/UserAvatar';
 
 const PLAYER_FIELDS: { key: PlayerKey; label: string; hint: string }[] = [
@@ -62,6 +64,7 @@ type AdminTab =
   | 'notifications'
   | 'popups'
   | 'emails'
+  | 'privacy'
   | 'api'
   | 'players'
   | 'comments';
@@ -74,6 +77,7 @@ const VALID_TABS: AdminTab[] = [
   'notifications',
   'popups',
   'emails',
+  'privacy',
   'api',
   'players',
   'comments',
@@ -87,13 +91,14 @@ const TAB_TITLE_MAP: Record<AdminTab, string> = {
   notifications: 'Administration · Notifications',
   popups: 'Administration · Popups',
   emails: 'Administration · Emails & Logs',
+  privacy: 'Administration · Confidentialité',
   api: 'Administration · Configuration & API',
   players: 'Administration · Lecteurs',
   comments: 'Administration · Modération',
 };
 
 export function AdminPage() {
-  const { user: currentUser, backend, isAdmin, refreshUser } = useAuth();
+  const { user: currentUser, backend, loading, isAdmin, refreshUser } = useAuth();
   const { siteName } = useSiteConfig();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -262,26 +267,12 @@ export function AdminPage() {
     reader.readAsDataURL(file);
   }
 
+  if (loading) {
+    return null;
+  }
+
   if (!isAdmin) {
-    return (
-      <main className="mx-auto max-w-4xl px-4 py-16 text-center sm:px-6">
-        <h1 className="font-display text-3xl font-bold text-foreground">Accès réservé</h1>
-        <p className="mt-2 text-sm text-muted-foreground">
-          Cette console est accessible uniquement aux administrateurs {siteName}.
-        </p>
-        {currentUser && (
-          <p className="mt-2 mb-6 text-xs text-muted-foreground">
-            Compte connecté : <span className="font-medium text-foreground">{currentUser.email}</span> (rôle détecté : membre). Vérifiez que cet utilisateur possède bien le rôle <code className="font-mono text-primary">admin</code> dans votre table <code className="font-mono text-primary">user_roles</code> Supabase.
-          </p>
-        )}
-        <Link
-          to="/"
-          className="mt-4 inline-flex rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground"
-        >
-          Retour à l’accueil
-        </Link>
-      </main>
-    );
+    return <Navigate to="/" replace />;
   }
 
   const data = overviewQuery.data;
@@ -357,6 +348,7 @@ export function AdminPage() {
             ['notifications', 'Notifications', Bell],
             ['popups', 'Popups', Layers],
             ['emails', 'Emails & Logs', Mail],
+            ['privacy', 'Confidentialité', ShieldCheck],
             ['api', 'Configuration & API', Globe],
             ['players', 'Lecteurs', null],
             ['comments', 'Modération', null],
@@ -434,6 +426,9 @@ export function AdminPage() {
           supabaseServiceRoleConfigured={settingsQuery.data?.supabaseServiceRoleConfigured}
         />
       )}
+
+      {/* TAB: PRIVACY PAGE EDITOR */}
+      {tab === 'privacy' && <AdminPrivacyTab />}
 
       {/* TAB: SITE CONFIG, API ORIGIN & EMAIL */}
       {tab === 'api' && (

@@ -8,6 +8,7 @@ import type {
   NotificationRecord,
 } from '../shared/types.ts';
 import { readModuleSnapshot, writeModuleSnapshot } from './persistentDb.ts';
+import { sendPushToUsers } from './webPushStore.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', '..', '.data');
@@ -46,6 +47,7 @@ export function createNotification(input: {
   message: string;
   link: string;
   dedupKey?: string;
+  skipPush?: boolean;
 }): NotificationRecord | null {
   if (!input.userId) return null;
 
@@ -73,6 +75,16 @@ export function createNotification(input: {
     notificationsDb.notifications = notificationsDb.notifications.slice(0, 2500);
   }
   saveNotificationsDb(notificationsDb);
+
+  if (!input.skipPush) {
+    void sendPushToUsers([record.userId], {
+      title: record.title,
+      body: record.message,
+      url: record.link,
+      tag: `ntf:${record.kind}:${record.id}`,
+    }).catch(() => undefined);
+  }
+
   return record;
 }
 

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  BellRing,
   Check,
   Crown,
   Globe,
@@ -43,6 +44,7 @@ export function AdminNotificationsTab({
   const [title, setTitle] = useState('');
   const [message, setMessage] = useState('');
   const [link, setLink] = useState('/');
+  const [sendPush, setSendPush] = useState(true);
 
   useEffect(() => {
     if (preselectedUserIds && preselectedUserIds.length > 0) {
@@ -64,18 +66,23 @@ export function AdminNotificationsTab({
         title: title.trim(),
         message: message.trim(),
         link: link.trim() || '/',
+        sendPush,
       }),
     onSuccess: (res) => {
       setTitle('');
       setMessage('');
       void queryClient.invalidateQueries({ queryKey: ['admin-notifications-history'] });
       void queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      const pushSuffix =
+        res.pushResult && res.pushResult.sent > 0
+          ? ` (+ ${res.pushResult.sent} alerte${res.pushResult.sent > 1 ? 's' : ''} Push PWA)`
+          : '';
       toast.success(
         target === 'guest'
-          ? 'Notification publiée pour tous les visiteurs invités.'
+          ? `Notification publiée pour tous les visiteurs invités${pushSuffix}.`
           : target === 'all'
-            ? `Notification envoyée à ${res.sentCount} membre${res.sentCount > 1 ? 's' : ''} + visiteurs invités.`
-            : `Notification envoyée à ${res.sentCount} destinataire${res.sentCount > 1 ? 's' : ''}.`
+            ? `Notification envoyée à ${res.sentCount} membre${res.sentCount > 1 ? 's' : ''} + visiteurs invités${pushSuffix}.`
+            : `Notification envoyée à ${res.sentCount} destinataire${res.sentCount > 1 ? 's' : ''}${pushSuffix}.`
       );
     },
     onError: (err) => {
@@ -128,23 +135,39 @@ export function AdminNotificationsTab({
 
   const broadcasts = historyQuery.data?.broadcasts ?? [];
   const guestNotifications = historyQuery.data?.guestNotifications ?? [];
+  const pushStats = historyQuery.data?.pushStats;
 
   return (
     <div className="grid gap-6 lg:grid-cols-3">
       {/* Compose Admin Notification */}
       <section className="rounded-xl border border-border bg-card p-6 space-y-5 lg:col-span-2">
-        <div className="flex items-center gap-3 border-b border-border pb-4">
-          <div className="grid size-10 shrink-0 place-items-center rounded-xl border border-border bg-background text-primary">
-            <Megaphone className="size-5" />
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-4">
+          <div className="flex items-center gap-3">
+            <div className="grid size-10 shrink-0 place-items-center rounded-xl border border-border bg-background text-primary">
+              <Megaphone className="size-5" />
+            </div>
+            <div>
+              <h2 className="font-display text-xl font-semibold text-foreground">
+                Envoyer une notification
+              </h2>
+              <p className="text-xs text-muted-foreground">
+                Ciblez tous vos membres, uniquement les comptes Pro, uniquement les comptes Gratuits ou des utilisateurs précis.
+              </p>
+            </div>
           </div>
-          <div>
-            <h2 className="font-display text-xl font-semibold text-foreground">
-              Envoyer une notification
-            </h2>
-            <p className="text-xs text-muted-foreground">
-              Ciblez tous vos membres, uniquement les comptes Pro, uniquement les comptes Gratuits ou des utilisateurs précis.
-            </p>
-          </div>
+
+          {pushStats && (
+            <div className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-1.5 text-xs text-muted-foreground tabular-nums">
+              <BellRing className="size-3.5 text-primary" />
+              <span>
+                Push PWA :{' '}
+                <strong className="font-semibold text-foreground">{pushStats.totalDevices}</strong>{' '}
+                appareil{pushStats.totalDevices > 1 ? 's' : ''} ({pushStats.memberDevices} membre
+                {pushStats.memberDevices > 1 ? 's' : ''}, {pushStats.guestDevices} invité
+                {pushStats.guestDevices > 1 ? 's' : ''})
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Target Audience Selector */}
@@ -384,7 +407,25 @@ export function AdminNotificationsTab({
             </div>
           </div>
 
-          <div className="pt-2">
+          <label className="flex cursor-pointer items-center gap-2.5 rounded-lg border border-border bg-background/60 px-3.5 py-2.5 text-xs">
+            <input
+              type="checkbox"
+              checked={sendPush}
+              onChange={(e) => setSendPush(e.target.checked)}
+              className="size-4 accent-primary"
+            />
+            <BellRing className="size-4 shrink-0 text-primary" />
+            <div>
+              <span className="font-semibold text-foreground">
+                Diffuser aussi en notification Push Web (PWA)
+              </span>
+              <p className="text-[11px] text-muted-foreground">
+                Envoie une alerte système sur les appareils abonnés de la cible sélectionnée.
+              </p>
+            </div>
+          </label>
+
+          <div className="pt-1">
             <button
               type="submit"
               disabled={

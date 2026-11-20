@@ -3,6 +3,8 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
+  BellOff,
+  BellRing,
   CalendarClock,
   Check,
   Crown,
@@ -19,6 +21,7 @@ import {
   Search,
   Shield,
   Shuffle,
+  Smartphone,
   Sun,
   Trash2,
   UserPlus,
@@ -28,6 +31,7 @@ import { toast } from 'sonner';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
 import { THEME_PRESETS, useTheme } from '../lib/theme';
+import { useWebPush } from '../hooks/useWebPush';
 import { OtpCodeInput } from '../components/OtpCodeInput';
 import {
   AVATAR_PRESETS,
@@ -49,6 +53,7 @@ export function ProfilePage() {
   });
 
   const { theme, applyAndSaveTheme, resetTheme } = useTheme();
+  const webPush = useWebPush();
   const [customHex, setCustomHex] = useState(theme.accentHex);
 
   useEffect(() => {
@@ -319,6 +324,7 @@ export function ProfilePage() {
 
   async function handleConfirmDeleteAccount(e: React.FormEvent) {
     e.preventDefault();
+    if (isAdmin) return;
     if (deleteConfirmText.trim().toUpperCase() !== 'SUPPRIMER') {
       toast.error('Veuillez saisir SUPPRIMER pour confirmer.');
       return;
@@ -560,19 +566,12 @@ export function ProfilePage() {
                 </button>
               </div>
 
-              <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground tabular-nums">
-                <CalendarClock className="size-3.5 shrink-0 text-primary" />
-                {emailChangeLocked && nextEmailChangeAt ? (
-                  <span>
-                    Modification limitée à 1 fois par mois · Prochaine modification possible le{' '}
-                    <strong className="text-foreground">
-                      {new Date(nextEmailChangeAt).toLocaleDateString('fr-FR')}
-                    </strong>
-                  </span>
-                ) : (
+              {!emailChangeLocked && (
+                <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground tabular-nums">
+                  <CalendarClock className="size-3.5 shrink-0 text-primary" />
                   <span>Modification autorisée 1 fois par mois.</span>
-                )}
-              </div>
+                </div>
+              )}
             </div>
 
             {/* Password row */}
@@ -603,6 +602,97 @@ export function ProfilePage() {
           </p>
         </section>
       </div>
+
+      {/* Web Push Notifications (PWA) */}
+      <section className="rounded-xl border border-border bg-card p-6">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-start gap-3.5">
+            <div
+              className={`grid size-10 shrink-0 place-items-center rounded-xl border ${
+                webPush.isSubscribed
+                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
+                  : 'border-border bg-background text-primary'
+              }`}
+            >
+              {webPush.isSubscribed ? (
+                <BellRing className="size-5" />
+              ) : (
+                <Smartphone className="size-5" />
+              )}
+            </div>
+            <div>
+              <h2 className="font-display text-lg font-semibold text-foreground">
+                Notifications Push Web (PWA)
+              </h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {!webPush.supported
+                  ? webPush.iosNeedsInstall
+                    ? 'Sur iPhone/iPad, installez d’abord l’application sur l’écran d’accueil (Partager → Sur l’écran d’accueil) pour activer les notifications Push.'
+                    : 'Votre navigateur actuel ne prend pas en charge les notifications Push Web.'
+                  : webPush.permission === 'denied'
+                    ? 'Les notifications sont actuellement bloquées dans les réglages de votre navigateur pour ce site.'
+                    : webPush.isSubscribed
+                      ? 'Cet appareil reçoit les alertes en temps réel (nouvelles sorties, réponses à vos commentaires, demandes et abonnement).'
+                      : 'Activez les notifications Push pour être prévenu directement sur votre appareil, même lorsque le site est fermé.'}
+              </p>
+            </div>
+          </div>
+
+          {webPush.supported && webPush.permission !== 'denied' && (
+            <div className="flex flex-wrap items-center gap-2">
+              {webPush.isSubscribed ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={webPush.testing || webPush.loading}
+                    onClick={async () => {
+                      const res = await webPush.sendTest();
+                      if (res.ok) {
+                        toast.success('Notification Push de test envoyée !');
+                      } else {
+                        toast.error(res.error || 'Échec du test Push.');
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-background px-3.5 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-accent disabled:opacity-50 whitespace-nowrap shrink-0"
+                  >
+                    <BellRing className="size-3.5 text-primary" />
+                    <span>{webPush.testing ? 'Envoi…' : 'Tester sur cet appareil'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={webPush.loading}
+                    onClick={async () => {
+                      const ok = await webPush.unsubscribe();
+                      if (ok) toast.success('Notifications Push désactivées sur cet appareil.');
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3.5 py-2 text-xs font-medium text-muted-foreground transition-colors hover:text-destructive disabled:opacity-50 whitespace-nowrap shrink-0"
+                  >
+                    <BellOff className="size-3.5" />
+                    <span>Désactiver</span>
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  disabled={webPush.loading}
+                  onClick={async () => {
+                    const res = await webPush.subscribe();
+                    if (res.ok) {
+                      toast.success('Notifications Push Web activées sur cet appareil !');
+                    } else if (res.reason) {
+                      toast.error(res.reason);
+                    }
+                  }}
+                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap shrink-0"
+                >
+                  <BellRing className="size-3.5" />
+                  <span>{webPush.loading ? 'Activation…' : 'Activer les notifications Push'}</span>
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </section>
 
       {/* Theme Colors Customization */}
       <section className="rounded-xl border border-border bg-card p-6 space-y-5">
@@ -898,36 +988,38 @@ export function ProfilePage() {
         )}
       </section>
 
-      {/* Danger Zone — Account Self-Deletion */}
-      <section className="rounded-xl border border-destructive/35 bg-card p-6">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-start gap-3">
-            <div className="grid size-10 shrink-0 place-items-center rounded-xl border border-destructive/30 bg-destructive/10 text-destructive">
-              <AlertTriangle className="size-5" />
+      {/* Danger Zone — Account Self-Deletion (disabled for admins) */}
+      {!isAdmin && (
+        <section className="rounded-xl border border-destructive/35 bg-card p-6">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="grid size-10 shrink-0 place-items-center rounded-xl border border-destructive/30 bg-destructive/10 text-destructive">
+                <AlertTriangle className="size-5" />
+              </div>
+              <div>
+                <h2 className="font-display text-lg font-semibold text-foreground">
+                  Supprimer mon compte
+                </h2>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  Cette action supprime définitivement votre profil, vos favoris, votre historique, vos commentaires et vos accès associés.
+                </p>
+              </div>
             </div>
-            <div>
-              <h2 className="font-display text-lg font-semibold text-foreground">
-                Supprimer mon compte
-              </h2>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                Cette action supprime définitivement votre profil, vos favoris, votre historique, vos commentaires et vos accès associés.
-              </p>
-            </div>
-          </div>
 
-          <button
-            type="button"
-            onClick={() => {
-              setDeleteConfirmText('');
-              setDeleteModalOpen(true);
-            }}
-            className="inline-flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-2 text-xs font-semibold text-destructive transition-colors hover:bg-destructive hover:text-white whitespace-nowrap shrink-0"
-          >
-            <Trash2 className="size-3.5" />
-            <span>Supprimer mon compte</span>
-          </button>
-        </div>
-      </section>
+            <button
+              type="button"
+              onClick={() => {
+                setDeleteConfirmText('');
+                setDeleteModalOpen(true);
+              }}
+              className="inline-flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-2 text-xs font-semibold text-destructive transition-colors hover:bg-destructive hover:text-white whitespace-nowrap shrink-0"
+            >
+              <Trash2 className="size-3.5" />
+              <span>Supprimer mon compte</span>
+            </button>
+          </div>
+        </section>
+      )}
 
       {avatarModalOpen && (
         <div
@@ -1347,7 +1439,7 @@ export function ProfilePage() {
         </div>
       )}
 
-      {deleteModalOpen && (
+      {!isAdmin && deleteModalOpen && (
         <div
           role="dialog"
           aria-modal="true"

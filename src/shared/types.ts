@@ -635,3 +635,55 @@ export interface ContentRequestRecord {
   updatedAt: string;
 }
 
+export interface PushStats {
+  totalDevices: number;
+  memberDevices: number;
+  guestDevices: number;
+  proDevices: number;
+}
+
+export interface PushDispatchResult {
+  attempted: number;
+  sent: number;
+  failed: number;
+  removed: number;
+}
+
+export type PrivacyIconKey =
+  | 'lock'
+  | 'key'
+  | 'shield'
+  | 'users'
+  | 'message'
+  | 'eye'
+  | 'devices'
+  | 'database'
+  | 'card'
+  | 'alert'
+  | 'eye-off'
+  | 'shield-check'
+  | 'globe'
+  | 'file-text';
+
+export interface PrivacyItem {
+  id: string;
+  icon: PrivacyIconKey;
+  title: string;
+  description: string;
+  technicalDetails?: string;
+}
+
+export interface PrivacySection {
+  id: string;
+  title: string;
+  items: PrivacyItem[];
+}
+
+export interface PrivacyPageConfig {
+  title: string;
+  subtitle: string;
+  updatedAt: string;
+  sections: PrivacySection[];
+}
+
+

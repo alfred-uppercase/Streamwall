@@ -65,6 +65,21 @@ sqlite.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_content_requests_status_votes
     ON content_requests (status, votes DESC, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint TEXT PRIMARY KEY,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    user_id TEXT,
+    is_pro INTEGER NOT NULL DEFAULT 0,
+    user_agent TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_sent_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user
+    ON push_subscriptions (user_id);
 `);
 
 const selectModuleStmt = sqlite.prepare(
