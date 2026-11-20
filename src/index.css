@@ -67,11 +67,13 @@
     font-family: var(--font-sans);
     scrollbar-color: color-mix(in oklch, var(--primary) 50%, transparent) var(--background);
     scrollbar-width: thin;
+    overflow-x: clip;
   }
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
     letter-spacing: 0.005em;
+    overflow-x: clip;
   }
   h1,
   h2,

@@ -142,6 +142,24 @@ import {
   trackPopupEvent,
   upsertPopup,
 } from './src/server/popupsStore.ts';
+import {
+  getPersistenceSummary,
+  hydrateModulesFromSupabase,
+  readModuleSnapshot,
+  writeModuleSnapshot,
+} from './src/server/persistentDb.ts';
+import {
+  countPendingRequestsAndReports,
+  createBrokenReport,
+  createOrVoteContentRequest,
+  deleteBrokenReport,
+  deleteContentRequest,
+  listBrokenReports,
+  listContentRequests,
+  toggleVoteContentRequest,
+  updateBrokenReportStatus,
+  updateContentRequestStatus,
+} from './src/server/requestsStore.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3000;
@@ -239,42 +257,31 @@ interface PendingSignupEntry {
 }
 
 function loadPendingSignups(): Record<string, PendingSignupEntry> {
-  try {
-    if (fs.existsSync(PENDING_SIGNUPS_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(PENDING_SIGNUPS_FILE, 'utf-8')) as Record<
-        string,
-        PendingSignupEntry
-      >;
-      const now = Date.now();
-      const cleaned: Record<string, PendingSignupEntry> = {};
-      for (const [k, v] of Object.entries(parsed || {})) {
-        if (v && v.expiresAt > now) {
-          cleaned[k] = v;
-        }
-      }
-      return cleaned;
+  const parsed = readModuleSnapshot<Record<string, PendingSignupEntry>>(
+    'pending_signups',
+    PENDING_SIGNUPS_FILE
+  );
+  if (!parsed) return {};
+  const now = Date.now();
+  const cleaned: Record<string, PendingSignupEntry> = {};
+  for (const [k, v] of Object.entries(parsed)) {
+    if (v && v.expiresAt > now) {
+      cleaned[k] = v;
     }
-  } catch {
-    // Ignore read error
   }
-  return {};
+  return cleaned;
 }
 
 const pendingSignups: Record<string, PendingSignupEntry> = loadPendingSignups();
 
 function savePendingSignups(): void {
-  try {
-    const now = Date.now();
-    for (const k of Object.keys(pendingSignups)) {
-      if (pendingSignups[k].expiresAt <= now) {
-        delete pendingSignups[k];
-      }
+  const now = Date.now();
+  for (const k of Object.keys(pendingSignups)) {
+    if (pendingSignups[k].expiresAt <= now) {
+      delete pendingSignups[k];
     }
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(PENDING_SIGNUPS_FILE, JSON.stringify(pendingSignups, null, 2), 'utf-8');
-  } catch {
-    // Non-fatal
   }
+  writeModuleSnapshot('pending_signups', pendingSignups);
 }
 
 const OTP_CHALLENGES_FILE = path.join(DATA_DIR, 'tapenaka-otp-challenges.json');
@@ -294,42 +301,31 @@ interface OtpChallengeEntry {
 }
 
 function loadOtpChallenges(): Record<string, OtpChallengeEntry> {
-  try {
-    if (fs.existsSync(OTP_CHALLENGES_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(OTP_CHALLENGES_FILE, 'utf-8')) as Record<
-        string,
-        OtpChallengeEntry
-      >;
-      const now = Date.now();
-      const cleaned: Record<string, OtpChallengeEntry> = {};
-      for (const [k, v] of Object.entries(parsed || {})) {
-        if (v && v.expiresAt > now) {
-          cleaned[k] = v;
-        }
-      }
-      return cleaned;
+  const parsed = readModuleSnapshot<Record<string, OtpChallengeEntry>>(
+    'otp_challenges',
+    OTP_CHALLENGES_FILE
+  );
+  if (!parsed) return {};
+  const now = Date.now();
+  const cleaned: Record<string, OtpChallengeEntry> = {};
+  for (const [k, v] of Object.entries(parsed)) {
+    if (v && v.expiresAt > now) {
+      cleaned[k] = v;
     }
-  } catch {
-    // Ignore read error
   }
-  return {};
+  return cleaned;
 }
 
 const otpChallenges: Record<string, OtpChallengeEntry> = loadOtpChallenges();
 
 function saveOtpChallenges(): void {
-  try {
-    const now = Date.now();
-    for (const k of Object.keys(otpChallenges)) {
-      if (otpChallenges[k].expiresAt <= now) {
-        delete otpChallenges[k];
-      }
+  const now = Date.now();
+  for (const k of Object.keys(otpChallenges)) {
+    if (otpChallenges[k].expiresAt <= now) {
+      delete otpChallenges[k];
     }
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(OTP_CHALLENGES_FILE, JSON.stringify(otpChallenges, null, 2), 'utf-8');
-  } catch {
-    // Non-fatal
   }
+  writeModuleSnapshot('otp_challenges', otpChallenges);
 }
 
 function cleanupUserOtpChallenges(userId: string, email?: string): void {
@@ -353,29 +349,17 @@ const EMAIL_COOLDOWNS_FILE = path.join(DATA_DIR, 'tapenaka-email-cooldowns.json'
 const EMAIL_CHANGE_COOLDOWN_MS = 30 * 86_400_000;
 
 function loadEmailCooldowns(): Record<string, string> {
-  try {
-    if (fs.existsSync(EMAIL_COOLDOWNS_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(EMAIL_COOLDOWNS_FILE, 'utf-8')) as Record<
-        string,
-        string
-      >;
-      if (parsed && typeof parsed === 'object') return parsed;
-    }
-  } catch {
-    // Ignore read error
-  }
-  return {};
+  const parsed = readModuleSnapshot<Record<string, string>>(
+    'email_cooldowns',
+    EMAIL_COOLDOWNS_FILE
+  );
+  return parsed && typeof parsed === 'object' ? parsed : {};
 }
 
 const emailChangeTimestamps: Record<string, string> = loadEmailCooldowns();
 
 function saveEmailCooldowns(): void {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(EMAIL_COOLDOWNS_FILE, JSON.stringify(emailChangeTimestamps, null, 2), 'utf-8');
-  } catch {
-    // Non-fatal
-  }
+  writeModuleSnapshot('email_cooldowns', emailChangeTimestamps);
 }
 
 function getUserEmailChangeStatus(userId: string): {
@@ -831,15 +815,9 @@ function createSeedDb(): DatabaseShape {
 }
 
 function loadDb(): DatabaseShape {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8')) as DatabaseShape;
-      if (parsed && Array.isArray(parsed.users) && parsed.settings) {
-        return parsed;
-      }
-    }
-  } catch {
-    // Fallback
+  const parsed = readModuleSnapshot<DatabaseShape>('store', DB_FILE);
+  if (parsed && Array.isArray(parsed.users) && parsed.settings) {
+    return parsed;
   }
   const seeded = createSeedDb();
   saveDb(seeded);
@@ -847,12 +825,7 @@ function loadDb(): DatabaseShape {
 }
 
 function saveDb(state: DatabaseShape): void {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(DB_FILE, JSON.stringify(state, null, 2), 'utf-8');
-  } catch {
-    // Non-fatal
-  }
+  writeModuleSnapshot('store', state);
 }
 
 const db: DatabaseShape = loadDb();
@@ -1138,6 +1111,25 @@ function getIndexedCatalogEntry(type: ItemType, id: string): IndexedCatalogEntry
     catalogIndex.get(`serie:${id}`) ??
     null
   );
+}
+
+function findIndexedCatalogByTmdb(
+  tmdbId: string,
+  mediaType: 'film' | 'serie'
+): { id: string; item_type: ItemType; titre: string } | null {
+  const cleanTmdb = String(tmdbId || '').trim();
+  if (!cleanTmdb) return null;
+  for (const entry of catalogIndex.values()) {
+    if (entry.tmdbId && String(entry.tmdbId) === cleanTmdb) {
+      if (mediaType === 'film' && entry.item_type === 'film') {
+        return { id: entry.id, item_type: entry.item_type, titre: entry.titre };
+      }
+      if (mediaType === 'serie' && entry.item_type !== 'film') {
+        return { id: entry.id, item_type: entry.item_type, titre: entry.titre };
+      }
+    }
+  }
+  return null;
 }
 
 function parseKorotokoRow(r: Record<string, unknown>): IndexedCatalogEntry {
@@ -4470,6 +4462,7 @@ async function startServer() {
       smtp: getAdminSmtpStatus(),
       site: await getSiteConfig(),
       supabaseServiceRoleConfigured: Boolean(createAdminClient()),
+      persistence: getPersistenceSummary(),
     });
   });
 
@@ -5383,6 +5376,332 @@ async function startServer() {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
+  // TMDB SUGGESTIONS, BROKEN LINK REPORTS & MISSING TITLE REQUESTS
+  // ─────────────────────────────────────────────────────────────────────────
+  const reportRateLimit = new Map<string, number[]>();
+  function checkSubmissionRateLimit(key: string, maxPerWindow = 10, windowMs = 900_000): boolean {
+    const now = Date.now();
+    const recent = (reportRateLimit.get(key) ?? []).filter((ts) => now - ts < windowMs);
+    if (recent.length >= maxPerWindow) return false;
+    recent.push(now);
+    reportRateLimit.set(key, recent);
+    return true;
+  }
+
+  app.get('/api/tmdb/search', async (req, res) => {
+    const query = String(req.query.q ?? '').trim();
+    const typeFilter = String(req.query.type ?? 'all').trim().toLowerCase();
+    if (query.length < 2) {
+      res.json({ results: [] });
+      return;
+    }
+
+    const cacheKey = `tmdb_search:${typeFilter}:${query.toLowerCase()}`;
+    const cached = getCached<{ results: unknown[] }>(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
+    const tmdbKey = await getTmdbApiKey();
+    if (!tmdbKey) {
+      res.json({ results: [] });
+      return;
+    }
+
+    const endpoint =
+      typeFilter === 'film'
+        ? 'search/movie'
+        : typeFilter === 'serie' || typeFilter === 'anime'
+          ? 'search/tv'
+          : 'search/multi';
+
+    try {
+      const url = new URL(`https://api.themoviedb.org/3/${endpoint}`);
+      url.searchParams.set('api_key', tmdbKey);
+      url.searchParams.set('language', 'fr-FR');
+      url.searchParams.set('include_adult', 'false');
+      url.searchParams.set('query', query);
+
+      const upstream = await fetch(url.toString(), { signal: AbortSignal.timeout(5000) });
+      if (!upstream.ok) {
+        res.json({ results: [] });
+        return;
+      }
+      const json = (await upstream.json()) as { results?: Array<Record<string, unknown>> };
+      const rawResults = Array.isArray(json.results) ? json.results : [];
+
+      const results = rawResults
+        .filter((r) => {
+          if (endpoint === 'search/multi') {
+            return r.media_type === 'movie' || r.media_type === 'tv';
+          }
+          return true;
+        })
+        .slice(0, 8)
+        .map((r) => {
+          const isMovie =
+            endpoint === 'search/movie' || (endpoint === 'search/multi' && r.media_type === 'movie');
+          const mediaType: 'film' | 'serie' = isMovie ? 'film' : 'serie';
+          const title = String(r.title || r.name || r.original_title || r.original_name || '').trim();
+          const originalTitleRaw = String(r.original_title || r.original_name || '').trim();
+          const originalTitle =
+            originalTitleRaw && originalTitleRaw.toLowerCase() !== title.toLowerCase()
+              ? originalTitleRaw
+              : null;
+          const dateStr = String(r.release_date || r.first_air_date || '').trim();
+          const yearMatch = dateStr.match(/^(\d{4})/);
+          const year = yearMatch ? Number(yearMatch[1]) : null;
+          const posterPath = typeof r.poster_path === 'string' && r.poster_path ? r.poster_path : null;
+          const tmdbId = String(r.id ?? '');
+          const overview = typeof r.overview === 'string' && r.overview.trim() ? r.overview.trim() : null;
+          const existingCatalogItem = findIndexedCatalogByTmdb(tmdbId, mediaType);
+
+          return {
+            tmdbId,
+            mediaType,
+            title,
+            originalTitle,
+            year,
+            overview,
+            posterUrl: posterPath ? `https://image.tmdb.org/t/p/w185${posterPath}` : null,
+            existingCatalogItem,
+          };
+        })
+        .filter((x) => x.tmdbId && x.title);
+
+      const payload = setCached(cacheKey, { results }, 300_000);
+      res.json(payload);
+    } catch {
+      res.json({ results: [] });
+    }
+  });
+
+  app.post('/api/reports/broken', async (req, res) => {
+    const auth = await resolveAuth(req);
+    const rateKey = auth ? `rep:u:${auth.user.id}` : `rep:ip:${req.ip || 'anon'}`;
+    if (!checkSubmissionRateLimit(rateKey, 10, 900_000)) {
+      res.status(429).json({
+        error: 'Trop de signalements envoyés récemment. Veuillez patienter quelques minutes.',
+      });
+      return;
+    }
+
+    const itemId = String(req.body?.itemId ?? '').trim();
+    const itemTitle = String(req.body?.itemTitle ?? '').trim();
+    const reason = String(req.body?.reason ?? '').trim();
+    if (!itemId || !itemTitle || !reason) {
+      res.status(400).json({ error: 'Informations du signalement incomplètes.' });
+      return;
+    }
+
+    const season =
+      req.body?.season !== undefined && req.body?.season !== null && req.body?.season !== ''
+        ? Number(req.body.season)
+        : null;
+    const episode =
+      req.body?.episode !== undefined && req.body?.episode !== null && req.body?.episode !== ''
+        ? Number(req.body.episode)
+        : null;
+
+    const guestLabel = String(req.body?.guestName ?? '').trim();
+    const report = createBrokenReport({
+      itemType: req.body?.itemType,
+      itemId,
+      itemTitle,
+      season,
+      episode,
+      reason,
+      comment: String(req.body?.comment ?? ''),
+      userId: auth?.user.id ?? null,
+      username: auth ? auth.user.username : guestLabel || 'Visiteur',
+    });
+
+    res.json({ ok: true, report });
+  });
+
+  app.get('/api/requests', async (req, res) => {
+    const auth = await resolveAuth(req);
+    const visitorKeyHeader = String(req.headers['x-visitor-id'] || '').trim();
+    const viewerKey = auth
+      ? `u:${auth.user.id}`
+      : visitorKeyHeader
+        ? `v:${visitorKeyHeader}`
+        : `ip:${req.ip || 'anon'}`;
+    const requests = listContentRequests(viewerKey);
+    res.json({ requests });
+  });
+
+  app.post('/api/requests', async (req, res) => {
+    const auth = await resolveAuth(req);
+    const visitorKeyHeader = String(req.body?.visitorKey || req.headers['x-visitor-id'] || '').trim();
+    const viewerKey = auth
+      ? `u:${auth.user.id}`
+      : visitorKeyHeader
+        ? `v:${visitorKeyHeader}`
+        : `ip:${req.ip || 'anon'}`;
+
+    if (!checkSubmissionRateLimit(`req:${viewerKey}`, 12, 900_000)) {
+      res.status(429).json({
+        error: 'Vous avez envoyé plusieurs demandes récemment. Merci de patienter quelques minutes.',
+      });
+      return;
+    }
+
+    const title = String(req.body?.title ?? '').trim();
+    if (title.length < 2) {
+      res.status(400).json({ error: 'Veuillez saisir un titre d’au moins 2 caractères.' });
+      return;
+    }
+
+    const yearRaw = req.body?.year !== undefined && req.body?.year !== null && req.body?.year !== ''
+      ? Number(req.body.year)
+      : null;
+
+    const result = createOrVoteContentRequest({
+      mediaType: req.body?.mediaType,
+      title,
+      year: yearRaw,
+      tmdbId: req.body?.tmdbId ? String(req.body.tmdbId) : null,
+      tmdbPosterUrl: req.body?.tmdbPosterUrl ? String(req.body.tmdbPosterUrl) : null,
+      tmdbOverview: req.body?.tmdbOverview ? String(req.body.tmdbOverview) : null,
+      note: String(req.body?.note ?? ''),
+      userId: auth?.user.id ?? null,
+      username: auth ? auth.user.username : String(req.body?.guestName ?? '').trim() || 'Visiteur',
+      viewerKey,
+    });
+
+    res.json({ ok: true, request: result.request, merged: result.merged });
+  });
+
+  app.post('/api/requests/:id/vote', async (req, res) => {
+    const auth = await resolveAuth(req);
+    const visitorKeyHeader = String(req.body?.visitorKey || req.headers['x-visitor-id'] || '').trim();
+    const viewerKey = auth
+      ? `u:${auth.user.id}`
+      : visitorKeyHeader
+        ? `v:${visitorKeyHeader}`
+        : `ip:${req.ip || 'anon'}`;
+    const updated = toggleVoteContentRequest(req.params.id, viewerKey);
+    if (!updated) {
+      res.status(404).json({ error: 'Demande introuvable.' });
+      return;
+    }
+    res.json({ ok: true, request: updated });
+  });
+
+  app.get('/api/admin/requests', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    res.json({
+      brokenReports: listBrokenReports(),
+      contentRequests: listContentRequests(),
+      counts: countPendingRequestsAndReports(),
+    });
+  });
+
+  app.put('/api/admin/reports/:id', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const before = listBrokenReports().find((r) => r.id === req.params.id);
+    const updated = updateBrokenReportStatus(
+      req.params.id,
+      req.body?.status,
+      typeof req.body?.adminNote === 'string' ? req.body.adminNote : undefined
+    );
+    if (!updated) {
+      res.status(404).json({ error: 'Signalement introuvable.' });
+      return;
+    }
+
+    if (
+      updated.userId &&
+      before?.status !== updated.status &&
+      (updated.status === 'resolved' || updated.status === 'rejected')
+    ) {
+      const epText =
+        updated.season && updated.episode ? ` (S${updated.season}·É${updated.episode})` : '';
+      createNotification({
+        userId: updated.userId,
+        kind: 'admin_announcement',
+        title:
+          updated.status === 'resolved'
+            ? 'Signalement traité'
+            : 'Signalement examiné',
+        message:
+          updated.status === 'resolved'
+            ? `Votre signalement pour « ${updated.itemTitle}${epText} » a été corrigé.${updated.adminNote ? ` Note : ${updated.adminNote}` : ''}`
+            : `Votre signalement pour « ${updated.itemTitle}${epText} » a été fermé.${updated.adminNote ? ` Note : ${updated.adminNote}` : ''}`,
+        link: `/${updated.itemType}/${updated.itemId}`,
+      });
+    }
+
+    res.json({ report: updated });
+  });
+
+  app.delete('/api/admin/reports/:id', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const ok = deleteBrokenReport(req.params.id);
+    if (!ok) {
+      res.status(404).json({ error: 'Signalement introuvable.' });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  app.put('/api/admin/requests/:id', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const before = listContentRequests().find((r) => r.id === req.params.id);
+    const updated = updateContentRequestStatus(req.params.id, {
+      status: req.body?.status,
+      adminNote: typeof req.body?.adminNote === 'string' ? req.body.adminNote : undefined,
+      resolvedItemUrl:
+        req.body?.resolvedItemUrl !== undefined ? req.body.resolvedItemUrl : undefined,
+    });
+    if (!updated) {
+      res.status(404).json({ error: 'Demande introuvable.' });
+      return;
+    }
+
+    if (
+      updated.userId &&
+      before?.status !== updated.status &&
+      (updated.status === 'added' || updated.status === 'rejected')
+    ) {
+      createNotification({
+        userId: updated.userId,
+        kind: 'admin_announcement',
+        title:
+          updated.status === 'added'
+            ? 'Titre ajouté au catalogue !'
+            : 'Mise à jour de votre demande',
+        message:
+          updated.status === 'added'
+            ? `Bonne nouvelle : « ${updated.title} » vient d’être ajouté au catalogue.${updated.adminNote ? ` ${updated.adminNote}` : ''}`
+            : `Votre demande pour « ${updated.title} » n’a pas pu être retenue.${updated.adminNote ? ` Raison : ${updated.adminNote}` : ''}`,
+        link: updated.resolvedItemUrl || '/demandes',
+      });
+    }
+
+    res.json({ request: updated });
+  });
+
+  app.delete('/api/admin/requests/:id', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const ok = deleteContentRequest(req.params.id);
+    if (!ok) {
+      res.status(404).json({ error: 'Demande introuvable.' });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  await hydrateModulesFromSupabase();
+
+  // ─────────────────────────────────────────────────────────────────────────
   // FRONTEND SERVING
   // ─────────────────────────────────────────────────────────────────────────
   const httpServer = http.createServer(app);
@@ -5407,8 +5726,8 @@ async function startServer() {
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(
-      `Tapenaka — StreamWall listening on http://0.0.0.0:${PORT} (DB: ${
-        isSupabaseEnabled() ? 'Supabase Online' : 'Local Store'
+      `Tapenaka — StreamWall listening on http://0.0.0.0:${PORT} (DB: SQLite + ${
+        isSupabaseEnabled() ? 'Supabase Online' : 'Local Mode'
       })`
     );
   });

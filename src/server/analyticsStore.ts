@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type express from 'express';
+import { readModuleSnapshot, writeModuleSnapshot } from './persistentDb.ts';
 import type {
   AnalyticsDashboardPayload,
   AnalyticsPeriodKey,
@@ -345,15 +345,9 @@ function createSeededAnalytics(): AnalyticsDatabase {
 }
 
 function loadAnalyticsDb(): AnalyticsDatabase {
-  try {
-    if (fs.existsSync(ANALYTICS_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(ANALYTICS_FILE, 'utf-8')) as AnalyticsDatabase;
-      if (parsed && Array.isArray(parsed.sessions) && Array.isArray(parsed.pageViews)) {
-        return parsed;
-      }
-    }
-  } catch {
-    // Re-seed if corrupted
+  const parsed = readModuleSnapshot<AnalyticsDatabase>('analytics', ANALYTICS_FILE);
+  if (parsed && Array.isArray(parsed.sessions) && Array.isArray(parsed.pageViews)) {
+    return parsed;
   }
   const seeded = createSeededAnalytics();
   saveAnalyticsDb(seeded);
@@ -362,12 +356,7 @@ function loadAnalyticsDb(): AnalyticsDatabase {
 
 let saveScheduled: NodeJS.Timeout | null = null;
 function saveAnalyticsDb(state: AnalyticsDatabase): void {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(ANALYTICS_FILE, JSON.stringify(state), 'utf-8');
-  } catch {
-    // Non-fatal
-  }
+  writeModuleSnapshot('analytics', state);
 }
 
 function scheduleSave(state: AnalyticsDatabase): void {

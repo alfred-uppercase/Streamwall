@@ -17,6 +17,7 @@ import { HomePage } from './pages/HomePage';
 import { CataloguePage } from './pages/CataloguePage';
 import { DetailPage } from './pages/DetailPage';
 import { SuggestionPage } from './pages/SuggestionPage';
+import { RequestsPage } from './pages/RequestsPage';
 import { FavoritesPage } from './pages/FavoritesPage';
 import { ProfilePage } from './pages/ProfilePage';
 import { AdminPage } from './pages/AdminPage';
@@ -72,7 +73,7 @@ function AppShell() {
     Boolean(billingPlansQuery.data?.config?.proOffersMenuVisible) && hasActiveProPlan;
 
   return (
-    <div className="flex min-h-dvh flex-col bg-background text-foreground pb-24 md:pb-0">
+    <div className="flex min-h-dvh flex-col overflow-x-clip bg-background text-foreground pb-24 md:pb-0">
       <ScrollToTop />
       <AnalyticsTracker />
       <OfflineIndicator />
@@ -83,6 +84,7 @@ function AppShell() {
           <Route path="/" element={<HomePage />} />
           <Route path="/catalogue" element={<CataloguePage />} />
           <Route path="/suggestion" element={<SuggestionPage />} />
+          <Route path="/demandes" element={<RequestsPage />} />
           <Route path="/abonnement" element={<PricingPage />} />
           <Route path="/:type/:id" element={<DetailPage />} />
           <Route path="/auth" element={<AuthPage />} />
@@ -126,6 +128,9 @@ function AppShell() {
             </Link>
             <Link to="/suggestion" className="hover:text-foreground">
               Suggestion
+            </Link>
+            <Link to="/demandes" className="hover:text-foreground">
+              Demandes
             </Link>
             {showProMenu && (
               <Link to="/abonnement" className="hover:text-foreground">

@@ -162,12 +162,12 @@ export function FavoritesPage() {
         )
       ) : tab === 'progress' ? (
         progress.length > 0 ? (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {progress.map((entry) => (
               <Link
                 key={`${entry.item.item_type}:${entry.item.id}`}
                 to={`/${entry.item.item_type}/${entry.item.id}?autoplay=1&s=${entry.season}&e=${entry.episode}`}
-                className="flex items-center gap-4 rounded-xl border border-border bg-card p-4 transition-colors hover:border-primary/70"
+                className="flex min-w-0 w-full items-center gap-4 overflow-hidden rounded-xl border border-border bg-card p-4 transition-colors hover:border-primary/70"
               >
                 {entry.item.poster && (
                   <img
@@ -179,7 +179,7 @@ export function FavoritesPage() {
                 )}
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-semibold text-foreground">{entry.item.titre}</p>
-                  <p className="mt-1 text-xs text-muted-foreground tabular-nums">
+                  <p className="mt-1 truncate text-xs text-muted-foreground tabular-nums">
                     {TYPE_LABELS[entry.item.item_type]}
                     {entry.item.item_type !== 'film'
                       ? ` · Saison ${entry.season} · Épisode ${entry.episode}`

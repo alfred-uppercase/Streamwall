@@ -7,6 +7,7 @@ import {
   ChevronUp,
   Clock,
   Film,
+  Flag,
   Lock,
   Play,
   Search,
@@ -115,6 +116,14 @@ export function DetailPage() {
   const [playerUrl, setPlayerUrl] = useState<string | null>(null);
   const [modal, setModal] = useState<'watch' | 'trailer' | null>(null);
   const [preparingPlayer, setPreparingPlayer] = useState(false);
+
+  const [reportModalOpen, setReportModalOpen] = useState(false);
+  const [reportReason, setReportReason] = useState<string>('Lien mort / ne charge pas');
+  const [reportSeason, setReportSeason] = useState<number>(1);
+  const [reportEpisode, setReportEpisode] = useState<number>(1);
+  const [reportDetails, setReportDetails] = useState('');
+  const [reportGuestName, setReportGuestName] = useState('');
+  const [reportSubmitting, setReportSubmitting] = useState(false);
 
   useEffect(() => {
     setBackdropFailed(false);
@@ -258,16 +267,52 @@ export function DetailPage() {
 
   // Close modals on Escape
   useEffect(() => {
-    if (!modal) return;
+    if (!modal && !reportModalOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (reportModalOpen) {
+          setReportModalOpen(false);
+          return;
+        }
         setWatchingItem(null);
         setModal(null);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [modal, setWatchingItem]);
+  }, [modal, reportModalOpen, setWatchingItem]);
+
+  function openReportModal(seasonOverride?: number, episodeOverride?: number) {
+    setReportReason('Lien mort / ne charge pas');
+    setReportSeason(seasonOverride || selectedSeason || 1);
+    setReportEpisode(episodeOverride || activeEpisode.episode || 1);
+    setReportDetails('');
+    setReportModalOpen(true);
+  }
+
+  async function handleSubmitReport(e: React.FormEvent) {
+    e.preventDefault();
+    if (!item || reportSubmitting) return;
+    setReportSubmitting(true);
+    try {
+      await api.reportBrokenStream({
+        itemType: effectiveType,
+        itemId: String(item.id),
+        itemTitle: item.titre,
+        season: effectiveType !== 'film' ? reportSeason : undefined,
+        episode: effectiveType !== 'film' ? reportEpisode : undefined,
+        reason: reportReason,
+        comment: reportDetails.trim(),
+        guestName: !isMember ? reportGuestName.trim() : undefined,
+      });
+      toast.success('Merci ! Votre signalement a bien été transmis à l’équipe.');
+      setReportModalOpen(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Impossible d’envoyer le signalement.');
+    } finally {
+      setReportSubmitting(false);
+    }
+  }
 
   // Compute next AVAILABLE episode for quick "Épisode suivant" inside player modal
   const nextEpisode = useMemo(() => {
@@ -474,6 +519,15 @@ export function DetailPage() {
                   <span>Se connecter pour ma liste</span>
                 </Link>
               )}
+
+              <button
+                type="button"
+                onClick={() => openReportModal(selectedSeason, defaultEpisode)}
+                className="inline-flex items-center gap-2 rounded-lg border border-border bg-card/85 px-4 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:border-amber-500/40 hover:bg-accent hover:text-amber-400 whitespace-nowrap shrink-0"
+              >
+                <Flag className="size-4" />
+                <span>Signaler un problème</span>
+              </button>
             </div>
 
             {!isMember && (
@@ -744,6 +798,15 @@ export function DetailPage() {
               )}
               <button
                 type="button"
+                onClick={() => openReportModal(activeEpisode.season, activeEpisode.episode)}
+                title="Signaler un lien cassé ou mauvais épisode"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-zinc-800 whitespace-nowrap shrink-0"
+              >
+                <Flag className="size-3.5" />
+                <span className="hidden sm:inline">Signaler</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   setWatchingItem(null);
                   setModal(null);
@@ -801,6 +864,146 @@ export function DetailPage() {
                 className="h-full w-full border-0"
               />
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Broken Stream / Wrong Episode Report Modal */}
+      {reportModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Signaler un problème de lecture"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-4 backdrop-blur-xs"
+          onClick={() => setReportModalOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="font-display text-lg font-bold text-foreground">
+                  Signaler un problème
+                </h2>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {item.titre} · {TYPE_LABELS[effectiveType]}
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Fermer"
+                onClick={() => setReportModalOpen(false)}
+                className="rounded-lg border border-border p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            <form onSubmit={(e) => void handleSubmitReport(e)} className="space-y-4">
+              <div className="space-y-1.5">
+                <span className="block text-xs font-medium text-muted-foreground">
+                  Type de problème
+                </span>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {[
+                    'Lien mort / ne charge pas',
+                    'Mauvais film ou épisode',
+                    'Son / audio décalé',
+                    'Sous-titres manquants',
+                    'Autre problème',
+                  ].map((label) => (
+                    <button
+                      key={label}
+                      type="button"
+                      onClick={() => setReportReason(label)}
+                      className={`rounded-lg border px-3 py-2 text-left text-xs font-medium transition-colors ${
+                        reportReason === label
+                          ? 'border-primary bg-primary/15 text-primary'
+                          : 'border-border bg-background text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {effectiveType !== 'film' && (
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="block text-xs">
+                    <span className="mb-1 block font-medium text-muted-foreground">Saison</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={99}
+                      value={reportSeason}
+                      onChange={(e) => setReportSeason(Math.max(1, Number(e.target.value) || 1))}
+                      className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground tabular-nums focus:border-primary focus:outline-none"
+                    />
+                  </label>
+                  <label className="block text-xs">
+                    <span className="mb-1 block font-medium text-muted-foreground">Épisode</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={999}
+                      value={reportEpisode}
+                      onChange={(e) => setReportEpisode(Math.max(1, Number(e.target.value) || 1))}
+                      className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground tabular-nums focus:border-primary focus:outline-none"
+                    />
+                  </label>
+                </div>
+              )}
+
+              {!isMember && (
+                <label className="block text-xs">
+                  <span className="mb-1 block font-medium text-muted-foreground">
+                    Votre pseudo (optionnel)
+                  </span>
+                  <input
+                    type="text"
+                    maxLength={50}
+                    value={reportGuestName}
+                    onChange={(e) => setReportGuestName(e.target.value)}
+                    placeholder="Visiteur"
+                    className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground focus:border-primary focus:outline-none"
+                  />
+                </label>
+              )}
+
+              <label className="block text-xs">
+                <span className="mb-1 block font-medium text-muted-foreground">
+                  Détails complémentaires (optionnel)
+                </span>
+                <textarea
+                  rows={3}
+                  maxLength={400}
+                  value={reportDetails}
+                  onChange={(e) => setReportDetails(e.target.value)}
+                  placeholder="Ex : Écran noir après 5s, ou erreur 404 sur le lecteur…"
+                  className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none"
+                />
+              </label>
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setReportModalOpen(false)}
+                  className="rounded-lg border border-border px-4 py-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+                >
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  disabled={reportSubmitting}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                >
+                  <Flag className="size-3.5" />
+                  <span>{reportSubmitting ? 'Envoi…' : 'Envoyer le signalement'}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

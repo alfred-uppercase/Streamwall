@@ -1,5 +1,4 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
@@ -8,6 +7,7 @@ import type {
   NotificationKind,
   NotificationRecord,
 } from '../shared/types.ts';
+import { readModuleSnapshot, writeModuleSnapshot } from './persistentDb.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', '..', '.data');
@@ -20,34 +20,21 @@ interface NotificationsDatabase {
 }
 
 function loadNotificationsDb(): NotificationsDatabase {
-  try {
-    if (fs.existsSync(NOTIFICATIONS_FILE)) {
-      const parsed = JSON.parse(
-        fs.readFileSync(NOTIFICATIONS_FILE, 'utf-8')
-      ) as NotificationsDatabase;
-      if (parsed && Array.isArray(parsed.notifications)) {
-        return {
-          notifications: parsed.notifications,
-          guestNotifications: Array.isArray(parsed.guestNotifications)
-            ? parsed.guestNotifications
-            : [],
-          adminBroadcasts: Array.isArray(parsed.adminBroadcasts) ? parsed.adminBroadcasts : [],
-        };
-      }
-    }
-  } catch {
-    // Re-seed if corrupted
+  const parsed = readModuleSnapshot<NotificationsDatabase>('notifications', NOTIFICATIONS_FILE);
+  if (parsed && Array.isArray(parsed.notifications)) {
+    return {
+      notifications: parsed.notifications,
+      guestNotifications: Array.isArray(parsed.guestNotifications)
+        ? parsed.guestNotifications
+        : [],
+      adminBroadcasts: Array.isArray(parsed.adminBroadcasts) ? parsed.adminBroadcasts : [],
+    };
   }
   return { notifications: [], guestNotifications: [], adminBroadcasts: [] };
 }
 
 function saveNotificationsDb(state: NotificationsDatabase): void {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(NOTIFICATIONS_FILE, JSON.stringify(state, null, 2), 'utf-8');
-  } catch {
-    // Non-fatal
-  }
+  writeModuleSnapshot('notifications', state);
 }
 
 const notificationsDb: NotificationsDatabase = loadNotificationsDb();

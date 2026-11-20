@@ -7,6 +7,7 @@ import {
   CheckCheck,
   Clock,
   Crown,
+  Flag,
   Heart,
   Home,
   LayoutGrid,
@@ -192,6 +193,7 @@ export function Navbar() {
   const desktopNavItems = [
     { to: '/catalogue', label: 'Catalogue', icon: LayoutGrid, exact: false },
     { to: '/suggestion', label: 'Suggestion', icon: Sparkles, exact: false },
+    { to: '/demandes', label: 'Demandes', icon: Flag, exact: false },
     ...(isMember ? [{ to: '/favoris', label: 'Ma liste', icon: Heart, exact: false }] : []),
     ...(showProMenu ? [{ to: '/abonnement', label: 'Devenir Pro', icon: Crown, exact: false }] : []),
     ...(isAdmin ? [{ to: '/admin', label: 'Admin', icon: Shield, exact: false }] : []),

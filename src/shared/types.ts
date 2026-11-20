@@ -578,3 +578,60 @@ export const TYPE_LABELS: Record<ItemType, string> = {
   serie: 'Série',
   anime: 'Anime',
 };
+
+export type BrokenReportStatus = 'pending' | 'resolved' | 'rejected';
+
+export interface BrokenReportRecord {
+  id: string;
+  itemType: ItemType;
+  itemId: string;
+  itemTitle: string;
+  season: number | null;
+  episode: number | null;
+  reason: string;
+  comment: string;
+  userId: string | null;
+  username: string;
+  status: BrokenReportStatus;
+  adminNote: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ContentRequestStatus = 'pending' | 'in_progress' | 'added' | 'rejected';
+
+export interface TmdbSearchSuggestion {
+  tmdbId: string;
+  mediaType: 'film' | 'serie';
+  title: string;
+  originalTitle: string | null;
+  year: number | null;
+  overview: string | null;
+  posterUrl: string | null;
+  existingCatalogItem?: {
+    id: string;
+    item_type: ItemType;
+    titre: string;
+  } | null;
+}
+
+export interface ContentRequestRecord {
+  id: string;
+  mediaType: ItemType;
+  title: string;
+  year: number | null;
+  tmdbId: string | null;
+  tmdbPosterUrl: string | null;
+  tmdbOverview: string | null;
+  note: string;
+  userId: string | null;
+  username: string;
+  votes: number;
+  hasVoted?: boolean;
+  status: ContentRequestStatus;
+  adminNote: string;
+  resolvedItemUrl: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+

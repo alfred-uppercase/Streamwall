@@ -11,9 +11,13 @@ import type {
   ApiHealthReport,
   BillingConfig,
   BillingCycle,
+  BrokenReportRecord,
+  BrokenReportStatus,
   CatalogueFilters,
   CataloguePage,
   CommentRecord,
+  ContentRequestRecord,
+  ContentRequestStatus,
   DetailResponse,
   EmailTemplateConfig,
   EmailTemplateKey,
@@ -28,6 +32,7 @@ import type {
   PopupConfig,
   SiteConfig,
   SubscriptionPlan,
+  TmdbSearchSuggestion,
   UserProfile,
   UserSubscription,
   UserThemePreference,
@@ -379,6 +384,12 @@ export const api = {
       smtp: AdminSmtpStatus;
       site: SiteConfig;
       supabaseServiceRoleConfigured?: boolean;
+      persistence?: {
+        engine: 'sqlite';
+        file: string;
+        supabaseMirror: boolean;
+        modules: { key: string; updatedAt: string }[];
+      };
     }>('/api/admin/settings'),
   adminSaveSiteConfig: (payload: {
     siteName: string;
@@ -592,6 +603,90 @@ export const api = {
     }),
   adminDeletePopup: (id: string) =>
     apiRequest<{ ok: boolean }>(`/api/admin/popups/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
+  // TMDB Search, Broken Stream Reports & Missing Content Requests
+  tmdbSearch: (q: string, type: string = 'all') =>
+    apiRequest<{ results: TmdbSearchSuggestion[] }>(
+      `/api/tmdb/search?q=${encodeURIComponent(q)}&type=${encodeURIComponent(type)}`
+    ),
+  reportBrokenStream: (payload: {
+    itemType: string;
+    itemId: string;
+    itemTitle: string;
+    season?: number | null;
+    episode?: number | null;
+    reason: string;
+    comment?: string;
+    guestName?: string;
+  }) =>
+    apiRequest<{ ok: boolean; report: BrokenReportRecord }>('/api/reports/broken', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  contentRequests: () => apiRequest<{ requests: ContentRequestRecord[] }>('/api/requests'),
+  submitContentRequest: (payload: {
+    mediaType: string;
+    title: string;
+    year?: number | null;
+    tmdbId?: string | null;
+    tmdbPosterUrl?: string | null;
+    tmdbOverview?: string | null;
+    note?: string;
+    guestName?: string;
+    visitorKey?: string;
+  }) =>
+    apiRequest<{ ok: boolean; request: ContentRequestRecord; merged: boolean }>('/api/requests', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  voteContentRequest: (id: string, visitorKey?: string) =>
+    apiRequest<{ ok: boolean; request: ContentRequestRecord }>(
+      `/api/requests/${encodeURIComponent(id)}/vote`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ visitorKey }),
+      }
+    ),
+  adminRequests: () =>
+    apiRequest<{
+      brokenReports: BrokenReportRecord[];
+      contentRequests: ContentRequestRecord[];
+      counts: { pendingReports: number; pendingRequests: number; totalPending: number };
+    }>('/api/admin/requests'),
+  adminUpdateReport: (
+    id: string,
+    payload: { status: BrokenReportStatus; adminNote?: string }
+  ) =>
+    apiRequest<{ report: BrokenReportRecord }>(
+      `/api/admin/reports/${encodeURIComponent(id)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }
+    ),
+  adminDeleteReport: (id: string) =>
+    apiRequest<{ ok: boolean }>(`/api/admin/reports/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+  adminUpdateRequest: (
+    id: string,
+    payload: {
+      status: ContentRequestStatus;
+      adminNote?: string;
+      resolvedItemUrl?: string | null;
+    }
+  ) =>
+    apiRequest<{ request: ContentRequestRecord }>(
+      `/api/admin/requests/${encodeURIComponent(id)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }
+    ),
+  adminDeleteRequest: (id: string) =>
+    apiRequest<{ ok: boolean }>(`/api/admin/requests/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     }),
 };

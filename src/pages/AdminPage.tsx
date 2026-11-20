@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   CreditCard,
   Database,
+  Flag,
   Globe,
   Layers,
   Mail,
@@ -37,6 +38,7 @@ import { AdminUsersTab } from '../components/AdminUsersTab';
 import { AdminNotificationsTab } from '../components/AdminNotificationsTab';
 import { AdminEmailsTab } from '../components/AdminEmailsTab';
 import { AdminPopupsTab } from '../components/AdminPopupsTab';
+import { AdminRequestsTab } from '../components/AdminRequestsTab';
 import { ProCrownBadge } from '../components/UserAvatar';
 
 const PLAYER_FIELDS: { key: PlayerKey; label: string; hint: string }[] = [
@@ -56,6 +58,7 @@ type AdminTab =
   | 'analytics'
   | 'offers'
   | 'users'
+  | 'requests'
   | 'notifications'
   | 'popups'
   | 'emails'
@@ -67,6 +70,7 @@ const VALID_TABS: AdminTab[] = [
   'analytics',
   'offers',
   'users',
+  'requests',
   'notifications',
   'popups',
   'emails',
@@ -79,6 +83,7 @@ const TAB_TITLE_MAP: Record<AdminTab, string> = {
   analytics: 'Administration · Statistiques',
   offers: 'Administration · Offres & Paiements',
   users: 'Administration · Utilisateurs',
+  requests: 'Administration · Signalements & Demandes',
   notifications: 'Administration · Notifications',
   popups: 'Administration · Popups',
   emails: 'Administration · Emails & Logs',
@@ -122,6 +127,14 @@ export function AdminPage() {
     queryFn: () => api.adminSettings(),
     enabled: isAdmin,
   });
+
+  const requestsCountQuery = useQuery({
+    queryKey: ['admin-requests'],
+    queryFn: () => api.adminRequests(),
+    enabled: isAdmin,
+    refetchInterval: 20_000,
+  });
+  const pendingRequestsCount = requestsCountQuery.data?.counts.totalPending ?? 0;
 
   const [siteNameInput, setSiteNameInput] = useState('');
   const [faviconUrlInput, setFaviconUrlInput] = useState('');
@@ -302,7 +315,11 @@ export function AdminPage() {
           <span>
             Base :{' '}
             <strong className="font-medium text-foreground">
-              {backend === 'supabase' ? 'Supabase en ligne' : 'Stockage local'}
+              {settingsQuery.data?.persistence?.supabaseMirror
+                ? 'SQLite WAL + Supabase'
+                : backend === 'supabase'
+                  ? 'Supabase + SQLite WAL'
+                  : 'SQLite WAL local'}
             </strong>
           </span>
         </div>
@@ -336,6 +353,7 @@ export function AdminPage() {
             ['analytics', 'Statistiques', BarChart3],
             ['offers', 'Offres & Paiements', CreditCard],
             ['users', 'Utilisateurs', Users],
+            ['requests', 'Signalements & Demandes', Flag],
             ['notifications', 'Notifications', Bell],
             ['popups', 'Popups', Layers],
             ['emails', 'Emails & Logs', Mail],
@@ -358,6 +376,17 @@ export function AdminPage() {
           >
             {Icon && <Icon className="size-4" />}
             <span>{label}</span>
+            {key === 'requests' && pendingRequestsCount > 0 && (
+              <span
+                className={`ml-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-bold tabular-nums ${
+                  tab === key
+                    ? 'bg-primary-foreground/20 text-primary-foreground'
+                    : 'bg-amber-500/20 text-amber-400'
+                }`}
+              >
+                {pendingRequestsCount}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -384,6 +413,9 @@ export function AdminPage() {
         />
       )}
 
+      {/* TAB: BROKEN REPORTS & MISSING TITLE REQUESTS */}
+      {tab === 'requests' && <AdminRequestsTab />}
+
       {/* TAB: ADMIN NOTIFICATIONS */}
       {tab === 'notifications' && (
         <AdminNotificationsTab
@@ -406,6 +438,41 @@ export function AdminPage() {
       {/* TAB: SITE CONFIG, API ORIGIN & EMAIL */}
       {tab === 'api' && (
         <div className="space-y-6">
+          {/* Persistence Engine Status */}
+          {settingsQuery.data?.persistence && (
+            <section className="rounded-xl border border-border bg-card p-6 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="grid size-10 shrink-0 place-items-center rounded-xl border border-border bg-background text-primary">
+                    <Database className="size-5" />
+                  </div>
+                  <div>
+                    <h2 className="font-display text-lg font-semibold text-foreground">
+                      Stockage persistant (SQLite WAL & synchronisation Supabase)
+                    </h2>
+                    <p className="text-xs text-muted-foreground">
+                      Base relationnelle locale <code className="font-mono text-primary">{settingsQuery.data.persistence.file}</code> — {settingsQuery.data.persistence.modules.length} module(s) synchronisés.
+                    </p>
+                  </div>
+                </div>
+                <span
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold ${
+                    settingsQuery.data.persistence.supabaseMirror
+                      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                      : 'border-primary/30 bg-primary/10 text-primary'
+                  }`}
+                >
+                  <CheckCircle2 className="size-3.5" />
+                  <span>
+                    {settingsQuery.data.persistence.supabaseMirror
+                      ? 'Miroir cloud Supabase actif'
+                      : 'SQLite WAL actif'}
+                  </span>
+                </span>
+              </div>
+            </section>
+          )}
+
           {/* Site Name & Favicon Configuration */}
           <section className="rounded-xl border border-border bg-card p-6 space-y-5">
             <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-4">

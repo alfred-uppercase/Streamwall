@@ -63,7 +63,7 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-background via-background/60 to-transparent sm:from-background/85 sm:via-background/25" />
 
         <div className="relative z-10 mx-auto flex w-full max-w-7xl items-center justify-between gap-8 px-4 pt-24 pb-16 sm:px-6 sm:pt-28 sm:pb-16 md:pt-32">
-          <div className="max-w-2xl space-y-3 sm:space-y-4">
+          <div className="min-w-0 max-w-2xl space-y-3 sm:space-y-4">
             <p className="text-xs font-medium text-primary tabular-nums drop-shadow-xs">
               {metaParts.join(' · ')}
             </p>
@@ -175,8 +175,8 @@ function ContinueWatchingSection({ items }: { items: WatchProgress[] }) {
 
   return (
     <section className="mb-12">
-      <div className="mb-5 flex items-baseline justify-between gap-4">
-        <div>
+      <div className="mb-5 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0">
           <h2 className="font-display text-2xl font-bold text-foreground">
             Dernières lectures ({recentFive.length}/5)
           </h2>
@@ -191,7 +191,7 @@ function ContinueWatchingSection({ items }: { items: WatchProgress[] }) {
           Voir l’historique
         </Link>
       </div>
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {recentFive.map((entry) => {
           const isEpisodic = entry.item.item_type !== 'film';
           const resumeLabel = isEpisodic
@@ -200,11 +200,11 @@ function ContinueWatchingSection({ items }: { items: WatchProgress[] }) {
           return (
             <div
               key={`${entry.item.item_type}:${entry.item.id}`}
-              className="group relative flex items-center gap-4 rounded-xl border border-border bg-card p-3.5 transition-colors hover:border-primary/70"
+              className="group relative flex min-w-0 w-full items-center gap-3 sm:gap-4 overflow-hidden rounded-xl border border-border bg-card p-3 sm:p-3.5 transition-colors hover:border-primary/70"
             >
               <Link
                 to={`/${entry.item.item_type}/${entry.item.id}?autoplay=1&s=${entry.season}&e=${entry.episode}`}
-                className="flex min-w-0 flex-1 items-center gap-4"
+                className="flex min-w-0 flex-1 items-center gap-3 sm:gap-4"
               >
                 <div className="relative h-20 w-14 shrink-0 overflow-hidden rounded-md bg-background border border-border">
                   {entry.item.poster && (
@@ -217,10 +217,10 @@ function ContinueWatchingSection({ items }: { items: WatchProgress[] }) {
                   )}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p className="truncate font-semibold text-foreground group-hover:text-primary transition-colors">
+                  <p className="truncate text-sm sm:text-base font-semibold text-foreground group-hover:text-primary transition-colors">
                     {entry.item.titre}
                   </p>
-                  <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">
+                  <p className="mt-0.5 truncate text-xs text-muted-foreground tabular-nums">
                     {TYPE_LABELS[entry.item.item_type]} · {resumeLabel}
                   </p>
                   <span className="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-primary">
@@ -330,7 +330,7 @@ export function HomePage() {
       {/* Activité des amis */}
       {isMember && Boolean(data?.friendsActivity.length) && (
         <section className="mb-14">
-          <div className="mb-5 flex items-baseline justify-between gap-4">
+          <div className="mb-5 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
             <h2 className="font-display text-2xl font-bold text-foreground">
               Regardé récemment par vos amis
             </h2>
@@ -341,12 +341,12 @@ export function HomePage() {
               Gérer mes amis
             </Link>
           </div>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {data!.friendsActivity.map((act, idx) => (
               <Link
                 key={`${act.username}-${act.item.id}-${idx}`}
                 to={`/${act.item.item_type}/${act.item.id}`}
-                className="flex items-center gap-4 rounded-xl border border-border bg-card p-4 transition-colors hover:border-primary/70"
+                className="flex min-w-0 w-full items-center gap-3 sm:gap-4 overflow-hidden rounded-xl border border-border bg-card p-3.5 sm:p-4 transition-colors hover:border-primary/70"
               >
                 {act.item.poster && (
                   <img
@@ -358,7 +358,7 @@ export function HomePage() {
                 )}
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-semibold text-foreground">{act.item.titre}</p>
-                  <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                  <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
                     <UserAvatar
                       avatar={act.avatar}
                       seed={act.username}
@@ -366,7 +366,7 @@ export function HomePage() {
                       isPro={act.isPro}
                       size="xs"
                     />
-                    <span className="font-medium text-foreground/90">@{act.username}</span>
+                    <span className="truncate font-medium text-foreground/90">@{act.username}</span>
                     {act.isPro && <ProCrownBadge />}
                     <span aria-hidden="true">·</span>
                     <span className="tabular-nums">

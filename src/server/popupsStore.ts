@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readModuleSnapshot, writeModuleSnapshot } from './persistentDb.ts';
 import type {
   PopupAudience,
   PopupConfig,
@@ -131,28 +132,17 @@ function normalizePopupRecord(raw: Partial<PopupConfig>): PopupConfig {
 }
 
 function loadPopupsDb(): PopupsDatabase {
-  try {
-    if (fs.existsSync(POPUPS_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(POPUPS_FILE, 'utf-8')) as PopupsDatabase;
-      if (parsed && Array.isArray(parsed.popups)) {
-        return {
-          popups: parsed.popups.map((p) => normalizePopupRecord(p)),
-        };
-      }
-    }
-  } catch {
-    // Re-seed if corrupted
+  const parsed = readModuleSnapshot<PopupsDatabase>('popups', POPUPS_FILE);
+  if (parsed && Array.isArray(parsed.popups)) {
+    return {
+      popups: parsed.popups.map((p) => normalizePopupRecord(p)),
+    };
   }
   return { popups: [] };
 }
 
 function savePopupsDb(state: PopupsDatabase): void {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(POPUPS_FILE, JSON.stringify(state, null, 2), 'utf-8');
-  } catch {
-    // Non-fatal
-  }
+  writeModuleSnapshot('popups', state);
 }
 
 const popupsDb: PopupsDatabase = loadPopupsDb();

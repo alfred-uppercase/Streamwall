@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { RotateCcw, Search } from 'lucide-react';
+import { MessageSquarePlus, RotateCcw, Search } from 'lucide-react';
 import type { CatalogueFilters } from '../shared/types';
 import { api } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
@@ -115,13 +115,22 @@ export function CataloguePage() {
             Recherchez parmi l’ensemble des films, séries et animes disponibles.
           </p>
         </div>
-        <p aria-live="polite" className="text-sm text-muted-foreground tabular-nums">
-          {catalogueQuery.isFetching
-            ? 'Actualisation…'
-            : `${(data?.total ?? 0).toLocaleString('fr-FR')} résultat${
-                (data?.total ?? 0) > 1 ? 's' : ''
-              }${data?.approximatif ? ' (approchants)' : ''}`}
-        </p>
+        <div className="flex flex-wrap items-center gap-4">
+          <Link
+            to={`/demandes${q ? `?q=${encodeURIComponent(q)}&type=${type !== 'all' ? type : 'film'}` : type !== 'all' ? `?type=${type}` : ''}`}
+            className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary hover:underline whitespace-nowrap"
+          >
+            <MessageSquarePlus className="size-3.5" />
+            <span>Titre manquant ? Demander l’ajout</span>
+          </Link>
+          <p aria-live="polite" className="text-sm text-muted-foreground tabular-nums">
+            {catalogueQuery.isFetching
+              ? 'Actualisation…'
+              : `${(data?.total ?? 0).toLocaleString('fr-FR')} résultat${
+                  (data?.total ?? 0) > 1 ? 's' : ''
+                }${data?.approximatif ? ' (approchants)' : ''}`}
+          </p>
+        </div>
       </div>
 
       {/* Search input */}
@@ -269,13 +278,22 @@ export function CataloguePage() {
           <p className="mt-1 mb-5 text-sm text-muted-foreground">
             Essayez d’élargir la recherche ou de réinitialiser les critères sélectionnés.
           </p>
-          <button
-            type="button"
-            onClick={resetAll}
-            className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground"
-          >
-            Réinitialiser les filtres
-          </button>
+          <div className="flex flex-wrap items-center justify-center gap-3">
+            <Link
+              to={`/demandes${q ? `?q=${encodeURIComponent(q)}&type=${type !== 'all' ? type : 'film'}` : type !== 'all' ? `?type=${type}` : ''}`}
+              className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90"
+            >
+              <MessageSquarePlus className="size-4" />
+              <span>{q ? `Demander l’ajout de « ${q} »` : 'Demander un titre manquant'}</span>
+            </Link>
+            <button
+              type="button"
+              onClick={resetAll}
+              className="rounded-lg border border-border bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent"
+            >
+              Réinitialiser les filtres
+            </button>
+          </div>
         </div>
       )}
 

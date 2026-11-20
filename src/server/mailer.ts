@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import nodemailer from 'nodemailer';
+import { readModuleSnapshot, writeModuleSnapshot } from './persistentDb.ts';
 import type {
   AdminSmtpSettings,
   AdminSmtpStatus,
@@ -75,41 +75,32 @@ function normalizeProvider(val: unknown, fallback: EmailProvider): EmailProvider
 }
 
 function loadMailConfig(): StoredMailConfig {
-  try {
-    if (fs.existsSync(MAIL_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(MAIL_FILE, 'utf-8')) as Partial<StoredMailConfig>;
-      const base = defaultMailConfig();
-      return {
-        provider: normalizeProvider(parsed.provider, base.provider),
-        enabled: typeof parsed.enabled === 'boolean' ? parsed.enabled : base.enabled,
-        host: typeof parsed.host === 'string' ? parsed.host : base.host,
-        port:
-          typeof parsed.port === 'number' && parsed.port > 0 && parsed.port <= 65535
-            ? parsed.port
-            : base.port,
-        secure: typeof parsed.secure === 'boolean' ? parsed.secure : base.secure,
-        user: typeof parsed.user === 'string' ? parsed.user : base.user,
-        pass: typeof parsed.pass === 'string' ? parsed.pass : base.pass,
-        resendApiKey: typeof parsed.resendApiKey === 'string' ? parsed.resendApiKey : base.resendApiKey,
-        brevoApiKey: typeof parsed.brevoApiKey === 'string' ? parsed.brevoApiKey : base.brevoApiKey,
-        fromName: typeof parsed.fromName === 'string' && parsed.fromName ? parsed.fromName : base.fromName,
-        fromEmail: typeof parsed.fromEmail === 'string' ? parsed.fromEmail : base.fromEmail,
-        requireSignupConfirmation: Boolean(parsed.requireSignupConfirmation),
-      };
-    }
-  } catch {
-    // Fallback to env defaults
+  const parsed = readModuleSnapshot<Partial<StoredMailConfig>>('mail_config', MAIL_FILE);
+  if (parsed) {
+    const base = defaultMailConfig();
+    return {
+      provider: normalizeProvider(parsed.provider, base.provider),
+      enabled: typeof parsed.enabled === 'boolean' ? parsed.enabled : base.enabled,
+      host: typeof parsed.host === 'string' ? parsed.host : base.host,
+      port:
+        typeof parsed.port === 'number' && parsed.port > 0 && parsed.port <= 65535
+          ? parsed.port
+          : base.port,
+      secure: typeof parsed.secure === 'boolean' ? parsed.secure : base.secure,
+      user: typeof parsed.user === 'string' ? parsed.user : base.user,
+      pass: typeof parsed.pass === 'string' ? parsed.pass : base.pass,
+      resendApiKey: typeof parsed.resendApiKey === 'string' ? parsed.resendApiKey : base.resendApiKey,
+      brevoApiKey: typeof parsed.brevoApiKey === 'string' ? parsed.brevoApiKey : base.brevoApiKey,
+      fromName: typeof parsed.fromName === 'string' && parsed.fromName ? parsed.fromName : base.fromName,
+      fromEmail: typeof parsed.fromEmail === 'string' ? parsed.fromEmail : base.fromEmail,
+      requireSignupConfirmation: Boolean(parsed.requireSignupConfirmation),
+    };
   }
   return defaultMailConfig();
 }
 
 function saveMailConfig(cfg: StoredMailConfig): void {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(MAIL_FILE, JSON.stringify(cfg, null, 2), 'utf-8');
-  } catch {
-    // Ignore write failures
-  }
+  writeModuleSnapshot('mail_config', cfg);
 }
 
 let mailConfig: StoredMailConfig = loadMailConfig();
@@ -243,50 +234,40 @@ Saisissez ce code de vérification à 6 chiffres (valable 15 minutes) pour chois
 function loadTemplates(): Record<EmailTemplateKey, EmailTemplateConfig> {
   const defaults = buildDefaultTemplates();
   let migrated = false;
-  try {
-    if (fs.existsSync(TEMPLATES_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(TEMPLATES_FILE, 'utf-8')) as Partial<
-        Record<EmailTemplateKey, Partial<EmailTemplateConfig>>
-      >;
-      for (const key of EMAIL_TEMPLATE_KEYS) {
-        const custom = parsed?.[key];
-        if (!custom) continue;
+  const parsed = readModuleSnapshot<
+    Partial<Record<EmailTemplateKey, Partial<EmailTemplateConfig>>>
+  >('mail_templates', TEMPLATES_FILE);
+  if (parsed) {
+    for (const key of EMAIL_TEMPLATE_KEYS) {
+      const custom = parsed?.[key];
+      if (!custom) continue;
 
-        // Upgrade legacy link-based defaults for password_reset / email_change to 6-digit code defaults
-        if (key === 'password_reset' && typeof custom.body === 'string' && !custom.body.includes('{{code}}') && (custom.ctaLabel === 'Choisir un nouveau mot de passe' || custom.body.includes('Cliquez sur le bouton'))) {
-          migrated = true;
-          continue;
-        }
-        if (key === 'email_change' && typeof custom.body === 'string' && !custom.body.includes('{{code}}') && custom.ctaLabel === 'Ouvrir mon profil') {
-          migrated = true;
-          continue;
-        }
-
-        defaults[key] = {
-          ...defaults[key],
-          subject: typeof custom.subject === 'string' && custom.subject.trim() ? custom.subject : defaults[key].subject,
-          heading: typeof custom.heading === 'string' && custom.heading.trim() ? custom.heading : defaults[key].heading,
-          body: typeof custom.body === 'string' && custom.body.trim() ? custom.body : defaults[key].body,
-          ctaLabel: typeof custom.ctaLabel === 'string' ? custom.ctaLabel : defaults[key].ctaLabel,
-          enabled: typeof custom.enabled === 'boolean' ? custom.enabled : defaults[key].enabled,
-          updatedAt: typeof custom.updatedAt === 'string' ? custom.updatedAt : defaults[key].updatedAt,
-        };
+      if (key === 'password_reset' && typeof custom.body === 'string' && !custom.body.includes('{{code}}') && (custom.ctaLabel === 'Choisir un nouveau mot de passe' || custom.body.includes('Cliquez sur le bouton'))) {
+        migrated = true;
+        continue;
       }
-      if (migrated) saveTemplates(defaults);
+      if (key === 'email_change' && typeof custom.body === 'string' && !custom.body.includes('{{code}}') && custom.ctaLabel === 'Ouvrir mon profil') {
+        migrated = true;
+        continue;
+      }
+
+      defaults[key] = {
+        ...defaults[key],
+        subject: typeof custom.subject === 'string' && custom.subject.trim() ? custom.subject : defaults[key].subject,
+        heading: typeof custom.heading === 'string' && custom.heading.trim() ? custom.heading : defaults[key].heading,
+        body: typeof custom.body === 'string' && custom.body.trim() ? custom.body : defaults[key].body,
+        ctaLabel: typeof custom.ctaLabel === 'string' ? custom.ctaLabel : defaults[key].ctaLabel,
+        enabled: typeof custom.enabled === 'boolean' ? custom.enabled : defaults[key].enabled,
+        updatedAt: typeof custom.updatedAt === 'string' ? custom.updatedAt : defaults[key].updatedAt,
+      };
     }
-  } catch {
-    // Use defaults
+    if (migrated) saveTemplates(defaults);
   }
   return defaults;
 }
 
 function saveTemplates(map: Record<EmailTemplateKey, EmailTemplateConfig>): void {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(TEMPLATES_FILE, JSON.stringify(map, null, 2), 'utf-8');
-  } catch {
-    // Ignore write failures
-  }
+  writeModuleSnapshot('mail_templates', map);
 }
 
 let emailTemplates: Record<EmailTemplateKey, EmailTemplateConfig> = loadTemplates();
@@ -343,24 +324,12 @@ export function resetEmailTemplate(key: EmailTemplateKey): EmailTemplateConfig |
 // MAIL SEND LOGS
 // ───────────────────────────────────────────────────────────────────────────
 function loadMailLogs(): MailLogEntry[] {
-  try {
-    if (fs.existsSync(LOGS_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(LOGS_FILE, 'utf-8')) as MailLogEntry[];
-      if (Array.isArray(parsed)) return parsed;
-    }
-  } catch {
-    // Ignore corrupted logs
-  }
-  return [];
+  const parsed = readModuleSnapshot<MailLogEntry[]>('mail_logs', LOGS_FILE);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 function saveMailLogs(logs: MailLogEntry[]): void {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(LOGS_FILE, JSON.stringify(logs, null, 2), 'utf-8');
-  } catch {
-    // Ignore write failures
-  }
+  writeModuleSnapshot('mail_logs', logs);
 }
 
 let mailLogs: MailLogEntry[] = loadMailLogs();

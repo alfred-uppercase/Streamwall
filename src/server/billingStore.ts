@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readModuleSnapshot, writeModuleSnapshot } from './persistentDb.ts';
 import {
   DEFAULT_PLAYERS,
   TEMPLATE_RE,
@@ -156,48 +156,42 @@ function createSeedBillingDb(): BillingDatabase {
 }
 
 function loadBillingDb(): BillingDatabase {
-  try {
-    if (fs.existsSync(BILLING_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(BILLING_FILE, 'utf-8')) as BillingDatabase;
-      if (parsed && Array.isArray(parsed.plans) && parsed.config) {
-        let migrated = false;
-        const plans = parsed.plans.map((p) => {
-          if (
-            p.id === 'free' &&
-            p.players &&
-            (p.players.film === '/movie/{tmdb}' || p.players.serie === '/tv/{tmdb}/{s}/{e}')
-          ) {
-            migrated = true;
-            return {
-              ...p,
-              players: {
-                film: p.players.film === '/movie/{tmdb}' ? DEFAULT_PLAYERS.player_guest_film : p.players.film,
-                serie:
-                  p.players.serie === '/tv/{tmdb}/{s}/{e}'
-                    ? DEFAULT_PLAYERS.player_guest_serie
-                    : p.players.serie,
-              },
-            };
-          }
-          return p;
-        });
-        const loaded: BillingDatabase = {
-          ...createSeedBillingDb(),
-          ...parsed,
-          plans,
-          subscriptions: parsed.subscriptions ?? {},
-          orders: Array.isArray(parsed.orders) ? parsed.orders : [],
-          avatars: parsed.avatars ?? {},
-          themes: parsed.themes ?? {},
-          userDirectory: parsed.userDirectory ?? {},
-          bannedUsers: parsed.bannedUsers ?? {},
+  const parsed = readModuleSnapshot<BillingDatabase>('billing', BILLING_FILE);
+  if (parsed && Array.isArray(parsed.plans) && parsed.config) {
+    let migrated = false;
+    const plans = parsed.plans.map((p) => {
+      if (
+        p.id === 'free' &&
+        p.players &&
+        (p.players.film === '/movie/{tmdb}' || p.players.serie === '/tv/{tmdb}/{s}/{e}')
+      ) {
+        migrated = true;
+        return {
+          ...p,
+          players: {
+            film: p.players.film === '/movie/{tmdb}' ? DEFAULT_PLAYERS.player_guest_film : p.players.film,
+            serie:
+              p.players.serie === '/tv/{tmdb}/{s}/{e}'
+                ? DEFAULT_PLAYERS.player_guest_serie
+                : p.players.serie,
+          },
         };
-        if (migrated) saveBillingDb(loaded);
-        return loaded;
       }
-    }
-  } catch {
-    // Re-seed if corrupted
+      return p;
+    });
+    const loaded: BillingDatabase = {
+      ...createSeedBillingDb(),
+      ...parsed,
+      plans,
+      subscriptions: parsed.subscriptions ?? {},
+      orders: Array.isArray(parsed.orders) ? parsed.orders : [],
+      avatars: parsed.avatars ?? {},
+      themes: parsed.themes ?? {},
+      userDirectory: parsed.userDirectory ?? {},
+      bannedUsers: parsed.bannedUsers ?? {},
+    };
+    if (migrated) saveBillingDb(loaded);
+    return loaded;
   }
   const seeded = createSeedBillingDb();
   saveBillingDb(seeded);
@@ -205,12 +199,7 @@ function loadBillingDb(): BillingDatabase {
 }
 
 function saveBillingDb(state: BillingDatabase): void {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(BILLING_FILE, JSON.stringify(state, null, 2), 'utf-8');
-  } catch {
-    // Non-fatal
-  }
+  writeModuleSnapshot('billing', state);
 }
 
 const billingDb: BillingDatabase = loadBillingDb();
