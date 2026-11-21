@@ -12,6 +12,7 @@ import {
 import { toast } from 'sonner';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle, useSiteConfig } from '../lib/siteConfig';
+import { CaptchaChallenge } from '../components/CaptchaChallenge';
 import { OtpCodeInput } from '../components/OtpCodeInput';
 
 export function AuthPage() {
@@ -41,6 +42,33 @@ export function AuthPage() {
   const [resendCooldown, setResendCooldown] = useState(0);
   const [resetNewPassword, setResetNewPassword] = useState('');
   const [resetConfirmPassword, setResetConfirmPassword] = useState('');
+
+  // Built-in SVG CAPTCHA + honeypot state
+  const [captchaToken, setCaptchaToken] = useState('');
+  const [captchaSvg, setCaptchaSvg] = useState<string | null>(null);
+  const [captchaAnswer, setCaptchaAnswer] = useState('');
+  const [captchaLoading, setCaptchaLoading] = useState(false);
+  const [honeypot, setHoneypot] = useState('');
+
+  const refreshCaptcha = React.useCallback(async () => {
+    setCaptchaLoading(true);
+    setCaptchaAnswer('');
+    try {
+      const challenge = await api.captcha();
+      setCaptchaToken(challenge.captchaToken);
+      setCaptchaSvg(challenge.svgDataUri);
+    } catch {
+      setCaptchaSvg(null);
+    } finally {
+      setCaptchaLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!pendingCodeEmail) {
+      void refreshCaptcha();
+    }
+  }, [mode, pendingCodeEmail, refreshCaptcha]);
 
   useDocumentTitle(
     pendingCodeEmail
@@ -144,12 +172,23 @@ export function AuthPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    const securityPayload = {
+      captchaToken,
+      captchaAnswer: captchaAnswer.trim(),
+      website: honeypot,
+    };
+    if (!securityPayload.captchaToken || securityPayload.captchaAnswer.length < 4) {
+      setStatusError(true);
+      setStatusMessage('Veuillez recopier le code de sécurité.');
+      return;
+    }
+
     setBusy(true);
     setStatusMessage('');
     setStatusError(false);
     try {
       if (mode === 'forgot') {
-        const res = await api.forgotPassword(email.trim().toLowerCase());
+        const res = await api.forgotPassword(email.trim().toLowerCase(), securityPayload);
         if (res.requiresCode) {
           setPendingKind('forgot');
           setPendingCodeEmail(res.email || email.trim().toLowerCase());
@@ -164,6 +203,7 @@ export function AuthPage() {
           toast.success('Code de réinitialisation envoyé par email');
         } else {
           setStatusMessage(res.message);
+          void refreshCaptcha();
         }
       } else if (mode === 'signup') {
         if (usernameStatus.available === false) {
@@ -172,7 +212,7 @@ export function AuthPage() {
           setBusy(false);
           return;
         }
-        const res = await api.signup(username, email, password);
+        const res = await api.signup(username, email, password, securityPayload);
         if (res.requiresCode) {
           setPendingKind('signup');
           setPendingCodeEmail(res.email || email.trim().toLowerCase());
@@ -187,13 +227,14 @@ export function AuthPage() {
           setStatusMessage(
             res.message || 'Consultez votre boîte mail pour confirmer votre inscription.'
           );
+          void refreshCaptcha();
         } else {
           setSession(res.token, res.user);
           toast.success(`Bienvenue sur ${siteName}, ${res.user.username} !`);
           navigate('/', { replace: true });
         }
       } else {
-        const res = await api.login(email, password);
+        const res = await api.login(email, password, securityPayload);
         setSession(res.token, res.user);
         toast.success(`Bon retour, ${res.user.username} !`);
         navigate('/', { replace: true });
@@ -201,6 +242,7 @@ export function AuthPage() {
     } catch (err) {
       setStatusError(true);
       setStatusMessage(err instanceof Error ? err.message : 'Opération impossible.');
+      void refreshCaptcha();
     } finally {
       setBusy(false);
     }
@@ -337,11 +379,11 @@ export function AuthPage() {
                   ? 'Créer un compte membre'
                   : 'Récupérer votre mot de passe'}
           </h1>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {pendingCodeEmail
-              ? `Saisissez le code à 6 chiffres envoyé à ${pendingCodeEmail}`
-              : 'Lecteur sans publicité, reprise des épisodes, favoris privés et réseau d’amis.'}
-          </p>
+          {pendingCodeEmail && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              {`Saisissez le code à 6 chiffres envoyé à ${pendingCodeEmail}`}
+            </p>
+          )}
         </div>
 
         {pendingCodeEmail && pendingKind === 'signup' ? (
@@ -550,9 +592,24 @@ export function AuthPage() {
               </label>
             )}
 
+            <CaptchaChallenge
+              svgDataUri={captchaSvg}
+              loading={captchaLoading}
+              answer={captchaAnswer}
+              onAnswerChange={setCaptchaAnswer}
+              onRefresh={() => void refreshCaptcha()}
+              honeypot={honeypot}
+              onHoneypotChange={setHoneypot}
+              disabled={busy}
+            />
+
             <button
               type="submit"
-              disabled={busy || (mode === 'signup' && usernameStatus.available === false)}
+              disabled={
+                busy ||
+                captchaAnswer.trim().length < 4 ||
+                (mode === 'signup' && usernameStatus.available === false)
+              }
               className="w-full rounded-lg bg-primary py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
             >
               {busy

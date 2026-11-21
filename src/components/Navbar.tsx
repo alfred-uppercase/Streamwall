@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { memo, useEffect, useRef, useState } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useIsFetching, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -70,10 +70,23 @@ function writeIdList(key: string, ids: string[]): void {
   }
 }
 
+const TopLoadingBar = memo(function TopLoadingBar() {
+  const isFetching = useIsFetching();
+  if (isFetching <= 0) return null;
+  return (
+    <div
+      role="progressbar"
+      aria-label="Chargement des données"
+      className="pointer-events-none absolute inset-x-0 -bottom-px h-0.5 overflow-hidden"
+    >
+      <div className="progress-bar h-full bg-primary" />
+    </div>
+  );
+});
+
 export function Navbar() {
   const { user, isMember, isAdmin, isPro } = useAuth();
   const { siteName } = useSiteConfig();
-  const isFetching = useIsFetching();
   const location = useLocation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -510,15 +523,7 @@ export function Navbar() {
         </div>
 
         {/* Top loading indicator matching original StreamWall PageLoadingIndicator */}
-        {isFetching > 0 && (
-          <div
-            role="progressbar"
-            aria-label="Chargement des données"
-            className="pointer-events-none absolute inset-x-0 -bottom-px h-0.5 overflow-hidden"
-          >
-            <div className="progress-bar h-full bg-primary" />
-          </div>
-        )}
+        <TopLoadingBar />
       </header>
 
       {/* Mobile Floating Bottom Navigation Dock (modern mobile app style) */}

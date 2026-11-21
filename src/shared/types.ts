@@ -713,6 +713,7 @@ export type ErrorLogSource =
   | 'api'
   | 'upstream'
   | 'auth'
+  | 'security'
   | 'billing'
   | 'push'
   | 'mail';

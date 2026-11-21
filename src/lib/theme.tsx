@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ThemeMode, UserThemePreference } from '../shared/types';
 import { api, useAuth } from './client';
 
@@ -198,11 +198,12 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     }
   }, [isMember]);
 
-  return (
-    <ThemeContext.Provider value={{ theme, applyAndSaveTheme, resetTheme }}>
-      {children}
-    </ThemeContext.Provider>
+  const value = useMemo(
+    () => ({ theme, applyAndSaveTheme, resetTheme }),
+    [theme, applyAndSaveTheme, resetTheme]
   );
+
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 
 export function useTheme(): ThemeContextValue {

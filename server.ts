@@ -22,6 +22,7 @@ import type {
   CastMember,
   CommentRecord,
   DetailItem,
+  DetailResponse,
   EmailTemplateKey,
   EndpointCheck,
   Episode,
@@ -45,6 +46,9 @@ import {
 import {
   createAdminClient,
   createAnonClient,
+  invalidateSbAdminOverviewCache,
+  invalidateSbCommentsCache,
+  invalidateSbMemberCache,
   invalidateSbSettingsCache,
   invalidateSbUserCache,
   isSupabaseEnabled,
@@ -59,6 +63,23 @@ import {
   sbGetTmdbApiKey,
   sbResolveUser,
 } from './src/server/supabaseAdapter.ts';
+import { InFlightCoalescer, TimedLruCache } from './src/server/cacheUtils.ts';
+import {
+  antiBotAndRateLimitMiddleware,
+  checkLoginLockout,
+  clearLoginFailures,
+  createCaptchaChallenge,
+  csrfOriginCheckMiddleware,
+  escapeHtml,
+  getClientIp,
+  getSessionCookieOptions,
+  isHoneypotTriggered,
+  payloadSanitizerMiddleware,
+  recordLoginFailure,
+  securityHeadersMiddleware,
+  stripDangerousText,
+  verifyCaptchaChallenge,
+} from './src/server/security.ts';
 import { clearTmdbCache, enrichDetailWithTmdb } from './src/server/tmdbService.ts';
 import {
   EMAIL_TEMPLATE_KEYS,
@@ -861,25 +882,23 @@ function saveDb(state: DatabaseShape): void {
 
 const db: DatabaseShape = loadDb();
 
-const upstreamCache = new Map<string, { expiresAt: number; value: unknown }>();
+const upstreamCache = new TimedLruCache<unknown>(2_000);
+const upstreamCoalescer = new InFlightCoalescer();
 
 function getCached<T>(key: string): T | null {
-  const entry = upstreamCache.get(key);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    upstreamCache.delete(key);
-    return null;
-  }
-  return entry.value as T;
+  return upstreamCache.get(key) as T | null;
 }
 
-function setCached<T>(key: string, value: T, ttlMs: number): T {
-  if (upstreamCache.size > 400) {
-    const oldestKey = upstreamCache.keys().next().value;
-    if (oldestKey) upstreamCache.delete(oldestKey);
-  }
-  upstreamCache.set(key, { expiresAt: Date.now() + ttlMs, value });
-  return value;
+function getStaleCached<T>(key: string): T | null {
+  return upstreamCache.getStale(key) as T | null;
+}
+
+function setCached<T>(key: string, value: T, ttlMs: number, staleTtlMs = ttlMs * 3): T {
+  return upstreamCache.set(key, value, ttlMs, staleTtlMs) as T;
+}
+
+function coalesceUpstream<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  return upstreamCoalescer.run(key, fn);
 }
 
 async function getOrigin(): Promise<string> {
@@ -1277,55 +1296,60 @@ async function fetchUpstreamSlider(): Promise<{ items: Slide[]; live: boolean }>
   const cached = getCached<{ items: Slide[]; live: boolean }>(cacheKey);
   if (cached) return cached;
 
-  try {
-    const res = await fetch(`${origin}/api/api_slider.php`, {
-      signal: AbortSignal.timeout(9_000),
-      headers: { 'user-agent': 'Mozilla/5.0 (Tapenaka StreamWall)' },
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = (await res.json()) as { items?: Array<Record<string, unknown>> };
-    const items: Slide[] = (json.items ?? []).slice(0, 8).map((r) => {
-      const genre = (r.genre as string) || null;
-      const t: ItemType = r.type === 'film' ? 'film' : /anim/i.test(genre ?? '') ? 'anime' : 'serie';
-      const slide: Slide = {
-        id: String(r.id ?? ''),
-        titre: String(r.titre ?? ''),
-        poster: (r.poster as string) || null,
-        qualite: (r.qualite as string) || null,
-        langue: (r.langue as string) || null,
-        item_type: t,
-        saison: null,
-        genre,
-        annee: r.annee ? Number(r.annee) : null,
-        tmdbId: r.tmdbId ? String(r.tmdbId) : null,
-        descr: (r.descr as string) || (r.description as string) || null,
-        backdrop: (r.backdrop as string) || (r.baggio as string) || null,
-        trailer: (r.trailer as string) || null,
-      };
-      indexCatalogEntry({
-        id: slide.id,
-        titre: slide.titre,
-        poster: slide.poster ?? null,
-        backdrop: slide.backdrop ?? null,
-        descr: slide.descr ?? null,
-        trailer: slide.trailer ?? null,
-        genre: slide.genre ?? null,
-        annee: slide.annee ?? null,
-        langue: slide.langue ?? null,
-        qualite: slide.qualite ?? null,
-        tmdbId: slide.tmdbId ?? null,
-        item_type: slide.item_type,
-        source: slide.item_type === 'film' ? 'films' : 'series',
+  return coalesceUpstream(cacheKey, async () => {
+    const recheck = getCached<{ items: Slide[]; live: boolean }>(cacheKey);
+    if (recheck) return recheck;
+
+    try {
+      const res = await fetch(`${origin}/api/api_slider.php`, {
+        signal: AbortSignal.timeout(9_000),
+        headers: { 'user-agent': 'Mozilla/5.0 (Tapenaka StreamWall)' },
       });
-      return slide;
-    });
-    if (items.length > 0) {
-      return setCached(cacheKey, { items, live: true }, 120_000);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = (await res.json()) as { items?: Array<Record<string, unknown>> };
+      const items: Slide[] = (json.items ?? []).slice(0, 8).map((r) => {
+        const genre = (r.genre as string) || null;
+        const t: ItemType = r.type === 'film' ? 'film' : /anim/i.test(genre ?? '') ? 'anime' : 'serie';
+        const slide: Slide = {
+          id: String(r.id ?? ''),
+          titre: String(r.titre ?? ''),
+          poster: (r.poster as string) || null,
+          qualite: (r.qualite as string) || null,
+          langue: (r.langue as string) || null,
+          item_type: t,
+          saison: null,
+          genre,
+          annee: r.annee ? Number(r.annee) : null,
+          tmdbId: r.tmdbId ? String(r.tmdbId) : null,
+          descr: (r.descr as string) || (r.description as string) || null,
+          backdrop: (r.backdrop as string) || (r.baggio as string) || null,
+          trailer: (r.trailer as string) || null,
+        };
+        indexCatalogEntry({
+          id: slide.id,
+          titre: slide.titre,
+          poster: slide.poster ?? null,
+          backdrop: slide.backdrop ?? null,
+          descr: slide.descr ?? null,
+          trailer: slide.trailer ?? null,
+          genre: slide.genre ?? null,
+          annee: slide.annee ?? null,
+          langue: slide.langue ?? null,
+          qualite: slide.qualite ?? null,
+          tmdbId: slide.tmdbId ?? null,
+          item_type: slide.item_type,
+          source: slide.item_type === 'film' ? 'films' : 'series',
+        });
+        return slide;
+      });
+      if (items.length > 0) {
+        return setCached(cacheKey, { items, live: true }, 120_000, 600_000);
+      }
+    } catch {
+      // Fallback
     }
-  } catch {
-    // Fallback
-  }
-  return { items: FALLBACK_SLIDER, live: false };
+    return getStaleCached<{ items: Slide[]; live: boolean }>(cacheKey) ?? { items: FALLBACK_SLIDER, live: false };
+  });
 }
 
 function buildKorotokoParams(f: CatalogueFilters): URLSearchParams {
@@ -1351,93 +1375,101 @@ async function fetchUpstreamCatalogue(filters: CatalogueFilters): Promise<Catalo
   const cached = getCached<CataloguePage>(cacheKey);
   if (cached) return cached;
 
-  try {
-    const res = await fetch(`${origin}/api/korotoko.php?${params.toString()}`, {
-      signal: AbortSignal.timeout(10_000),
-      headers: { 'user-agent': 'Mozilla/5.0 (Tapenaka StreamWall)' },
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = (await res.json()) as {
-      total?: number;
-      page?: number;
-      pages?: number;
-      approximatif?: boolean;
-      data?: Array<Record<string, unknown>>;
-    };
-    let items: Item[] = (json.data ?? []).map((r) => {
-      const entry = parseKorotokoRow(r);
-      return {
-        id: entry.id,
-        titre: entry.titre,
-        poster: entry.poster,
-        qualite: entry.qualite,
-        langue: entry.langue,
-        item_type: entry.item_type,
-        saison: null,
-        genre: entry.genre,
-        annee: entry.annee,
-        tmdbId: entry.tmdbId,
+  return coalesceUpstream(cacheKey, async () => {
+    const recheck = getCached<CataloguePage>(cacheKey);
+    if (recheck) return recheck;
+
+    try {
+      const res = await fetch(`${origin}/api/korotoko.php?${params.toString()}`, {
+        signal: AbortSignal.timeout(10_000),
+        headers: { 'user-agent': 'Mozilla/5.0 (Tapenaka StreamWall)' },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = (await res.json()) as {
+        total?: number;
+        page?: number;
+        pages?: number;
+        approximatif?: boolean;
+        data?: Array<Record<string, unknown>>;
       };
-    });
+      let items: Item[] = (json.data ?? []).map((r) => {
+        const entry = parseKorotokoRow(r);
+        return {
+          id: entry.id,
+          titre: entry.titre,
+          poster: entry.poster,
+          qualite: entry.qualite,
+          langue: entry.langue,
+          item_type: entry.item_type,
+          saison: null,
+          genre: entry.genre,
+          annee: entry.annee,
+          tmdbId: entry.tmdbId,
+        };
+      });
 
-    if (filters.lang === 'vf') {
-      items = items.filter((i) => /french|vf/i.test(i.langue ?? ''));
-    } else if (filters.lang === 'vostfr') {
-      items = items.filter((i) => /vostfr/i.test(i.langue ?? ''));
-    }
-
-    if (filters.sort === 'annee_desc') {
-      items = [...items].sort((a, b) => (b.annee ?? 0) - (a.annee ?? 0));
-    }
-
-    const pageData: CataloguePage = {
-      total: json.total ?? items.length,
-      page: json.page ?? filters.page,
-      pages: Math.max(1, json.pages ?? 1),
-      approximatif: Boolean(json.approximatif),
-      upstreamStatus: 'live',
-      items,
-    };
-    return setCached(cacheKey, pageData, 90_000);
-  } catch (err) {
-    recordErrorLog({
-      level: 'warn',
-      source: 'upstream',
-      message: 'Échec de récupération du catalogue upstream (bascule fallback)',
-      route: '/api/catalogue',
-      context: { q: filters.q, type: filters.type, page: filters.page },
-      err,
-    });
-    const qLower = filters.q.toLowerCase();
-    let filtered = FALLBACK_ITEMS.filter((it) => {
-      if (qLower && !it.titre.toLowerCase().includes(qLower)) return false;
-      if (filters.type !== 'all' && it.item_type !== filters.type) return false;
-      if (
-        filters.genre &&
-        !(it.genre ?? '')
-          .split(',')
-          .map((g) => g.trim().toLowerCase())
-          .includes(filters.genre.toLowerCase())
-      ) {
-        return false;
+      if (filters.lang === 'vf') {
+        items = items.filter((i) => /french|vf/i.test(i.langue ?? ''));
+      } else if (filters.lang === 'vostfr') {
+        items = items.filter((i) => /vostfr/i.test(i.langue ?? ''));
       }
-      if (filters.year && String(it.annee ?? '') !== filters.year) return false;
-      if (filters.lang === 'vf' && !/french|vf/i.test(it.langue ?? '')) return false;
-      if (filters.lang === 'vostfr' && !/vostfr/i.test(it.langue ?? '')) return false;
-      return true;
-    });
-    if (filters.sort === 'annee_desc') {
-      filtered = [...filtered].sort((a, b) => (b.annee ?? 0) - (a.annee ?? 0));
+
+      if (filters.sort === 'annee_desc') {
+        items = [...items].sort((a, b) => (b.annee ?? 0) - (a.annee ?? 0));
+      }
+
+      const pageData: CataloguePage = {
+        total: json.total ?? items.length,
+        page: json.page ?? filters.page,
+        pages: Math.max(1, json.pages ?? 1),
+        approximatif: Boolean(json.approximatif),
+        upstreamStatus: 'live',
+        items,
+      };
+      return setCached(cacheKey, pageData, 90_000, 450_000);
+    } catch (err) {
+      const stale = getStaleCached<CataloguePage>(cacheKey);
+      if (stale) return stale;
+
+      recordErrorLog({
+        level: 'warn',
+        source: 'upstream',
+        message: 'Échec de récupération du catalogue upstream (bascule fallback)',
+        route: '/api/catalogue',
+        context: { q: filters.q, type: filters.type, page: filters.page },
+        err,
+      });
+      const qLower = filters.q.toLowerCase();
+      let filtered = FALLBACK_ITEMS.filter((it) => {
+        if (qLower && !it.titre.toLowerCase().includes(qLower)) return false;
+        if (filters.type !== 'all' && it.item_type !== filters.type) return false;
+        if (
+          filters.genre &&
+          !(it.genre ?? '')
+            .split(',')
+            .map((g) => g.trim().toLowerCase())
+            .includes(filters.genre.toLowerCase())
+        ) {
+          return false;
+        }
+        if (filters.year && String(it.annee ?? '') !== filters.year) return false;
+        if (filters.lang === 'vf' && !/french|vf/i.test(it.langue ?? '')) return false;
+        if (filters.lang === 'vostfr' && !/vostfr/i.test(it.langue ?? '')) return false;
+        return true;
+      });
+      if (filters.sort === 'annee_desc') {
+        filtered = [...filtered].sort((a, b) => (b.annee ?? 0) - (a.annee ?? 0));
+      }
+      return {
+        total: filtered.length,
+        page: 1,
+        pages: 1,
+        approximatif: false,
+        upstreamStatus: 'fallback',
+        items: filtered,
+      };
     }
-    return {
-      total: filtered.length,
-      page: 1,
-      pages: 1,
-      approximatif: false,
-      upstreamStatus: 'fallback',
-      items: filtered,
-    };
-  }
+  });
 }
 
 async function fetchUpstreamGenres(): Promise<string[]> {
@@ -1450,54 +1482,62 @@ async function fetchUpstreamGenres(): Promise<string[]> {
   const cached = getCached<string[]>(cacheKey);
   if (cached && cached.length > 0) return cached;
 
-  try {
-    const [movieRes, tvRes] = await Promise.all([
-      fetch(
-        `https://api.themoviedb.org/3/genre/movie/list?language=fr-FR&api_key=${encodeURIComponent(apiKey)}`,
-        {
-          signal: AbortSignal.timeout(7_000),
-          headers: { accept: 'application/json' },
-        }
-      ),
-      fetch(
-        `https://api.themoviedb.org/3/genre/tv/list?language=fr-FR&api_key=${encodeURIComponent(apiKey)}`,
-        {
-          signal: AbortSignal.timeout(7_000),
-          headers: { accept: 'application/json' },
-        }
-      ),
-    ]);
+  return coalesceUpstream(cacheKey, async () => {
+    const recheck = getCached<string[]>(cacheKey);
+    if (recheck && recheck.length > 0) return recheck;
 
-    const merged = new Set<string>();
-    if (movieRes.ok) {
-      const movieJson = (await movieRes.json()) as { genres?: Array<{ id: number; name?: string }> };
-      for (const g of movieJson.genres ?? []) {
-        const name = String(g.name ?? '').trim();
-        if (name) merged.add(name);
-      }
-    }
-    if (tvRes.ok) {
-      const tvJson = (await tvRes.json()) as { genres?: Array<{ id: number; name?: string }> };
-      for (const g of tvJson.genres ?? []) {
-        const name = String(g.name ?? '').trim();
-        if (name) merged.add(name);
-      }
-    }
+    try {
+      const [movieRes, tvRes] = await Promise.all([
+        fetch(
+          `https://api.themoviedb.org/3/genre/movie/list?language=fr-FR&api_key=${encodeURIComponent(apiKey)}`,
+          {
+            signal: AbortSignal.timeout(7_000),
+            headers: { accept: 'application/json' },
+          }
+        ),
+        fetch(
+          `https://api.themoviedb.org/3/genre/tv/list?language=fr-FR&api_key=${encodeURIComponent(apiKey)}`,
+          {
+            signal: AbortSignal.timeout(7_000),
+            headers: { accept: 'application/json' },
+          }
+        ),
+      ]);
 
-    const sorted = [...merged].sort((a, b) => a.localeCompare(b, 'fr'));
-    if (sorted.length > 0) {
-      return setCached(cacheKey, sorted, 6 * 3_600_000);
+      const merged = new Set<string>();
+      if (movieRes.ok) {
+        const movieJson = (await movieRes.json()) as { genres?: Array<{ id: number; name?: string }> };
+        for (const g of movieJson.genres ?? []) {
+          const name = String(g.name ?? '').trim();
+          if (name) merged.add(name);
+        }
+      }
+      if (tvRes.ok) {
+        const tvJson = (await tvRes.json()) as { genres?: Array<{ id: number; name?: string }> };
+        for (const g of tvJson.genres ?? []) {
+          const name = String(g.name ?? '').trim();
+          if (name) merged.add(name);
+        }
+      }
+
+      const sorted = [...merged].sort((a, b) => a.localeCompare(b, 'fr'));
+      if (sorted.length > 0) {
+        return setCached(cacheKey, sorted, 6 * 3_600_000, 24 * 3_600_000);
+      }
+    } catch (err) {
+      const stale = getStaleCached<string[]>(cacheKey);
+      if (stale && stale.length > 0) return stale;
+
+      recordErrorLog({
+        level: 'warn',
+        source: 'upstream',
+        message: 'Échec de récupération des genres TMDB (bascule fallback)',
+        route: '/api/catalogue/genres',
+        err,
+      });
     }
-  } catch (err) {
-    recordErrorLog({
-      level: 'warn',
-      source: 'upstream',
-      message: 'Échec de récupération des genres TMDB (bascule fallback)',
-      route: '/api/catalogue/genres',
-      err,
-    });
-  }
-  return FALLBACK_GENRES;
+    return FALLBACK_GENRES;
+  });
 }
 
 interface RawUpstreamDetailJson {
@@ -1534,7 +1574,6 @@ async function fetchUpstreamDetail(
   live: boolean;
 }> {
   const origin = await getOrigin();
-  let usedEndpointType: 'film' | 'serie' = type === 'film' ? 'film' : 'serie';
   const cacheKey = `detail:v2:${origin}:${type}:${id}`;
   const cached = getCached<{
     item: DetailItem | null;
@@ -1545,157 +1584,179 @@ async function fetchUpstreamDetail(
   }>(cacheKey);
   if (cached) return cached;
 
-  try {
-    let json = await queryDetailsApi(origin, id, usedEndpointType);
+  return coalesceUpstream(cacheKey, async () => {
+    const recheck = getCached<{
+      item: DetailItem | null;
+      cast: CastMember[];
+      related: Item[];
+      episodes: Episode[];
+      live: boolean;
+    }>(cacheKey);
+    if (recheck) return recheck;
 
-    if ((!json?.item || String(json.item.id ?? '') !== id) && type === 'anime') {
-      const filmJson = await queryDetailsApi(origin, id, 'film');
-      if (filmJson?.item && String(filmJson.item.id ?? '') === id) {
-        json = filmJson;
-        usedEndpointType = 'film';
+    let usedEndpointType: 'film' | 'serie' = type === 'film' ? 'film' : 'serie';
+
+    try {
+      let json = await queryDetailsApi(origin, id, usedEndpointType);
+
+      if ((!json?.item || String(json.item.id ?? '') !== id) && type === 'anime') {
+        const filmJson = await queryDetailsApi(origin, id, 'film');
+        if (filmJson?.item && String(filmJson.item.id ?? '') === id) {
+          json = filmJson;
+          usedEndpointType = 'film';
+        }
       }
-    }
 
-    let matchedByExactId = Boolean(json?.item && String(json.item.id ?? '') === id);
-    let indexedFallback: IndexedCatalogEntry | null = null;
+      let matchedByExactId = Boolean(json?.item && String(json.item.id ?? '') === id);
+      let indexedFallback: IndexedCatalogEntry | null = null;
 
-    // Upstream details_api.php queries tmdbId BEFORE id; if another title's tmdbId matches our requested id,
-    // recover the true catalog entry by its exact id instead of returning the collided title.
-    if (!matchedByExactId) {
-      indexedFallback = await findCatalogEntryById(origin, type, id);
-      if (indexedFallback) {
-        usedEndpointType = indexedFallback.source === 'films' ? 'film' : 'serie';
-        if (indexedFallback.tmdbId) {
-          const viaTmdb = await queryDetailsApi(origin, indexedFallback.tmdbId, usedEndpointType);
-          if (viaTmdb?.item && String(viaTmdb.item.id ?? '') === id) {
-            json = viaTmdb;
-            matchedByExactId = true;
-          } else if (
-            viaTmdb?.item &&
-            String(viaTmdb.item.tmdbId ?? '') === String(indexedFallback.tmdbId)
-          ) {
-            // Two catalog items share the same tmdbId: keep metadata from indexedFallback and cast/episodes from viaTmdb
-            json = viaTmdb;
+      // Upstream details_api.php queries tmdbId BEFORE id; if another title's tmdbId matches our requested id,
+      // recover the true catalog entry by its exact id instead of returning the collided title.
+      if (!matchedByExactId) {
+        indexedFallback = await findCatalogEntryById(origin, type, id);
+        if (indexedFallback) {
+          usedEndpointType = indexedFallback.source === 'films' ? 'film' : 'serie';
+          if (indexedFallback.tmdbId) {
+            const viaTmdb = await queryDetailsApi(origin, indexedFallback.tmdbId, usedEndpointType);
+            if (viaTmdb?.item && String(viaTmdb.item.id ?? '') === id) {
+              json = viaTmdb;
+              matchedByExactId = true;
+            } else if (
+              viaTmdb?.item &&
+              String(viaTmdb.item.tmdbId ?? '') === String(indexedFallback.tmdbId)
+            ) {
+              // Two catalog items share the same tmdbId: keep metadata from indexedFallback and cast/episodes from viaTmdb
+              json = viaTmdb;
+            }
           }
         }
       }
+
+      if (!matchedByExactId && !indexedFallback) {
+        return { item: null, cast: [], related: [], episodes: [], live: true };
+      }
+
+      const raw = matchedByExactId ? json?.item : undefined;
+      const genre = (raw?.genre as string) || indexedFallback?.genre || null;
+      const resolvedType: ItemType = indexedFallback
+        ? indexedFallback.item_type
+        : usedEndpointType === 'film' || raw?.type === 'film'
+          ? 'film'
+          : type === 'anime' || raw?.type === 'anime' || /anim/i.test(genre ?? '')
+            ? 'anime'
+            : 'serie';
+      const synopsis =
+        ((raw?.descr as string) ||
+          (raw?.description as string) ||
+          indexedFallback?.descr ||
+          null)?.trim() || null;
+
+      const item: DetailItem = {
+        id: String(id),
+        titre: matchedByExactId
+          ? String(raw?.titre ?? indexedFallback?.titre ?? '')
+          : String(indexedFallback?.titre ?? ''),
+        descr: synopsis,
+        qualite: (matchedByExactId ? (raw?.qualite as string) : indexedFallback?.qualite) || null,
+        langue: (matchedByExactId ? (raw?.langue as string) : indexedFallback?.langue) || null,
+        type: resolvedType,
+        tmdbId:
+          (matchedByExactId && raw?.tmdbId ? String(raw.tmdbId) : indexedFallback?.tmdbId) || null,
+        poster:
+          (matchedByExactId ? (raw?.poster as string) : null) || indexedFallback?.poster || null,
+        trailer:
+          (matchedByExactId ? (raw?.trailer as string) : null) || indexedFallback?.trailer || null,
+        backdrop:
+          (matchedByExactId ? ((raw?.backdrop as string) || (raw?.baggio as string)) : null) ||
+          indexedFallback?.backdrop ||
+          null,
+        genre,
+        annee:
+          matchedByExactId && raw?.annee
+            ? Number(raw.annee)
+            : indexedFallback?.annee ?? null,
+        saison: (raw?.saison as string | number | null) ?? null,
+      };
+
+      const allowExtrasFromJson = Boolean(
+        json?.item &&
+          (String(json.item.id ?? '') === id ||
+            (indexedFallback?.tmdbId &&
+              String(json.item.tmdbId ?? '') === String(indexedFallback.tmdbId)))
+      );
+
+      const cast: CastMember[] = allowExtrasFromJson
+        ? (json?.cast ?? []).slice(0, 18).map((c) => ({
+            nom: String(c.nom ?? ''),
+            photo: (c.photo as string) || null,
+            role: (c.role as string) || null,
+          }))
+        : [];
+
+      const related: Item[] = allowExtrasFromJson
+        ? (json?.related ?? []).slice(0, 12).map((r) => {
+            const relItem: Item = {
+              id: String(r.id ?? ''),
+              titre: String(r.titre ?? ''),
+              poster: (r.poster as string) || null,
+              qualite: null,
+              langue: null,
+              item_type: resolvedType,
+              saison: null,
+              annee: r.annee ? Number(r.annee) : null,
+              tmdbId: r.tmdbId ? String(r.tmdbId) : null,
+            };
+            indexCatalogEntry({
+              id: relItem.id,
+              titre: relItem.titre,
+              poster: relItem.poster,
+              backdrop: null,
+              descr: null,
+              trailer: null,
+              genre: null,
+              annee: relItem.annee ?? null,
+              langue: null,
+              qualite: null,
+              tmdbId: relItem.tmdbId ?? null,
+              item_type: resolvedType,
+              source: resolvedType === 'film' ? 'films' : 'series',
+            });
+            return relItem;
+          })
+        : [];
+
+      const episodes: Episode[] = allowExtrasFromJson
+        ? (json?.episodes ?? []).map((e, idx) => ({
+            saison: Number(e.saison) || 1,
+            episode: Number(e.episode) || idx + 1,
+            titre: (e.titre as string) || `Épisode ${Number(e.episode) || idx + 1}`,
+            url: (e.url as string) || null,
+          }))
+        : [];
+
+      const result = { item, cast, related, episodes, live: true };
+      return setCached(cacheKey, result, 180_000, 900_000);
+    } catch (err) {
+      const stale = getStaleCached<{
+        item: DetailItem | null;
+        cast: CastMember[];
+        related: Item[];
+        episodes: Episode[];
+        live: boolean;
+      }>(cacheKey);
+      if (stale) return stale;
+
+      recordErrorLog({
+        level: 'warn',
+        source: 'upstream',
+        message: `Échec de récupération fiche détail (${type}/${id})`,
+        route: `/api/details/${type}/${id}`,
+        err,
+      });
+      const fb = buildFallbackDetail(type, id);
+      return { ...fb, live: false };
     }
-
-    if (!matchedByExactId && !indexedFallback) {
-      return { item: null, cast: [], related: [], episodes: [], live: true };
-    }
-
-    const raw = matchedByExactId ? json?.item : undefined;
-    const genre = (raw?.genre as string) || indexedFallback?.genre || null;
-    const resolvedType: ItemType = indexedFallback
-      ? indexedFallback.item_type
-      : usedEndpointType === 'film' || raw?.type === 'film'
-        ? 'film'
-        : type === 'anime' || raw?.type === 'anime' || /anim/i.test(genre ?? '')
-          ? 'anime'
-          : 'serie';
-    const synopsis =
-      ((raw?.descr as string) ||
-        (raw?.description as string) ||
-        indexedFallback?.descr ||
-        null)?.trim() || null;
-
-    const item: DetailItem = {
-      id: String(id),
-      titre: matchedByExactId
-        ? String(raw?.titre ?? indexedFallback?.titre ?? '')
-        : String(indexedFallback?.titre ?? ''),
-      descr: synopsis,
-      qualite: (matchedByExactId ? (raw?.qualite as string) : indexedFallback?.qualite) || null,
-      langue: (matchedByExactId ? (raw?.langue as string) : indexedFallback?.langue) || null,
-      type: resolvedType,
-      tmdbId:
-        (matchedByExactId && raw?.tmdbId ? String(raw.tmdbId) : indexedFallback?.tmdbId) || null,
-      poster:
-        (matchedByExactId ? (raw?.poster as string) : null) || indexedFallback?.poster || null,
-      trailer:
-        (matchedByExactId ? (raw?.trailer as string) : null) || indexedFallback?.trailer || null,
-      backdrop:
-        (matchedByExactId ? ((raw?.backdrop as string) || (raw?.baggio as string)) : null) ||
-        indexedFallback?.backdrop ||
-        null,
-      genre,
-      annee:
-        matchedByExactId && raw?.annee
-          ? Number(raw.annee)
-          : indexedFallback?.annee ?? null,
-      saison: (raw?.saison as string | number | null) ?? null,
-    };
-
-    const allowExtrasFromJson = Boolean(
-      json?.item &&
-        (String(json.item.id ?? '') === id ||
-          (indexedFallback?.tmdbId &&
-            String(json.item.tmdbId ?? '') === String(indexedFallback.tmdbId)))
-    );
-
-    const cast: CastMember[] = allowExtrasFromJson
-      ? (json?.cast ?? []).slice(0, 18).map((c) => ({
-          nom: String(c.nom ?? ''),
-          photo: (c.photo as string) || null,
-          role: (c.role as string) || null,
-        }))
-      : [];
-
-    const related: Item[] = allowExtrasFromJson
-      ? (json?.related ?? []).slice(0, 12).map((r) => {
-          const relItem: Item = {
-            id: String(r.id ?? ''),
-            titre: String(r.titre ?? ''),
-            poster: (r.poster as string) || null,
-            qualite: null,
-            langue: null,
-            item_type: resolvedType,
-            saison: null,
-            annee: r.annee ? Number(r.annee) : null,
-            tmdbId: r.tmdbId ? String(r.tmdbId) : null,
-          };
-          indexCatalogEntry({
-            id: relItem.id,
-            titre: relItem.titre,
-            poster: relItem.poster,
-            backdrop: null,
-            descr: null,
-            trailer: null,
-            genre: null,
-            annee: relItem.annee ?? null,
-            langue: null,
-            qualite: null,
-            tmdbId: relItem.tmdbId ?? null,
-            item_type: resolvedType,
-            source: resolvedType === 'film' ? 'films' : 'series',
-          });
-          return relItem;
-        })
-      : [];
-
-    const episodes: Episode[] = allowExtrasFromJson
-      ? (json?.episodes ?? []).map((e, idx) => ({
-          saison: Number(e.saison) || 1,
-          episode: Number(e.episode) || idx + 1,
-          titre: (e.titre as string) || `Épisode ${Number(e.episode) || idx + 1}`,
-          url: (e.url as string) || null,
-        }))
-      : [];
-
-    const result = { item, cast, related, episodes, live: true };
-    return setCached(cacheKey, result, 180_000);
-  } catch (err) {
-    recordErrorLog({
-      level: 'warn',
-      source: 'upstream',
-      message: `Échec de récupération fiche détail (${type}/${id})`,
-      route: `/api/details/${type}/${id}`,
-      err,
-    });
-    const fb = buildFallbackDetail(type, id);
-    return { ...fb, live: false };
-  }
+  });
 }
 
 const clientErrorRateMap = new Map<string, { count: number; resetAt: number }>();
@@ -1714,6 +1775,10 @@ function allowClientErrorReport(ip: string): boolean {
 
 export async function createApiApp(): Promise<express.Express> {
   const app = express();
+  app.disable('x-powered-by');
+  app.set('trust proxy', 1);
+  app.use(securityHeadersMiddleware);
+  app.use('/api', antiBotAndRateLimitMiddleware);
 
   app.get('/api/health', (_req, res) => {
     res.json({
@@ -1746,6 +1811,8 @@ export async function createApiApp(): Promise<express.Express> {
   );
 
   app.use(express.json({ limit: '4mb' }));
+  app.use('/api', csrfOriginCheckMiddleware);
+  app.use('/api', payloadSanitizerMiddleware);
 
   app.use('/api', (req, res, next) => {
     res.on('finish', () => {
@@ -1823,15 +1890,83 @@ export async function createApiApp(): Promise<express.Express> {
     });
   });
 
+  app.get('/api/auth/captcha', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(createCaptchaChallenge(getClientIp(req)));
+  });
+
   app.post('/api/auth/login', async (req, res) => {
+    if (isHoneypotTriggered(req.body)) {
+      res.status(400).json({ error: 'Validation du formulaire échouée.' });
+      return;
+    }
+
     const email = String(req.body?.email ?? '').trim().toLowerCase();
     const password = String(req.body?.password ?? '');
+    const clientIp = getClientIp(req);
+
+    const lockState = checkLoginLockout(email, clientIp);
+    if (lockState.locked) {
+      const mins = Math.max(1, Math.ceil(lockState.retryAfterSeconds / 60));
+      res.setHeader('Retry-After', String(lockState.retryAfterSeconds));
+      res.status(429).json({
+        error: `Compte temporairement verrouillé après 3 tentatives échouées. Réessayez dans ${mins} minute${mins > 1 ? 's' : ''}.`,
+        locked: true,
+        remainingAttempts: 0,
+        retryAfterSeconds: lockState.retryAfterSeconds,
+      });
+      return;
+    }
+
+    const captchaCheck = verifyCaptchaChallenge({
+      captchaToken: req.body?.captchaToken,
+      captchaAnswer: req.body?.captchaAnswer,
+      ip: clientIp,
+    });
+    if (!captchaCheck.ok) {
+      res.status(400).json({ error: captchaCheck.error || 'Code CAPTCHA invalide.' });
+      return;
+    }
+
+    const handleFailedCredentials = (baseMessage: string) => {
+      const nextLock = recordLoginFailure(email, clientIp);
+      if (nextLock.locked) {
+        recordErrorLog({
+          level: 'warn',
+          source: 'security',
+          message: `Verrouillage connexion 15 min après 3 échecs (${email || 'email vide'})`,
+          route: req.originalUrl,
+          method: req.method,
+          statusCode: 429,
+          userAgent: String(req.headers['user-agent'] ?? ''),
+        });
+        res.setHeader('Retry-After', String(nextLock.retryAfterSeconds));
+        res.status(429).json({
+          error:
+            'Trop de tentatives incorrectes (3/3). Connexion bloquée pendant 15 minutes pour protéger votre compte.',
+          locked: true,
+          remainingAttempts: 0,
+          retryAfterSeconds: nextLock.retryAfterSeconds,
+        });
+        return;
+      }
+      res.status(401).json({
+        error: `${baseMessage} (${nextLock.remainingAttempts} tentative${nextLock.remainingAttempts > 1 ? 's' : ''} restante${nextLock.remainingAttempts > 1 ? 's' : ''} avant verrouillage).`,
+        locked: false,
+        remainingAttempts: nextLock.remainingAttempts,
+      });
+    };
+
+    if (!email || !password) {
+      handleFailedCredentials('Veuillez saisir votre email et votre mot de passe.');
+      return;
+    }
 
     if (isSupabaseEnabled()) {
       const sb = createAnonClient();
       const { data, error } = await sb.auth.signInWithPassword({ email, password });
       if (error || !data.session) {
-        res.status(401).json({ error: error?.message || 'Identifiants incorrects.' });
+        handleFailedCredentials(error?.message || 'Identifiants incorrects.');
         return;
       }
       const token = data.session.access_token;
@@ -1850,19 +1985,15 @@ export async function createApiApp(): Promise<express.Express> {
         });
         return;
       }
-      res.cookie('tapenaka_session', token, {
-        httpOnly: true,
-        sameSite: 'lax',
-        path: '/',
-        maxAge: 30 * 86_400_000,
-      });
+      clearLoginFailures(email, clientIp);
+      res.cookie('tapenaka_session', token, getSessionCookieOptions(req));
       res.json({ token, user: enrichUserProfile(resolved.user) });
       return;
     }
 
     const user = db.users.find((u) => u.email.toLowerCase() === email);
     if (!user || user.passwordHash !== hashPassword(password)) {
-      res.status(401).json({ error: 'Identifiants incorrects. Vérifiez votre email et mot de passe.' });
+      handleFailedCredentials('Identifiants incorrects.');
       return;
     }
     const ban = getUserBanInfo(user.id);
@@ -1880,15 +2011,11 @@ export async function createApiApp(): Promise<express.Express> {
       });
       return;
     }
+    clearLoginFailures(email, clientIp);
     const token = crypto.randomBytes(24).toString('hex');
     db.sessions.push({ token, userId: user.id, createdAt: new Date().toISOString() });
     saveDb(db);
-    res.cookie('tapenaka_session', token, {
-      httpOnly: true,
-      sameSite: 'lax',
-      path: '/',
-      maxAge: 30 * 86_400_000,
-    });
+    res.cookie('tapenaka_session', token, getSessionCookieOptions(req));
     res.json({
       token,
       user: enrichUserProfile({
@@ -1921,12 +2048,7 @@ export async function createApiApp(): Promise<express.Express> {
     const token = crypto.randomBytes(24).toString('hex');
     db.sessions.push({ token, userId: user.id, createdAt: new Date().toISOString() });
     saveDb(db);
-    res.cookie('tapenaka_session', token, {
-      httpOnly: true,
-      sameSite: 'lax',
-      path: '/',
-      maxAge: 30 * 86_400_000,
-    });
+    res.cookie('tapenaka_session', token, getSessionCookieOptions(req));
     res.json({
       token,
       user: enrichUserProfile({
@@ -2020,12 +2142,7 @@ export async function createApiApp(): Promise<express.Express> {
 
         const token = signInData.session.access_token;
         const resolved = await sbResolveUser(token);
-        res.cookie('tapenaka_session', token, {
-          httpOnly: true,
-          sameSite: 'lax',
-          path: '/',
-          maxAge: 30 * 86_400_000,
-        });
+        res.cookie('tapenaka_session', token, getSessionCookieOptions(params.req));
         res.json({
           token,
           user: resolved?.user ? enrichUserProfile(resolved.user) : null,
@@ -2080,12 +2197,7 @@ export async function createApiApp(): Promise<express.Express> {
       }
       const token = data.session.access_token;
       const resolved = await sbResolveUser(token);
-      res.cookie('tapenaka_session', token, {
-        httpOnly: true,
-        sameSite: 'lax',
-        path: '/',
-        maxAge: 30 * 86_400_000,
-      });
+      res.cookie('tapenaka_session', token, getSessionCookieOptions(params.req));
       res.json({ token, user: resolved?.user ? enrichUserProfile(resolved.user) : null });
       return true;
     }
@@ -2112,12 +2224,7 @@ export async function createApiApp(): Promise<express.Express> {
     if (isSmtpReady()) {
       void sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
     }
-    res.cookie('tapenaka_session', token, {
-      httpOnly: true,
-      sameSite: 'lax',
-      path: '/',
-      maxAge: 30 * 86_400_000,
-    });
+    res.cookie('tapenaka_session', token, getSessionCookieOptions(params.req));
     res.json({
       token,
       user: enrichUserProfile({
@@ -2133,6 +2240,20 @@ export async function createApiApp(): Promise<express.Express> {
   }
 
   app.post('/api/auth/signup', async (req, res) => {
+    if (isHoneypotTriggered(req.body)) {
+      res.status(400).json({ error: 'Validation du formulaire échouée.' });
+      return;
+    }
+    const captchaCheck = verifyCaptchaChallenge({
+      captchaToken: req.body?.captchaToken,
+      captchaAnswer: req.body?.captchaAnswer,
+      ip: getClientIp(req),
+    });
+    if (!captchaCheck.ok) {
+      res.status(400).json({ error: captchaCheck.error || 'Code CAPTCHA invalide.' });
+      return;
+    }
+
     const email = String(req.body?.email ?? '').trim().toLowerCase();
     const password = String(req.body?.password ?? '');
     const usernameCheck = validateUsernameFormat(String(req.body?.username ?? ''));
@@ -2251,11 +2372,11 @@ export async function createApiApp(): Promise<express.Express> {
       return;
     }
 
-    if (pending.attempts >= 5) {
+    if (pending.attempts >= 3) {
       delete pendingSignups[email];
       savePendingSignups();
       res.status(429).json({
-        error: 'Trop de tentatives incorrectes. Veuillez demander un nouveau code.',
+        error: 'Trop de tentatives incorrectes (3/3). Veuillez demander un nouveau code.',
       });
       return;
     }
@@ -2263,7 +2384,7 @@ export async function createApiApp(): Promise<express.Express> {
     if (pending.code !== code) {
       pending.attempts += 1;
       savePendingSignups();
-      const remaining = Math.max(0, 5 - pending.attempts);
+      const remaining = Math.max(0, 3 - pending.attempts);
       res.status(400).json({
         error:
           remaining > 0
@@ -2389,12 +2510,7 @@ export async function createApiApp(): Promise<express.Express> {
         appUrl: resolveAppOrigin(req),
       });
     }
-    res.cookie('tapenaka_session', sessionToken, {
-      httpOnly: true,
-      sameSite: 'lax',
-      path: '/',
-      maxAge: 30 * 86_400_000,
-    });
+    res.cookie('tapenaka_session', sessionToken, getSessionCookieOptions(req));
     res.json({
       token: sessionToken,
       user: enrichUserProfile({
@@ -2423,6 +2539,20 @@ export async function createApiApp(): Promise<express.Express> {
   });
 
   app.post('/api/auth/forgot-password', async (req, res) => {
+    if (isHoneypotTriggered(req.body)) {
+      res.status(400).json({ error: 'Validation du formulaire échouée.' });
+      return;
+    }
+    const captchaCheck = verifyCaptchaChallenge({
+      captchaToken: req.body?.captchaToken,
+      captchaAnswer: req.body?.captchaAnswer,
+      ip: getClientIp(req),
+    });
+    if (!captchaCheck.ok) {
+      res.status(400).json({ error: captchaCheck.error || 'Code CAPTCHA invalide.' });
+      return;
+    }
+
     const email = String(req.body?.email ?? '').trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       res.status(400).json({ error: 'Veuillez saisir une adresse email valide.' });
@@ -2581,11 +2711,11 @@ export async function createApiApp(): Promise<express.Express> {
       return;
     }
 
-    if (challenge.attempts >= 5) {
+    if (challenge.attempts >= 3) {
       delete otpChallenges[key];
       saveOtpChallenges();
       res.status(429).json({
-        error: 'Trop de tentatives incorrectes. Veuillez demander un nouveau code.',
+        error: 'Trop de tentatives incorrectes (3/3). Veuillez demander un nouveau code.',
       });
       return;
     }
@@ -2593,7 +2723,7 @@ export async function createApiApp(): Promise<express.Express> {
     if (challenge.code !== code) {
       challenge.attempts += 1;
       saveOtpChallenges();
-      const remaining = Math.max(0, 5 - challenge.attempts);
+      const remaining = Math.max(0, 3 - challenge.attempts);
       res.status(400).json({
         error:
           remaining > 0
@@ -2696,23 +2826,52 @@ export async function createApiApp(): Promise<express.Express> {
   // ─────────────────────────────────────────────────────────────────────────
   app.get('/api/home', async (req, res) => {
     const auth = await resolveAuth(req);
-    const [sliderRes, catRes] = await Promise.all([
-      fetchUpstreamSlider(),
-      fetchUpstreamCatalogue({
-        q: '',
-        type: 'all',
-        genre: '',
-        year: '',
-        lang: '',
-        sort: 'recent',
-        page: 1,
-      }),
-    ]);
 
-    const latest = catRes.items.slice(0, 12);
-    const week = isSupabaseEnabled()
-      ? await sbGetRankings(auth?.sbClient ?? null, 7)
-      : computeLocalRankings(7);
+    const getHomeBase = async () => {
+      const cachedBase = getCached<{
+        upstreamStatus: 'live' | 'fallback';
+        slider: Slide[];
+        latest: Item[];
+        week: RankingEntry[];
+      }>('home:base:v1');
+      if (cachedBase) return cachedBase;
+
+      return coalesceUpstream('home:base:v1', async () => {
+        const recheck = getCached<{
+          upstreamStatus: 'live' | 'fallback';
+          slider: Slide[];
+          latest: Item[];
+          week: RankingEntry[];
+        }>('home:base:v1');
+        if (recheck) return recheck;
+
+        const [sliderRes, catRes, week] = await Promise.all([
+          fetchUpstreamSlider(),
+          fetchUpstreamCatalogue({
+            q: '',
+            type: 'all',
+            genre: '',
+            year: '',
+            lang: '',
+            sort: 'recent',
+            page: 1,
+          }),
+          isSupabaseEnabled() ? sbGetRankings(null, 7) : Promise.resolve(computeLocalRankings(7)),
+        ]);
+
+        const basePayload = {
+          upstreamStatus: (sliderRes.live || catRes.upstreamStatus === 'live' ? 'live' : 'fallback') as
+            | 'live'
+            | 'fallback',
+          slider: sliderRes.items,
+          latest: catRes.items.slice(0, 12),
+          week,
+        };
+        return setCached('home:base:v1', basePayload, 30_000, 180_000);
+      });
+    };
+
+    const base = await getHomeBase();
 
     let forYou: Item[] = [];
     let continueWatching: WatchProgress[] = [];
@@ -2804,18 +2963,46 @@ export async function createApiApp(): Promise<express.Express> {
       }
     }
 
+    res.setHeader('Vary', 'Authorization, Cookie');
+    if (!auth && !extractToken(req)) {
+      res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=120, stale-while-revalidate=300');
+    } else {
+      res.setHeader('Cache-Control', 'private, no-store');
+    }
+
     res.json({
-      upstreamStatus: sliderRes.live || catRes.upstreamStatus === 'live' ? 'live' : 'fallback',
-      slider: sliderRes.items,
-      latest,
+      upstreamStatus: base.upstreamStatus,
+      slider: base.slider,
+      latest: base.latest,
       forYou,
       continueWatching,
       friendsActivity,
-      week,
+      week: base.week,
     });
   });
 
   app.get('/api/catalogue', async (req, res) => {
+    const auth = await resolveAuth(req);
+    const isAdmin = auth?.user.role === 'admin';
+    const maxPageForRole = isAdmin ? 250 : auth ? 10 : 2;
+    const requestedPage = Math.max(1, Number(req.query.page) || 1);
+
+    if (!auth && requestedPage > 2) {
+      res.status(401).json({
+        error: 'Connectez-vous pour consulter au-delà de la page 2.',
+        requiresAuth: true,
+        maxPage: 2,
+      });
+      return;
+    }
+    if (auth && !isAdmin && requestedPage > 10) {
+      res.status(403).json({
+        error: 'La navigation est limitée à 10 pages maximum pour protéger le catalogue.',
+        maxPage: 10,
+      });
+      return;
+    }
+
     const filters: CatalogueFilters = {
       q: String(req.query.q ?? '').trim().slice(0, 100),
       type: ['all', 'film', 'serie', 'anime'].includes(String(req.query.type))
@@ -2827,14 +3014,30 @@ export async function createApiApp(): Promise<express.Express> {
       sort: ['recent', 'pertinence', 'annee_desc'].includes(String(req.query.sort))
         ? (String(req.query.sort) as CatalogueFilters['sort'])
         : 'recent',
-      page: Math.min(10000, Math.max(1, Number(req.query.page) || 1)),
+      page: Math.min(maxPageForRole, requestedPage),
     };
     const page = await fetchUpstreamCatalogue(filters);
-    res.json(page);
+
+    res.setHeader('Vary', 'Authorization, Cookie');
+    if (auth) {
+      res.setHeader('Cache-Control', 'private, no-cache');
+    } else {
+      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
+    }
+
+    res.json(
+      auth && !isAdmin
+        ? {
+            ...page,
+            pages: Math.min(page.pages, 10),
+          }
+        : page
+    );
   });
 
   app.get('/api/catalogue/genres', async (_req, res) => {
     const genres = await fetchUpstreamGenres();
+    res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=1800, stale-while-revalidate=3600');
     res.json({ genres });
   });
 
@@ -2874,34 +3077,60 @@ export async function createApiApp(): Promise<express.Express> {
       : 'film';
     const id = String(req.params.id).slice(0, 24);
     const auth = await resolveAuth(req);
+    const tmdbApiKey = await getTmdbApiKey();
+    const detailCacheKey = `enriched-detail:v1:${type}:${id}:${tmdbApiKey.slice(0, 6)}`;
 
-    const detail = await fetchUpstreamDetail(type, id);
-    if (!detail.item) {
-      res.status(404).json({ error: 'Titre introuvable' });
-      return;
+    type CachedDetailPayload = Omit<DetailResponse, 'rating'>;
+    let baseDetail = getCached<CachedDetailPayload>(detailCacheKey);
+
+    if (!baseDetail) {
+      baseDetail = await coalesceUpstream<CachedDetailPayload | null>(detailCacheKey, async () => {
+        const recheck = getCached<CachedDetailPayload>(detailCacheKey);
+        if (recheck) return recheck;
+
+        const detail = await fetchUpstreamDetail(type, id);
+        if (!detail.item) {
+          return null;
+        }
+
+        const enriched = await enrichDetailWithTmdb({
+          type: detail.item.type === 'film' ? 'film' : type,
+          item: detail.item,
+          upstreamEpisodes: detail.episodes,
+          apiKey: tmdbApiKey,
+        });
+
+        const firstGenre = enriched.item.genre?.split(',')[0]?.trim() ?? '';
+        let sameGenre: Item[] = [];
+        if (firstGenre) {
+          const cat = await fetchUpstreamCatalogue({
+            q: '',
+            type,
+            genre: firstGenre,
+            year: '',
+            lang: '',
+            sort: 'recent',
+            page: 1,
+          });
+          sameGenre = cat.items.filter((x) => x.id !== String(enriched.item.id)).slice(0, 6);
+        }
+
+        const built = {
+          item: enriched.item,
+          cast: detail.cast,
+          related: detail.related,
+          sameGenre,
+          episodes: enriched.episodes,
+          seasonsMeta: enriched.seasonsMeta,
+          tmdbRating: enriched.tmdbRating,
+        };
+        return setCached(detailCacheKey, built, 180_000, 900_000);
+      });
     }
 
-    const tmdbApiKey = await getTmdbApiKey();
-    const enriched = await enrichDetailWithTmdb({
-      type: detail.item.type === 'film' ? 'film' : type,
-      item: detail.item,
-      upstreamEpisodes: detail.episodes,
-      apiKey: tmdbApiKey,
-    });
-
-    const firstGenre = enriched.item.genre?.split(',')[0]?.trim() ?? '';
-    let sameGenre: Item[] = [];
-    if (firstGenre) {
-      const cat = await fetchUpstreamCatalogue({
-        q: '',
-        type,
-        genre: firstGenre,
-        year: '',
-        lang: '',
-        sort: 'recent',
-        page: 1,
-      });
-      sameGenre = cat.items.filter((x) => x.id !== String(enriched.item.id)).slice(0, 6);
+    if (!baseDetail) {
+      res.status(404).json({ error: 'Titre introuvable' });
+      return;
     }
 
     const itemKey = `${type}:${id}`;
@@ -2915,14 +3144,21 @@ export async function createApiApp(): Promise<express.Express> {
       ? (itemRatings.find((r) => r.userId === auth.user.id)?.score ?? null)
       : null;
 
+    res.setHeader('Vary', 'Authorization, Cookie');
+    if (!auth && !extractToken(req)) {
+      res.setHeader('Cache-Control', 'public, max-age=120, s-maxage=600, stale-while-revalidate=1200');
+    } else {
+      res.setHeader('Cache-Control', 'private, no-cache');
+    }
+
     res.json({
-      item: enriched.item,
-      cast: detail.cast,
-      related: detail.related,
-      sameGenre,
-      episodes: enriched.episodes,
-      seasonsMeta: enriched.seasonsMeta,
-      tmdbRating: enriched.tmdbRating,
+      item: baseDetail.item,
+      cast: baseDetail.cast,
+      related: baseDetail.related,
+      sameGenre: baseDetail.sameGenre,
+      episodes: baseDetail.episodes,
+      seasonsMeta: baseDetail.seasonsMeta,
+      tmdbRating: baseDetail.tmdbRating,
       rating: { average, count, myScore },
     });
   });
@@ -2994,6 +3230,7 @@ export async function createApiApp(): Promise<express.Express> {
             item_type: rawItem.item_type,
             item: rawItem,
           });
+          invalidateSbMemberCache(auth.user.id);
         } catch {
           // Non-fatal if Supabase watch_events insert fails transiently
         }
@@ -3042,12 +3279,10 @@ export async function createApiApp(): Promise<express.Express> {
       db.watchProgress[auth.user.id] = list.slice(0, 5);
       saveDb(db);
 
-      res.cookie('streamwall_watch', auth.token, {
-        httpOnly: true,
-        sameSite: 'lax',
+      res.cookie('streamwall_watch', auth.token, getSessionCookieOptions(req, {
         path: '/api/public/watch',
         maxAge: 3600 * 1000,
-      });
+      }));
     }
 
     const embedProvider = await getEmbedProvider();
@@ -3175,7 +3410,7 @@ export async function createApiApp(): Promise<express.Express> {
   <div class="box">
     <h2>Embed temporairement indisponible</h2>
     <p>Le fournisseur d’embed ne répond pas dans le délai imparti. Vérifiez le champ « Embed provider » dans l’onglet Administration.</p>
-    <code>${embedProvider}/${splat}</code>
+    <code>${escapeHtml(embedProvider)}/${escapeHtml(splat)}</code>
   </div>
 </body>
 </html>`);
@@ -3296,6 +3531,7 @@ export async function createApiApp(): Promise<express.Express> {
           .eq('user_id', auth.user.id)
           .eq('item_type', item.item_type)
           .eq('item_id', item.id);
+        invalidateSbMemberCache(auth.user.id);
         res.json({ saved: false, favorites: [] });
         return;
       }
@@ -3305,6 +3541,7 @@ export async function createApiApp(): Promise<express.Express> {
         item_id: item.id,
         item,
       });
+      invalidateSbMemberCache(auth.user.id);
       res.json({ saved: true, favorites: [] });
       return;
     }
@@ -3570,11 +3807,11 @@ export async function createApiApp(): Promise<express.Express> {
       return;
     }
 
-    if (challenge.attempts >= 5) {
+    if (challenge.attempts >= 3) {
       delete otpChallenges[key];
       saveOtpChallenges();
       res.status(429).json({
-        error: 'Trop de tentatives incorrectes. Veuillez redemander un code.',
+        error: 'Trop de tentatives incorrectes (3/3). Veuillez redemander un code.',
       });
       return;
     }
@@ -3582,7 +3819,7 @@ export async function createApiApp(): Promise<express.Express> {
     if (challenge.code !== code) {
       challenge.attempts += 1;
       saveOtpChallenges();
-      const remaining = Math.max(0, 5 - challenge.attempts);
+      const remaining = Math.max(0, 3 - challenge.attempts);
       res.status(400).json({
         error:
           remaining > 0
@@ -3783,11 +4020,11 @@ export async function createApiApp(): Promise<express.Express> {
       return;
     }
 
-    if (challenge.attempts >= 5) {
+    if (challenge.attempts >= 3) {
       delete otpChallenges[key];
       saveOtpChallenges();
       res.status(429).json({
-        error: 'Trop de tentatives incorrectes. Veuillez redemander un code.',
+        error: 'Trop de tentatives incorrectes (3/3). Veuillez redemander un code.',
       });
       return;
     }
@@ -3795,7 +4032,7 @@ export async function createApiApp(): Promise<express.Express> {
     if (challenge.code !== code) {
       challenge.attempts += 1;
       saveOtpChallenges();
-      const remaining = Math.max(0, 5 - challenge.attempts);
+      const remaining = Math.max(0, 3 - challenge.attempts);
       res.status(400).json({
         error:
           remaining > 0
@@ -3934,6 +4171,13 @@ export async function createApiApp(): Promise<express.Express> {
     const { type, id } = req.params;
     const auth = await resolveAuth(req);
 
+    res.setHeader('Vary', 'Authorization, Cookie');
+    if (!auth && !extractToken(req)) {
+      res.setHeader('Cache-Control', 'public, max-age=15, stale-while-revalidate=45');
+    } else {
+      res.setHeader('Cache-Control', 'private, no-cache');
+    }
+
     if (isSupabaseEnabled()) {
       const comments = (await sbGetComments(auth?.sbClient ?? null, type, id)).map((c) => ({
         ...c,
@@ -3964,10 +4208,10 @@ export async function createApiApp(): Promise<express.Express> {
     const itemType = (['film', 'serie', 'anime'].includes(req.body?.itemType)
       ? req.body.itemType
       : 'film') as ItemType;
-    const itemId = String(req.body?.itemId ?? '').trim();
-    const itemTitle = String(req.body?.itemTitle ?? '').trim().slice(0, 120);
-    const body = String(req.body?.body ?? '').trim().slice(0, 1000);
-    const parentId = req.body?.parentId ? String(req.body.parentId) : null;
+    const itemId = stripDangerousText(req.body?.itemId ?? '', 64);
+    const itemTitle = stripDangerousText(req.body?.itemTitle ?? '', 120);
+    const body = stripDangerousText(req.body?.body ?? '', 1000);
+    const parentId = req.body?.parentId ? stripDangerousText(req.body.parentId, 80) : null;
 
     if (!itemId || !body) {
       res.status(400).json({ error: 'Commentaire vide' });
@@ -4061,6 +4305,7 @@ export async function createApiApp(): Promise<express.Express> {
         res.status(400).json({ error: error.message });
         return;
       }
+      invalidateSbCommentsCache(itemType, itemId);
       await dispatchCommentNotifications();
       res.json({
         comment: {
@@ -4115,6 +4360,7 @@ export async function createApiApp(): Promise<express.Express> {
         res.status(403).json({ error: error.message });
         return;
       }
+      invalidateSbCommentsCache();
       res.json({ ok: true });
       return;
     }
@@ -4184,6 +4430,8 @@ export async function createApiApp(): Promise<express.Express> {
           ],
           { onConflict: 'user_id,friend_id', ignoreDuplicates: true }
         );
+      invalidateSbMemberCache(userA);
+      invalidateSbMemberCache(userB);
       return;
     }
 
@@ -4210,6 +4458,8 @@ export async function createApiApp(): Promise<express.Express> {
       await writer.from('friendships').delete().eq('user_id', userA).eq('friend_id', userB);
       await writer.from('friendships').delete().eq('user_id', userB).eq('friend_id', userA);
       clearFriendRequestsBetween(userA, userB);
+      invalidateSbMemberCache(userA);
+      invalidateSbMemberCache(userB);
       return;
     }
 
@@ -4588,6 +4838,7 @@ export async function createApiApp(): Promise<express.Express> {
           .eq('role', 'admin');
       }
       invalidateSbUserCache({ userId: req.params.userId });
+      invalidateSbAdminOverviewCache();
       res.json({ ok: true, role: nextRole === 'admin' ? 'admin' : 'member' });
       return;
     }
@@ -4649,10 +4900,12 @@ export async function createApiApp(): Promise<express.Express> {
 
     if (shouldBan) {
       invalidateSbUserCache({ userId: targetId });
+      invalidateSbAdminOverviewCache();
       const record = banUser(targetId, auth.user.id, reason);
       res.json({ ok: true, banned: true, bannedAt: record.bannedAt, banReason: record.reason });
     } else {
       invalidateSbUserCache({ userId: targetId });
+      invalidateSbAdminOverviewCache();
       unbanUser(targetId);
       res.json({ ok: true, banned: false, bannedAt: null, banReason: null });
     }
@@ -4744,10 +4997,12 @@ export async function createApiApp(): Promise<express.Express> {
     cleanupUserFriendRequests(targetId);
     deletePushSubscriptionsForUser(targetId);
     cleanupUserEmailCooldown(targetId);
+    invalidateSbAdminOverviewCache();
     res.json({ ok: true });
   });
 
   app.get('/api/site/config', async (_req, res) => {
+    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
     res.json(await getSiteConfig());
   });
 
@@ -5366,6 +5621,7 @@ export async function createApiApp(): Promise<express.Express> {
   // SUBSCRIPTION PLANS, CRYPTOGATE & MANUAL PAYMENTS, MANUAL PRO ASSIGNMENT
   // ─────────────────────────────────────────────────────────────────────────
   app.get('/api/billing/plans', (_req, res) => {
+    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
     res.json({
       plans: listPlans(false),
       config: getBillingConfig(),
@@ -5501,6 +5757,7 @@ export async function createApiApp(): Promise<express.Express> {
   });
 
   app.get('/api/push/vapid-public-key', (_req, res) => {
+    res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=1800, stale-while-revalidate=3600');
     res.json({ publicKey: getVapidPublicKey() });
   });
 
@@ -5570,6 +5827,7 @@ export async function createApiApp(): Promise<express.Express> {
   });
 
   app.get('/api/privacy', (_req, res) => {
+    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
     res.json({ privacy: getPrivacyPageConfig() });
   });
 
@@ -5741,6 +5999,7 @@ export async function createApiApp(): Promise<express.Express> {
   // CONFIGURABLE POPUPS (PUBLIC + ADMIN)
   // ─────────────────────────────────────────────────────────────────────────
   app.get('/api/popups/active', (_req, res) => {
+    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
     res.json({ popups: listActivePopups() });
   });
 
@@ -5910,9 +6169,9 @@ export async function createApiApp(): Promise<express.Express> {
       return;
     }
 
-    const itemId = String(req.body?.itemId ?? '').trim();
-    const itemTitle = String(req.body?.itemTitle ?? '').trim();
-    const reason = String(req.body?.reason ?? '').trim();
+    const itemId = stripDangerousText(req.body?.itemId ?? '', 80);
+    const itemTitle = stripDangerousText(req.body?.itemTitle ?? '', 180);
+    const reason = stripDangerousText(req.body?.reason ?? '', 120);
     if (!itemId || !itemTitle || !reason) {
       res.status(400).json({ error: 'Informations du signalement incomplètes.' });
       return;
@@ -5934,7 +6193,7 @@ export async function createApiApp(): Promise<express.Express> {
       season,
       episode,
       reason,
-      comment: String(req.body?.comment ?? ''),
+      comment: stripDangerousText(req.body?.comment ?? '', 400),
       userId: auth.user.id,
       username: auth.user.username,
     });
@@ -5971,7 +6230,7 @@ export async function createApiApp(): Promise<express.Express> {
       return;
     }
 
-    const title = String(req.body?.title ?? '').trim();
+    const title = stripDangerousText(req.body?.title ?? '', 160);
     if (title.length < 2) {
       res.status(400).json({ error: 'Veuillez saisir un titre d’au moins 2 caractères.' });
       return;
@@ -5985,10 +6244,10 @@ export async function createApiApp(): Promise<express.Express> {
       mediaType: req.body?.mediaType,
       title,
       year: yearRaw,
-      tmdbId: req.body?.tmdbId ? String(req.body.tmdbId) : null,
+      tmdbId: req.body?.tmdbId ? stripDangerousText(req.body.tmdbId, 24) : null,
       tmdbPosterUrl: req.body?.tmdbPosterUrl ? String(req.body.tmdbPosterUrl) : null,
-      tmdbOverview: req.body?.tmdbOverview ? String(req.body.tmdbOverview) : null,
-      note: String(req.body?.note ?? ''),
+      tmdbOverview: req.body?.tmdbOverview ? stripDangerousText(req.body.tmdbOverview, 600) : null,
+      note: stripDangerousText(req.body?.note ?? '', 400),
       userId: auth.user.id,
       username: auth.user.username,
       viewerKey,

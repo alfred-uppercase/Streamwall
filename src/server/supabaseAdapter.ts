@@ -16,6 +16,7 @@ import {
   type UserProfile,
   type WatchEventRecord,
 } from '../shared/types.ts';
+import { InFlightCoalescer, TimedLruCache } from './cacheUtils.ts';
 
 function getSupabaseEnv() {
   const url = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
@@ -96,6 +97,47 @@ export function createAdminClient(): SupabaseClient | null {
 const SB_USER_CACHE_TTL_MS = 30_000;
 const SB_USER_NEGATIVE_TTL_MS = 15_000;
 const sbUserCache = new Map<string, { expiresAt: number; user: UserProfile | null }>();
+const sbCoalescer = new InFlightCoalescer();
+
+const sbRankingsCache = new TimedLruCache<RankingEntry[]>(20);
+const sbMemberCache = new TimedLruCache<{
+  profile: UserProfile;
+  favorites: Item[];
+  history: WatchEventRecord[];
+  friends: FriendRecord[];
+}>(500);
+const sbCommentsCache = new TimedLruCache<CommentRecord[]>(500);
+const sbAdminOverviewCache = new TimedLruCache<{
+  users: AdminUserSummary[];
+  top7: RankingEntry[];
+  top30: RankingEntry[];
+  source: 'supabase_auth' | 'supabase_rpc' | 'supabase_profiles';
+  warning: string | null;
+}>(8);
+
+export function invalidateSbRankingsCache(): void {
+  sbRankingsCache.clear();
+}
+
+export function invalidateSbMemberCache(userId?: string): void {
+  if (userId) {
+    sbMemberCache.delete(userId);
+  } else {
+    sbMemberCache.clear();
+  }
+}
+
+export function invalidateSbCommentsCache(itemType?: string, itemId?: string): void {
+  if (itemType && itemId) {
+    sbCommentsCache.delete(`${itemType}:${itemId}`);
+  } else {
+    sbCommentsCache.clear();
+  }
+}
+
+export function invalidateSbAdminOverviewCache(): void {
+  sbAdminOverviewCache.clear();
+}
 
 function hashTokenKey(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
@@ -131,6 +173,7 @@ export function invalidateSbUserCache(target?: { token?: string; userId?: string
         sbUserCache.delete(k);
       }
     }
+    sbMemberCache.delete(target.userId);
   }
 }
 
@@ -151,17 +194,18 @@ export async function sbResolveUser(
     if (hit) sbUserCache.delete(cacheKey);
   }
 
-  try {
-    const client = createUserClient(token);
-    const { data: authData, error } = await client.auth.getUser(token);
-    if (error || !authData.user) {
-      if (sbUserCache.size > 500) sbUserCache.clear();
-      sbUserCache.set(cacheKey, {
-        expiresAt: Date.now() + SB_USER_NEGATIVE_TTL_MS,
-        user: null,
-      });
-      return null;
-    }
+  return sbCoalescer.run(`auth:${cacheKey}`, async () => {
+    try {
+      const client = createUserClient(token);
+      const { data: authData, error } = await client.auth.getUser(token);
+      if (error || !authData.user) {
+        if (sbUserCache.size > 500) sbUserCache.clear();
+        sbUserCache.set(cacheKey, {
+          expiresAt: Date.now() + SB_USER_NEGATIVE_TTL_MS,
+          user: null,
+        });
+        return null;
+      }
 
     const uid = authData.user.id;
     const adminSb = createAdminClient();
@@ -229,16 +273,17 @@ export async function sbResolveUser(
       createdAt,
     };
 
-    if (sbUserCache.size > 500) sbUserCache.clear();
-    sbUserCache.set(cacheKey, {
-      expiresAt: Date.now() + SB_USER_CACHE_TTL_MS,
-      user,
-    });
+      if (sbUserCache.size > 500) sbUserCache.clear();
+      sbUserCache.set(cacheKey, {
+        expiresAt: Date.now() + SB_USER_CACHE_TTL_MS,
+        user,
+      });
 
-    return { client, user };
-  } catch {
-    return null;
-  }
+      return { client, user };
+    } catch {
+      return null;
+    }
+  });
 }
 
 const SB_SETTINGS_TTL_MS = 60_000;
@@ -265,122 +310,154 @@ function setSbCached<T>(key: string, value: T): T {
 export async function sbGetApiOrigin(fallbackOrigin: string): Promise<string> {
   const cached = getSbCached<string>('api_origin');
   if (cached) return cached;
-  try {
-    const sb = createAnonClient();
-    const { data } = await sb
-      .from('app_settings')
-      .select('value')
-      .eq('key', 'api_origin')
-      .maybeSingle();
-    if (data?.value && /^https?:\/\/[^/]+/.test(data.value)) {
-      return setSbCached('api_origin', data.value.replace(/\/+$/, ''));
+  return sbCoalescer.run('setting:api_origin', async () => {
+    const recheck = getSbCached<string>('api_origin');
+    if (recheck) return recheck;
+    try {
+      const sb = createAnonClient();
+      const { data } = await sb
+        .from('app_settings')
+        .select('value')
+        .eq('key', 'api_origin')
+        .maybeSingle();
+      if (data?.value && /^https?:\/\/[^/]+/.test(data.value)) {
+        return setSbCached('api_origin', data.value.replace(/\/+$/, ''));
+      }
+    } catch {
+      // Fall back gracefully
     }
-  } catch {
-    // Fall back gracefully
-  }
-  return setSbCached('api_origin', fallbackOrigin);
+    return setSbCached('api_origin', fallbackOrigin);
+  });
 }
 
 export async function sbGetEmbedProvider(fallbackProvider: string): Promise<string> {
   const cached = getSbCached<string>('embed_provider');
   if (cached) return cached;
-  try {
-    const sb = createAnonClient();
-    const { data } = await sb
-      .from('app_settings')
-      .select('value')
-      .eq('key', 'embed_provider')
-      .maybeSingle();
-    if (data?.value && /^https?:\/\/[^/]+/.test(data.value)) {
-      return setSbCached('embed_provider', data.value.replace(/\/+$/, ''));
+  return sbCoalescer.run('setting:embed_provider', async () => {
+    const recheck = getSbCached<string>('embed_provider');
+    if (recheck) return recheck;
+    try {
+      const sb = createAnonClient();
+      const { data } = await sb
+        .from('app_settings')
+        .select('value')
+        .eq('key', 'embed_provider')
+        .maybeSingle();
+      if (data?.value && /^https?:\/\/[^/]+/.test(data.value)) {
+        return setSbCached('embed_provider', data.value.replace(/\/+$/, ''));
+      }
+    } catch {
+      // Fall back gracefully
     }
-  } catch {
-    // Fall back gracefully
-  }
-  return setSbCached('embed_provider', fallbackProvider);
+    return setSbCached('embed_provider', fallbackProvider);
+  });
 }
 
 export async function sbGetTmdbApiKey(fallbackKey: string): Promise<string> {
   const cached = getSbCached<string>('tmdb_api_key');
   if (cached) return cached;
-  try {
-    const sb = createAnonClient();
-    const { data } = await sb
-      .from('app_settings')
-      .select('value')
-      .eq('key', 'tmdb_api_key')
-      .maybeSingle();
-    if (data?.value && String(data.value).trim()) {
-      return setSbCached('tmdb_api_key', String(data.value).trim());
+  return sbCoalescer.run('setting:tmdb_api_key', async () => {
+    const recheck = getSbCached<string>('tmdb_api_key');
+    if (recheck) return recheck;
+    try {
+      const sb = createAnonClient();
+      const { data } = await sb
+        .from('app_settings')
+        .select('value')
+        .eq('key', 'tmdb_api_key')
+        .maybeSingle();
+      if (data?.value && String(data.value).trim()) {
+        return setSbCached('tmdb_api_key', String(data.value).trim());
+      }
+    } catch {
+      // Fall back gracefully
     }
-  } catch {
-    // Fall back gracefully
-  }
-  return setSbCached('tmdb_api_key', fallbackKey);
+    return setSbCached('tmdb_api_key', fallbackKey);
+  });
 }
 
 export async function sbGetSiteConfig(fallback: SiteConfig): Promise<SiteConfig> {
   const cached = getSbCached<SiteConfig>('site_config');
   if (cached) return cached;
-  try {
-    const sb = createAdminClient() ?? createAnonClient();
-    const { data } = await sb
-      .from('app_settings')
-      .select('key,value')
-      .in('key', ['site_name', 'favicon_url']);
-    const out: SiteConfig = { ...fallback };
-    for (const row of (data ?? []) as { key: string; value: string }[]) {
-      if (row.key === 'site_name' && typeof row.value === 'string' && row.value.trim()) {
-        out.siteName = row.value.trim();
+  return sbCoalescer.run('setting:site_config', async () => {
+    const recheck = getSbCached<SiteConfig>('site_config');
+    if (recheck) return recheck;
+    try {
+      const sb = createAdminClient() ?? createAnonClient();
+      const { data } = await sb
+        .from('app_settings')
+        .select('key,value')
+        .in('key', ['site_name', 'favicon_url']);
+      const out: SiteConfig = { ...fallback };
+      for (const row of (data ?? []) as { key: string; value: string }[]) {
+        if (row.key === 'site_name' && typeof row.value === 'string' && row.value.trim()) {
+          out.siteName = row.value.trim();
+        }
+        if (row.key === 'favicon_url' && typeof row.value === 'string' && row.value.trim()) {
+          out.faviconUrl = row.value.trim();
+        }
       }
-      if (row.key === 'favicon_url' && typeof row.value === 'string' && row.value.trim()) {
-        out.faviconUrl = row.value.trim();
-      }
+      return setSbCached('site_config', out);
+    } catch {
+      return setSbCached('site_config', fallback);
     }
-    return setSbCached('site_config', out);
-  } catch {
-    return setSbCached('site_config', fallback);
-  }
+  });
 }
 
 export async function sbGetPlayerTemplates(): Promise<PlayerTemplates> {
   const cached = getSbCached<PlayerTemplates>('player_templates');
   if (cached) return cached;
-  const out = { ...DEFAULT_PLAYERS };
-  try {
-    const sb = createAnonClient();
-    const { data } = await sb
-      .from('app_settings')
-      .select('key,value')
-      .in('key', PLAYER_KEYS as unknown as string[]);
-    for (const row of (data ?? []) as { key: PlayerKey; value: string }[]) {
-      if (TEMPLATE_RE.test(row.value)) {
-        out[row.key] = row.value;
+  return sbCoalescer.run('setting:player_templates', async () => {
+    const recheck = getSbCached<PlayerTemplates>('player_templates');
+    if (recheck) return recheck;
+    const out = { ...DEFAULT_PLAYERS };
+    try {
+      const sb = createAnonClient();
+      const { data } = await sb
+        .from('app_settings')
+        .select('key,value')
+        .in('key', PLAYER_KEYS as unknown as string[]);
+      for (const row of (data ?? []) as { key: PlayerKey; value: string }[]) {
+        if (TEMPLATE_RE.test(row.value)) {
+          out[row.key] = row.value;
+        }
       }
+    } catch {
+      // Use defaults
     }
-  } catch {
-    // Use defaults
-  }
-  return setSbCached('player_templates', out);
+    return setSbCached('player_templates', out);
+  });
 }
 
 export async function sbGetRankings(
   client: SupabaseClient | null,
   days: number
 ): Promise<RankingEntry[]> {
-  const sb = client ?? createAdminClient();
-  if (!sb) return [];
-  try {
-    const { data, error } = await sb.rpc('film_rankings', { days });
-    if (error || !Array.isArray(data)) return [];
-    return data.map((r: { item: Item; views: number }) => ({
-      item: r.item,
-      viewers: Number(r.views) || 0,
-      plays: Number(r.views) || 0,
-    }));
-  } catch {
-    return [];
-  }
+  const cacheKey = `days:${days}`;
+  const cached = sbRankingsCache.get(cacheKey);
+  if (cached) return cached;
+
+  return sbCoalescer.run(`rankings:${cacheKey}`, async () => {
+    const recheck = sbRankingsCache.get(cacheKey);
+    if (recheck) return recheck;
+
+    const sb = createAdminClient() ?? client ?? createAnonClient();
+    if (!sb) return sbRankingsCache.getStale(cacheKey) ?? [];
+    try {
+      const { data, error } = await sb.rpc('film_rankings', { days });
+      if (error || !Array.isArray(data)) {
+        return sbRankingsCache.getStale(cacheKey) ?? [];
+      }
+      const mapped: RankingEntry[] = data.map((r: { item: Item; views: number }) => ({
+        item: r.item,
+        viewers: Number(r.views) || 0,
+        plays: Number(r.views) || 0,
+      }));
+      return sbRankingsCache.set(cacheKey, mapped, 120_000, 600_000);
+    } catch {
+      return sbRankingsCache.getStale(cacheKey) ?? [];
+    }
+  });
 }
 
 export async function sbGetMemberData(
@@ -392,45 +469,57 @@ export async function sbGetMemberData(
   history: WatchEventRecord[];
   friends: FriendRecord[];
 }> {
-  const [favRes, histRes, friendsRes] = await Promise.all([
-    client
-      .from('favorites')
-      .select('item,created_at')
-      .eq('user_id', profile.id)
-      .order('created_at', { ascending: false }),
-    client
-      .from('watch_events')
-      .select('id,user_id,item,viewed_at')
-      .eq('user_id', profile.id)
-      .order('viewed_at', { ascending: false })
-      .limit(50),
-    client.rpc('my_friends'),
-  ]);
+  const cached = sbMemberCache.get(profile.id);
+  if (cached) {
+    return { ...cached, profile };
+  }
 
-  const favorites: Item[] = ((favRes.data ?? []) as { item: Item }[]).map((r) => r.item);
-  const history: WatchEventRecord[] = (
-    (histRes.data ?? []) as { id: string; user_id: string; item: Item; viewed_at: string }[]
-  ).map((r) => ({
-    id: r.id,
-    userId: r.user_id,
-    item: r.item,
-    season: 1,
-    episode: 1,
-    viewedAt: r.viewed_at,
-  }));
+  return sbCoalescer.run(`member:${profile.id}`, async () => {
+    const recheck = sbMemberCache.get(profile.id);
+    if (recheck) return { ...recheck, profile };
 
-  const friends: FriendRecord[] = ((friendsRes.data ?? []) as { id: string; username: string }[]).map(
-    (f) => ({
-      id: f.id,
-      username: f.username,
-      avatar: null,
-      online: false,
-      currentItem: null,
-      recentWatch: null,
-    })
-  );
+    const [favRes, histRes, friendsRes] = await Promise.all([
+      client
+        .from('favorites')
+        .select('item,created_at')
+        .eq('user_id', profile.id)
+        .order('created_at', { ascending: false })
+        .limit(500),
+      client
+        .from('watch_events')
+        .select('id,user_id,item,viewed_at')
+        .eq('user_id', profile.id)
+        .order('viewed_at', { ascending: false })
+        .limit(50),
+      client.rpc('my_friends'),
+    ]);
 
-  return { profile, favorites, history, friends };
+    const favorites: Item[] = ((favRes.data ?? []) as { item: Item }[]).map((r) => r.item);
+    const history: WatchEventRecord[] = (
+      (histRes.data ?? []) as { id: string; user_id: string; item: Item; viewed_at: string }[]
+    ).map((r) => ({
+      id: r.id,
+      userId: r.user_id,
+      item: r.item,
+      season: 1,
+      episode: 1,
+      viewedAt: r.viewed_at,
+    }));
+
+    const friends: FriendRecord[] = ((friendsRes.data ?? []) as { id: string; username: string }[]).map(
+      (f) => ({
+        id: f.id,
+        username: f.username,
+        avatar: null,
+        online: false,
+        currentItem: null,
+        recentWatch: null,
+      })
+    );
+
+    const payload = { profile, favorites, history, friends };
+    return sbMemberCache.set(profile.id, payload, 15_000, 60_000);
+  });
 }
 
 export async function sbGetComments(
@@ -438,32 +527,46 @@ export async function sbGetComments(
   itemType: string,
   itemId: string
 ): Promise<CommentRecord[]> {
-  if (!client) return [];
-  const { data, error } = await client.rpc('item_comments', {
-    _type: itemType,
-    _id: itemId,
+  const sb = client ?? createAdminClient();
+  if (!sb) return [];
+
+  const cacheKey = `${itemType}:${itemId}`;
+  const cached = sbCommentsCache.get(cacheKey);
+  if (cached) return cached;
+
+  return sbCoalescer.run(`comments:${cacheKey}`, async () => {
+    const recheck = sbCommentsCache.get(cacheKey);
+    if (recheck) return recheck;
+
+    const { data, error } = await sb.rpc('item_comments', {
+      _type: itemType,
+      _id: itemId,
+    });
+    if (error || !Array.isArray(data)) {
+      return sbCommentsCache.getStale(cacheKey) ?? [];
+    }
+    const mapped: CommentRecord[] = data.map(
+      (c: {
+        id: string;
+        parent_id: string | null;
+        user_id: string;
+        username: string;
+        body: string;
+        created_at: string;
+      }) => ({
+        id: c.id,
+        itemType: itemType as ItemType,
+        itemId,
+        userId: c.user_id,
+        username: c.username,
+        avatar: null,
+        parentId: c.parent_id,
+        body: c.body,
+        createdAt: c.created_at,
+      })
+    );
+    return sbCommentsCache.set(cacheKey, mapped, 30_000, 120_000);
   });
-  if (error || !Array.isArray(data)) return [];
-  return data.map(
-    (c: {
-      id: string;
-      parent_id: string | null;
-      user_id: string;
-      username: string;
-      body: string;
-      created_at: string;
-    }) => ({
-      id: c.id,
-      itemType: itemType as ItemType,
-      itemId,
-      userId: c.user_id,
-      username: c.username,
-      avatar: null,
-      parentId: c.parent_id,
-      body: c.body,
-      createdAt: c.created_at,
-    })
-  );
 }
 
 function aggregateTopFromWatchEvents(
@@ -502,8 +605,15 @@ export async function sbGetAdminOverview(client: SupabaseClient): Promise<{
   source: 'supabase_auth' | 'supabase_rpc' | 'supabase_profiles';
   warning: string | null;
 }> {
-  const adminSb = createAdminClient();
-  const dbReader = adminSb ?? client;
+  const cached = sbAdminOverviewCache.get('overview');
+  if (cached) return cached;
+
+  return sbCoalescer.run('admin:overview', async () => {
+    const recheck = sbAdminOverviewCache.get('overview');
+    if (recheck) return recheck;
+
+    const adminSb = createAdminClient();
+    const dbReader = adminSb ?? client;
 
   let users: AdminUserSummary[] = [];
   let source: 'supabase_auth' | 'supabase_rpc' | 'supabase_profiles' = 'supabase_rpc';
@@ -668,11 +778,17 @@ export async function sbGetAdminOverview(client: SupabaseClient): Promise<{
       ? mapTop(top30Res.data)
       : aggregateTopFromWatchEvents(watchRows, 30);
 
-  return {
-    users,
-    top7,
-    top30,
-    source,
-    warning,
-  };
+    return sbAdminOverviewCache.set(
+      'overview',
+      {
+        users,
+        top7,
+        top30,
+        source,
+        warning,
+      },
+      15_000,
+      60_000
+    );
+  });
 }

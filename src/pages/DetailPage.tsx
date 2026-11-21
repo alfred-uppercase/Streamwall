@@ -21,7 +21,7 @@ import {
 import { toast } from 'sonner';
 import { TYPE_LABELS } from '../shared/types';
 import type { CastMember, Episode, Item, ItemType, SeasonMeta } from '../shared/types';
-import { api, useAuth } from '../lib/client';
+import { api, useAuth, useSetWatchingItem } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
 import { FavoriteButton, PosterCard } from '../components/PosterCard';
 import { CommentsSection } from '../components/CommentsSection';
@@ -120,7 +120,8 @@ function EpisodeStill({
 export function DetailPage() {
   const params = useParams<{ type: string; id: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { isMember, setWatchingItem } = useAuth();
+  const { isMember } = useAuth();
+  const setWatchingItem = useSetWatchingItem();
   const queryClient = useQueryClient();
 
   const type = (['film', 'serie', 'anime'].includes(params.type ?? '')

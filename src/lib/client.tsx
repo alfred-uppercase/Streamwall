@@ -1,6 +1,6 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   AdminBroadcastRecord,
   AdminNotificationTarget,
@@ -110,17 +110,30 @@ export interface MemberPayload {
 
 export const api = {
   me: () => apiRequest<{ user: UserProfile | null; backend?: 'supabase' | 'local' }>('/api/auth/me'),
-  login: (email: string, password: string) =>
+  captcha: () =>
+    apiRequest<{ captchaToken: string; svgDataUri: string; expiresInSeconds: number }>(
+      '/api/auth/captcha'
+    ),
+  login: (
+    email: string,
+    password: string,
+    security?: { captchaToken: string; captchaAnswer: string; website?: string }
+  ) =>
     apiRequest<{ token: string; user: UserProfile }>('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, ...security }),
     }),
   demoLogin: (role: 'admin' | 'member') =>
     apiRequest<{ token: string; user: UserProfile }>('/api/auth/demo-login', {
       method: 'POST',
       body: JSON.stringify({ role }),
     }),
-  signup: (username: string, email: string, password: string) =>
+  signup: (
+    username: string,
+    email: string,
+    password: string,
+    security?: { captchaToken: string; captchaAnswer: string; website?: string }
+  ) =>
     apiRequest<{
       token: string;
       user: UserProfile | null;
@@ -131,7 +144,7 @@ export const api = {
       message?: string;
     }>('/api/auth/signup', {
       method: 'POST',
-      body: JSON.stringify({ username, email, password }),
+      body: JSON.stringify({ username, email, password, ...security }),
     }),
   checkUsername: (username: string) =>
     apiRequest<{ available: boolean; error?: string }>(
@@ -156,7 +169,10 @@ export const api = {
     apiRequest<{ ok: boolean }>('/api/auth/logout', {
       method: 'POST',
     }),
-  forgotPassword: (email: string) =>
+  forgotPassword: (
+    email: string,
+    security?: { captchaToken: string; captchaAnswer: string; website?: string }
+  ) =>
     apiRequest<{
       ok?: boolean;
       requiresCode?: boolean;
@@ -166,7 +182,7 @@ export const api = {
       resetPath: string | null;
     }>('/api/auth/forgot-password', {
       method: 'POST',
-      body: JSON.stringify({ email }),
+      body: JSON.stringify({ email, ...security }),
     }),
   resendForgotPasswordCode: (email: string) =>
     apiRequest<{ ok: boolean; message: string }>('/api/auth/forgot-password/resend-code', {
@@ -765,22 +781,80 @@ interface AuthContextValue {
   isMember: boolean;
   isAdmin: boolean;
   isPro: boolean;
-  watchingItem: Item | null;
-  setWatchingItem: (item: Item | null) => void;
   setSession: (token: string, user: UserProfile) => void;
   refreshUser: () => Promise<void>;
   signOut: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+const WatchingItemContext = createContext<Item | null>(null);
+const SetWatchingItemContext = createContext<(item: Item | null) => void>(() => {});
+const EMPTY_FAVORITES_SET = new Set<string>();
+const FavoritesSetContext = createContext<Set<string>>(EMPTY_FAVORITES_SET);
+
+function WatchingProvider({ children }: { children: React.ReactNode }) {
+  const [watchingItem, setWatchingItem] = useState<Item | null>(null);
+  const location = useLocation();
+
+  useEffect(() => {
+    setWatchingItem(null);
+  }, [location.pathname]);
+
+  return (
+    <SetWatchingItemContext.Provider value={setWatchingItem}>
+      <WatchingItemContext.Provider value={watchingItem}>
+        {children}
+      </WatchingItemContext.Provider>
+    </SetWatchingItemContext.Provider>
+  );
+}
+
+function FavoritesSetProvider({
+  isMember,
+  children,
+}: {
+  isMember: boolean;
+  children: React.ReactNode;
+}) {
+  const memberQuery = useQuery({
+    queryKey: ['member'],
+    queryFn: () => api.member(),
+    enabled: isMember,
+    staleTime: 60_000,
+  });
+
+  const prevRef = useRef<{ sig: string; set: Set<string> }>({
+    sig: '',
+    set: EMPTY_FAVORITES_SET,
+  });
+
+  const favoritesSet = useMemo(() => {
+    const list = memberQuery.data?.favorites;
+    if (!isMember || !list || list.length === 0) {
+      return EMPTY_FAVORITES_SET;
+    }
+    const keys = list.map((f) => `${f.item_type}:${f.id}`);
+    const sig = keys.join('|');
+    if (sig === prevRef.current.sig) {
+      return prevRef.current.set;
+    }
+    const next = new Set(keys);
+    prevRef.current = { sig, set: next };
+    return next;
+  }, [isMember, memberQuery.data?.favorites]);
+
+  return (
+    <FavoritesSetContext.Provider value={favoritesSet}>
+      {children}
+    </FavoritesSetContext.Provider>
+  );
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [backend, setBackend] = useState<'supabase' | 'local'>('local');
   const [loading, setLoading] = useState(true);
-  const [watchingItem, setWatchingItem] = useState<Item | null>(null);
   const queryClient = useQueryClient();
-  const location = useLocation();
 
   const refreshUser = useCallback(async () => {
     try {
@@ -797,11 +871,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     void refreshUser();
   }, [refreshUser]);
-
-  // Clear watching state on route change
-  useEffect(() => {
-    setWatchingItem(null);
-  }, [location.pathname]);
 
   const setSession = useCallback(
     (token: string, nextUser: UserProfile) => {
@@ -820,32 +889,49 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
     setStoredToken(null);
     setUser(null);
-    setWatchingItem(null);
     queryClient.clear();
   }, [queryClient]);
+
+  const isMember = Boolean(user);
 
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
       backend,
       loading,
-      isMember: Boolean(user),
+      isMember,
       isAdmin: user?.role === 'admin',
       isPro: Boolean(user?.isPro),
-      watchingItem,
-      setWatchingItem,
       setSession,
       refreshUser,
       signOut,
     }),
-    [user, backend, loading, watchingItem, setSession, refreshUser, signOut]
+    [user, backend, loading, isMember, setSession, refreshUser, signOut]
   );
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={value}>
+      <WatchingProvider>
+        <FavoritesSetProvider isMember={isMember}>{children}</FavoritesSetProvider>
+      </WatchingProvider>
+    </AuthContext.Provider>
+  );
 }
 
 export function useAuth(): AuthContextValue {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error('useAuth must be used inside AuthProvider');
   return ctx;
+}
+
+export function useWatchingItem(): Item | null {
+  return useContext(WatchingItemContext);
+}
+
+export function useSetWatchingItem(): (item: Item | null) => void {
+  return useContext(SetWatchingItemContext);
+}
+
+export function useFavoritesSet(): Set<string> {
+  return useContext(FavoritesSetContext);
 }

@@ -292,16 +292,27 @@ export function PopupManager() {
 
   if (!activePopup) return null;
 
+  const sanitizeClientUrl = (raw: string): string | null => {
+    const val = String(raw ?? '').trim();
+    if (!val) return null;
+    if (/^\/(?!\/)/.test(val)) return val;
+    if (/^https?:\/\//i.test(val)) return val;
+    return null;
+  };
+
   const handleLinkNavigation = (url: string, newTab: boolean) => {
     void api.trackPopupEvent(activePopup.id, 'click').catch(() => {});
     setActivePopup(null);
-    if (!url) return;
-    if (newTab || /^https?:\/\//i.test(url)) {
-      window.open(url, newTab ? '_blank' : '_self', 'noopener,noreferrer');
+    const safeUrl = sanitizeClientUrl(url);
+    if (!safeUrl) return;
+    if (newTab || /^https?:\/\//i.test(safeUrl)) {
+      window.open(safeUrl, newTab ? '_blank' : '_self', 'noopener,noreferrer');
     } else {
-      navigate(url);
+      navigate(safeUrl);
     }
   };
+
+  const safeImageLink = sanitizeClientUrl(activePopup.imageLink);
 
   return (
     <div
@@ -328,14 +339,14 @@ export function PopupManager() {
             <X className="size-4" />
           </button>
 
-          {activePopup.imageLink ? (
+          {safeImageLink ? (
             <a
-              href={activePopup.imageLink}
+              href={safeImageLink}
               target={activePopup.imageNewTab ? '_blank' : undefined}
               rel={activePopup.imageNewTab ? 'noopener noreferrer' : undefined}
               onClick={(e) => {
                 e.preventDefault();
-                handleLinkNavigation(activePopup.imageLink, activePopup.imageNewTab);
+                handleLinkNavigation(safeImageLink, activePopup.imageNewTab);
               }}
               className="block border-0 p-0"
             >

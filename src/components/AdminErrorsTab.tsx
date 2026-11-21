@@ -18,6 +18,7 @@ const SOURCE_LABELS: Record<ErrorLogSource, string> = {
   api: 'API HTTP',
   upstream: 'Catalogue / TMDB',
   auth: 'Authentification',
+  security: 'Sécurité / Anti-Bot',
   billing: 'Paiements',
   push: 'Push Web',
   mail: 'Emails',

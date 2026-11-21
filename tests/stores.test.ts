@@ -13,6 +13,7 @@ const {
   readModuleSnapshot,
   writeModuleSnapshot,
 } = await import('../src/server/persistentDb.ts');
+const { InFlightCoalescer, TimedLruCache } = await import('../src/server/cacheUtils.ts');
 const { sbResolveUser } = await import('../src/server/supabaseAdapter.ts');
 const { clearErrorLogs, listErrorLogs, recordErrorLog, sanitizeLogContext } = await import(
   '../src/server/errorLogger.ts'
@@ -306,3 +307,175 @@ test('sbResolveUser rejects malformed or expired JWTs locally without hitting Su
   const expiredJwt = `eyJhbGciOiJIUzI1NiJ9.${expiredPayload}.sig`;
   assert.equal(await sbResolveUser(expiredJwt), null);
 });
+
+test('TimedLruCache evicts oldest entry, keeps stale fallback, and supports prefix deletion', async () => {
+  const cache = new TimedLruCache<string>(16);
+  for (let i = 0; i < 20; i++) {
+    cache.set(`k:${i}`, `val-${i}`, 5_000, 10_000);
+  }
+  assert.equal(cache.size, 16);
+  assert.equal(cache.get('k:0'), null);
+  assert.equal(cache.get('k:19'), 'val-19');
+
+  cache.set('short:1', 'fresh', 5, 5_000);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(cache.get('short:1'), null);
+  assert.equal(cache.getStale('short:1'), 'fresh');
+
+  assert.ok(cache.deleteByPrefix('k:') >= 15);
+  assert.equal(cache.get('k:19'), null);
+});
+
+test('InFlightCoalescer deduplicates concurrent calls and clears on success or error', async () => {
+  const coalescer = new InFlightCoalescer();
+  let calls = 0;
+
+  const results = await Promise.all(
+    Array.from({ length: 50 }, () =>
+      coalescer.run('hot-key', async () => {
+        calls += 1;
+        await new Promise((r) => setTimeout(r, 15));
+        return 'shared-payload';
+      })
+    )
+  );
+
+  assert.equal(calls, 1);
+  assert.equal(results.length, 50);
+  assert.ok(results.every((r) => r === 'shared-payload'));
+  assert.equal(coalescer.activeCount, 0);
+
+  await assert.rejects(
+    () =>
+      coalescer.run('err-key', async () => {
+        throw new Error('boom');
+      }),
+    /boom/
+  );
+  assert.equal(coalescer.activeCount, 0);
+});
+
+test('Security module enforces single-use SVG CAPTCHA, 3-attempt login lockout, and injection sanitization', async () => {
+  const {
+    checkLoginLockout,
+    clearLoginFailures,
+    consumeRateLimit,
+    createCaptchaChallenge,
+    escapeHtml,
+    hasPathTraversalProbe,
+    hasSqlInjectionProbe,
+    hasXssProbe,
+    isHoneypotTriggered,
+    isSuspiciousBotUserAgent,
+    peekCaptchaAnswerForTest,
+    recordLoginFailure,
+    resetRateLimitsForTest,
+    sanitizeJsonPayload,
+    sanitizeSafeUrl,
+    stripDangerousText,
+    verifyCaptchaChallenge,
+  } = await import('../src/server/security.ts');
+
+  resetRateLimitsForTest();
+
+  // 1. Cryptographic SVG CAPTCHA
+  const challenge = createCaptchaChallenge('10.0.0.5');
+  assert.ok(challenge.captchaToken.includes('.'));
+  assert.ok(challenge.svgDataUri.startsWith('data:image/svg+xml;base64,'));
+  const answer = peekCaptchaAnswerForTest(challenge.captchaToken);
+  assert.ok(answer && answer.length === 5);
+
+  // Wrong answer rejected & consumes single-use token
+  const wrong = verifyCaptchaChallenge({
+    captchaToken: challenge.captchaToken,
+    captchaAnswer: 'ZZZZZ',
+    ip: '10.0.0.5',
+    minSolveMs: 0,
+  });
+  assert.equal(wrong.ok, false);
+
+  const replay = verifyCaptchaChallenge({
+    captchaToken: challenge.captchaToken,
+    captchaAnswer: answer,
+    ip: '10.0.0.5',
+    minSolveMs: 0,
+  });
+  assert.equal(replay.ok, false);
+
+  // Fresh token succeeds once, then replay fails
+  const fresh = createCaptchaChallenge('10.0.0.5');
+  const freshAns = peekCaptchaAnswerForTest(fresh.captchaToken)!;
+  assert.equal(
+    verifyCaptchaChallenge({
+      captchaToken: fresh.captchaToken,
+      captchaAnswer: freshAns.toLowerCase(),
+      ip: '10.0.0.5',
+      minSolveMs: 0,
+    }).ok,
+    true
+  );
+  assert.equal(
+    verifyCaptchaChallenge({
+      captchaToken: fresh.captchaToken,
+      captchaAnswer: freshAns,
+      ip: '10.0.0.5',
+      minSolveMs: 0,
+    }).ok,
+    false
+  );
+
+  // 2. 3-attempt login lockout
+  const email = 'sec-user@example.com';
+  const ip = '10.0.0.8';
+  assert.equal(checkLoginLockout(email, ip).locked, false);
+  assert.equal(recordLoginFailure(email, ip).remainingAttempts, 2);
+  assert.equal(recordLoginFailure(email, ip).remainingAttempts, 1);
+  const third = recordLoginFailure(email, ip);
+  assert.equal(third.locked, true);
+  assert.equal(third.remainingAttempts, 0);
+  assert.ok(third.retryAfterSeconds > 60);
+  assert.equal(checkLoginLockout(email, ip).locked, true);
+
+  clearLoginFailures(email, ip);
+  assert.equal(checkLoginLockout(email, ip).locked, false);
+
+  // 3. Injection, XSS, prototype pollution, URL, bot UA, and rate limits
+  assert.equal(hasSqlInjectionProbe("' OR '1'='1"), true);
+  assert.equal(hasSqlInjectionProbe('1 UNION SELECT password FROM users'), true);
+  assert.equal(hasSqlInjectionProbe('Spider-Man: No Way Home'), false);
+
+  assert.equal(hasXssProbe('<script>alert(1)</script>'), true);
+  assert.equal(hasXssProbe('javascript:alert(1)'), true);
+  assert.equal(hasPathTraversalProbe('../../etc/passwd'), true);
+
+  assert.equal(isSuspiciousBotUserAgent('python-requests/2.31.0'), true);
+  assert.equal(isSuspiciousBotUserAgent('sqlmap/1.7'), true);
+  assert.equal(
+    isSuspiciousBotUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0 Safari/537.36'),
+    false
+  );
+  assert.equal(isHoneypotTriggered({ website: 'https://spam.example' }), true);
+  assert.equal(isHoneypotTriggered({ website: '' }), false);
+
+  const sanitizedObj = sanitizeJsonPayload({
+    safe: 'ok\0test',
+    __proto__: { polluted: true },
+    constructor: 'bad',
+  });
+  assert.equal(sanitizedObj.blocked, false);
+  const cleanRecord = sanitizedObj.clean as Record<string, unknown>;
+  assert.equal(cleanRecord.safe, 'oktest');
+  assert.equal(Object.prototype.hasOwnProperty.call(cleanRecord, '__proto__'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(cleanRecord, 'constructor'), false);
+
+  assert.equal(sanitizeSafeUrl('javascript:alert(1)'), null);
+  assert.equal(sanitizeSafeUrl('https://streamwall.example/film/1'), 'https://streamwall.example/film/1');
+  assert.equal(sanitizeSafeUrl('/film/24417'), '/film/24417');
+  assert.equal(stripDangerousText('<script>xss()</script>Bonjour'), 'Bonjour');
+  assert.equal(escapeHtml('<img src=x onerror="1">'), '&lt;img src=x onerror=&quot;1&quot;&gt;');
+
+  assert.equal(consumeRateLimit('test-ip', 2, 10_000).allowed, true);
+  assert.equal(consumeRateLimit('test-ip', 2, 10_000).allowed, true);
+  assert.equal(consumeRateLimit('test-ip', 2, 10_000).allowed, false);
+});
+

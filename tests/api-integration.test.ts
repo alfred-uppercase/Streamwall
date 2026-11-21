@@ -340,3 +340,161 @@ test('Presence heartbeat and analytics ping respond quickly as zero-DB no-ops', 
   assert.equal(hbJson.ok, true);
   assert.equal(pingJson.ok, true);
 });
+
+test('Public API endpoints expose Cache-Control headers while authenticated /api/home stays private', async () => {
+  const [privacyRes, plansRes, popupsRes, siteRes, genresRes, guestHomeRes] = await Promise.all([
+    fetch(`${baseUrl}/api/privacy`),
+    fetch(`${baseUrl}/api/billing/plans`),
+    fetch(`${baseUrl}/api/popups/active`),
+    fetch(`${baseUrl}/api/site/config`),
+    fetch(`${baseUrl}/api/catalogue/genres`),
+    fetch(`${baseUrl}/api/home`),
+  ]);
+
+  assert.match(privacyRes.headers.get('cache-control') || '', /^public, max-age=\d+/);
+  assert.match(plansRes.headers.get('cache-control') || '', /^public, max-age=\d+/);
+  assert.match(popupsRes.headers.get('cache-control') || '', /^public, max-age=\d+/);
+  assert.match(siteRes.headers.get('cache-control') || '', /^public, max-age=\d+/);
+  assert.match(genresRes.headers.get('cache-control') || '', /^public, max-age=\d+/);
+  assert.match(guestHomeRes.headers.get('cache-control') || '', /^public, max-age=30/);
+  assert.match(guestHomeRes.headers.get('vary') || '', /Authorization/i);
+
+  const loginRes = await fetch(`${baseUrl}/api/auth/demo-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: 'member' }),
+  });
+  const { token } = (await loginRes.json()) as { token: string };
+  const authHomeRes = await fetch(`${baseUrl}/api/home`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(authHomeRes.status, 200);
+  assert.match(authHomeRes.headers.get('cache-control') || '', /private, no-store/i);
+});
+
+test('Security protections enforce CAPTCHA, 3-attempt login lockout, anti-bot, anti-SQLi/XSS, and headers', async () => {
+  const { peekCaptchaAnswerForTest } = await import('../src/server/security.ts');
+
+  // Security headers present & X-Powered-By absent
+  const healthRes = await fetch(`${baseUrl}/api/health`);
+  assert.equal(healthRes.headers.get('x-powered-by'), null);
+  assert.equal(healthRes.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(healthRes.headers.get('referrer-policy'), 'strict-origin-when-cross-origin');
+
+  // Known scraper / scanner User-Agents are blocked with 403
+  for (const botUa of ['python-requests/2.31.0', 'Scrapy/2.11.0', 'sqlmap/1.8', 'curl/8.5.0']) {
+    const botRes = await fetch(`${baseUrl}/api/catalogue`, {
+      headers: { 'User-Agent': botUa },
+    });
+    assert.equal(botRes.status, 403, `Expected 403 for ${botUa}`);
+  }
+
+  // SQLi and XSS probes in query string are blocked with 403
+  const sqliRes = await fetch(`${baseUrl}/api/catalogue?q=${encodeURIComponent("' UNION SELECT 1,2,3--")}`);
+  assert.equal(sqliRes.status, 403);
+  const xssRes = await fetch(`${baseUrl}/api/catalogue?q=${encodeURIComponent('<script>alert(1)</script>')}`);
+  assert.equal(xssRes.status, 403);
+
+  // Login rejects missing CAPTCHA & honeypot fills
+  const noCaptchaRes = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'locktest@example.com', password: 'wrongpassword' }),
+  });
+  assert.equal(noCaptchaRes.status, 400);
+
+  const hpRes = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'locktest@example.com',
+      password: 'wrongpassword',
+      website: 'https://bot-filled.example',
+    }),
+  });
+  assert.equal(hpRes.status, 400);
+
+  // 3 failed logins with valid CAPTCHA trigger 429 lockout
+  const solveCaptcha = async () => {
+    const capRes = await fetch(`${baseUrl}/api/auth/captcha`);
+    assert.equal(capRes.status, 200);
+    const cap = (await capRes.json()) as { captchaToken: string; svgDataUri: string };
+    assert.ok(cap.svgDataUri.startsWith('data:image/svg+xml;base64,'));
+    const ans = peekCaptchaAnswerForTest(cap.captchaToken);
+    assert.ok(ans);
+    return { captchaToken: cap.captchaToken, captchaAnswer: ans };
+  };
+
+  for (const expectedStatus of [401, 401, 429]) {
+    const cap = await solveCaptcha();
+    const res = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'locktest@example.com',
+        password: 'wrong-password-123',
+        ...cap,
+      }),
+    });
+    assert.equal(res.status, expectedStatus);
+    if (expectedStatus === 429) {
+      assert.ok(Number(res.headers.get('retry-after')) > 0);
+    }
+  }
+
+  // 4th attempt is immediately rejected with 429 even with another valid CAPTCHA
+  const fourthCap = await solveCaptcha();
+  const lockedRes = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'locktest@example.com',
+      password: 'wrong-password-123',
+      ...fourthCap,
+    }),
+  });
+  assert.equal(lockedRes.status, 429);
+});
+
+test('Catalogue enforces 2-page cap for guests, 10-page cap for members, and unrestricted access for admins', async () => {
+  // Guest: page 2 allowed, page 3 rejected with 401
+  const guestP2 = await fetch(`${baseUrl}/api/catalogue?page=2`);
+  assert.equal(guestP2.status, 200);
+  const guestP3 = await fetch(`${baseUrl}/api/catalogue?page=3`);
+  assert.equal(guestP3.status, 401);
+  const guestP3Json = (await guestP3.json()) as { requiresAuth?: boolean };
+  assert.equal(guestP3Json.requiresAuth, true);
+
+  // Member: page 10 allowed, page 11 rejected with 403
+  const memberLogin = await fetch(`${baseUrl}/api/auth/demo-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: 'member' }),
+  });
+  const memberAuth = (await memberLogin.json()) as { token: string };
+  const memberP10 = await fetch(`${baseUrl}/api/catalogue?page=10`, {
+    headers: { Authorization: `Bearer ${memberAuth.token}` },
+  });
+  assert.equal(memberP10.status, 200);
+  const memberP10Json = (await memberP10.json()) as { pages: number };
+  assert.ok(memberP10Json.pages <= 10);
+
+  const memberP11 = await fetch(`${baseUrl}/api/catalogue?page=11`, {
+    headers: { Authorization: `Bearer ${memberAuth.token}` },
+  });
+  assert.equal(memberP11.status, 403);
+
+  // Admin: page 11 allowed
+  const adminLogin = await fetch(`${baseUrl}/api/auth/demo-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: 'admin' }),
+  });
+  const adminAuth = (await adminLogin.json()) as { token: string };
+  const adminP11 = await fetch(`${baseUrl}/api/catalogue?page=11`, {
+    headers: { Authorization: `Bearer ${adminAuth.token}` },
+  });
+  assert.equal(adminP11.status, 200);
+});
+
+

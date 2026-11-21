@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { MessageSquarePlus, RotateCcw, Search } from 'lucide-react';
+import { toast } from 'sonner';
 import type { CatalogueFilters } from '../shared/types';
-import { api } from '../lib/client';
+import { api, useAuth } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
 import { PosterCard, PosterSkeletonGrid } from '../components/PosterCard';
 
@@ -19,6 +20,8 @@ const TYPE_OPTIONS = [
 ] as const;
 
 export function CataloguePage() {
+  const navigate = useNavigate();
+  const { isMember, isAdmin, loading: authLoading } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const initialQ = searchParams.get('q') ?? '';
@@ -32,6 +35,19 @@ export function CataloguePage() {
     (searchParams.get('sort') as CatalogueFilters['sort']) || 'recent'
   );
   const [page, setPage] = useState(Math.max(1, Number(searchParams.get('page')) || 1));
+
+  // Redirect guests beyond page 2 to login, and cap connected members (non-admin) to 10 pages
+  useEffect(() => {
+    if (authLoading) return;
+    if (!isMember && page > 2) {
+      toast.info('Connectez-vous pour naviguer au-delà de la page 2.');
+      navigate('/auth', { replace: true });
+      return;
+    }
+    if (isMember && !isAdmin && page > 10) {
+      setPage(10);
+    }
+  }, [authLoading, isMember, isAdmin, page, navigate]);
 
   const pageTitle = q
     ? `Recherche « ${q} »`
@@ -69,11 +85,13 @@ export function CataloguePage() {
     setSearchParams(next, { replace: true });
   }, [q, type, genre, year, lang, sort, page, setSearchParams]);
 
-  const filters: CatalogueFilters = { q, type, genre, year, lang, sort, page };
+  const effectivePage = isAdmin ? page : isMember ? Math.min(page, 10) : Math.min(page, 2);
+  const filters: CatalogueFilters = { q, type, genre, year, lang, sort, page: effectivePage };
 
   const catalogueQuery = useQuery({
-    queryKey: ['catalogue', filters],
+    queryKey: ['catalogue', filters, isAdmin ? 'admin' : isMember ? 'member' : 'guest'],
     queryFn: () => api.catalogue(filters),
+    enabled: !authLoading || page <= 2,
     placeholderData: keepPreviousData,
     staleTime: 60_000,
   });
@@ -299,35 +317,60 @@ export function CataloguePage() {
       )}
 
       {/* Pagination */}
-      {data && data.pages > 1 && (
-        <div className="mt-10 flex items-center justify-center gap-4">
-          <button
-            type="button"
-            disabled={page <= 1}
-            onClick={() => {
-              setPage((p) => Math.max(1, p - 1));
-              window.scrollTo({ top: 0, behavior: 'smooth' });
-            }}
-            className="rounded-lg border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-40 whitespace-nowrap shrink-0"
-          >
-            Précédent
-          </button>
-          <span className="text-sm text-muted-foreground tabular-nums">
-            Page {data.page.toLocaleString('fr-FR')} / {data.pages.toLocaleString('fr-FR')}
-          </span>
-          <button
-            type="button"
-            disabled={page >= data.pages}
-            onClick={() => {
-              setPage((p) => Math.min(data.pages, p + 1));
-              window.scrollTo({ top: 0, behavior: 'smooth' });
-            }}
-            className="rounded-lg border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-40 whitespace-nowrap shrink-0"
-          >
-            Suivant
-          </button>
-        </div>
-      )}
+      {data && data.pages > 1 && (() => {
+        const memberMaxPages = isAdmin ? data.pages : isMember ? Math.min(data.pages, 10) : data.pages;
+        const canClickNext = isAdmin
+          ? page < data.pages
+          : isMember
+            ? page < Math.min(data.pages, 10)
+            : page < data.pages;
+
+        return (
+          <div className="mt-10 flex flex-col items-center gap-2">
+            <div className="flex items-center justify-center gap-4">
+              <button
+                type="button"
+                disabled={page <= 1}
+                onClick={() => {
+                  setPage((p) => Math.max(1, p - 1));
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                className="rounded-lg border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-40 whitespace-nowrap shrink-0"
+              >
+                Précédent
+              </button>
+              <span className="text-sm text-muted-foreground tabular-nums">
+                Page {data.page.toLocaleString('fr-FR')} / {memberMaxPages.toLocaleString('fr-FR')}
+              </span>
+              <button
+                type="button"
+                disabled={!canClickNext}
+                onClick={() => {
+                  const nextPage = page + 1;
+                  if (!isMember && nextPage > 2) {
+                    toast.info('Connectez-vous pour consulter les pages suivantes.');
+                    navigate('/auth');
+                    return;
+                  }
+                  if (isMember && !isAdmin && nextPage > 10) {
+                    return;
+                  }
+                  setPage(Math.min(data.pages, nextPage));
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                className="rounded-lg border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-40 whitespace-nowrap shrink-0"
+              >
+                Suivant
+              </button>
+            </div>
+            {isMember && !isAdmin && page >= 10 && (
+              <p className="text-xs text-muted-foreground">
+                Navigation limitée aux 10 premières pages · Utilisez la recherche ou les filtres pour cibler un titre.
+              </p>
+            )}
+          </div>
+        );
+      })()}
     </main>
   );
 }

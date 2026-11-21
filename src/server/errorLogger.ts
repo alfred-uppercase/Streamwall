@@ -14,6 +14,7 @@ const VALID_SOURCES = new Set<ErrorLogSource>([
   'api',
   'upstream',
   'auth',
+  'security',
   'billing',
   'push',
   'mail',
