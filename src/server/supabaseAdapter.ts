@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import {
   DEFAULT_PLAYERS,
@@ -55,7 +56,12 @@ function createSupabaseFetch(apiKey: string): typeof fetch {
       headers.delete('Authorization');
     }
     headers.set('apikey', apiKey);
-    return fetch(input, { ...init, headers });
+    const signal =
+      init?.signal ??
+      (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+        ? AbortSignal.timeout(8_000)
+        : undefined);
+    return fetch(input, { ...init, headers, signal });
   };
 }
 
@@ -87,85 +93,178 @@ export function createAdminClient(): SupabaseClient | null {
   });
 }
 
-export async function sbResolveUser(
-  token: string | null
-): Promise<{ user: UserProfile; client: SupabaseClient } | null> {
-  if (!token) return null;
-  const client = createUserClient(token);
-  const { data: authData, error } = await client.auth.getUser(token);
-  if (error || !authData.user) return null;
+const SB_USER_CACHE_TTL_MS = 30_000;
+const SB_USER_NEGATIVE_TTL_MS = 15_000;
+const sbUserCache = new Map<string, { expiresAt: number; user: UserProfile | null }>();
 
-  const uid = authData.user.id;
-  const adminSb = createAdminClient();
-  const dbReader = adminSb ?? client;
+function hashTokenKey(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
 
-  const [profileRes, rpcRoleRes, tableRoleRes] = await Promise.all([
-    dbReader.from('profiles').select('*').eq('id', uid).maybeSingle(),
-    client.rpc('has_role', { _user_id: uid, _role: 'admin' }),
-    dbReader
-      .from('user_roles')
-      .select('role')
-      .eq('user_id', uid)
-      .eq('role', 'admin')
-      .maybeSingle(),
-  ]);
+function isLikelyValidJwt(token: string): boolean {
+  const parts = token.split('.');
+  if (parts.length !== 3) return false;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as {
+      exp?: unknown;
+    };
+    if (typeof payload.exp === 'number' && payload.exp * 1000 <= Date.now()) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-  const profileRow = (profileRes.data ?? null) as Record<string, unknown> | null;
-  const appMeta = (authData.user.app_metadata ?? {}) as Record<string, unknown>;
-  const userMeta = (authData.user.user_metadata ?? {}) as Record<string, unknown>;
-
-  const isAdmin = Boolean(
-    rpcRoleRes.data === true ||
-      tableRoleRes.data?.role === 'admin' ||
-      profileRow?.role === 'admin' ||
-      profileRow?.is_admin === true ||
-      appMeta.role === 'admin' ||
-      userMeta.role === 'admin' ||
-      (Array.isArray(appMeta.roles) && appMeta.roles.includes('admin'))
-  );
-
-  let avatarUrl: string | null = null;
-  const avatarPath =
-    typeof profileRow?.avatar_path === 'string'
-      ? profileRow.avatar_path
-      : typeof profileRow?.avatar_url === 'string'
-        ? profileRow.avatar_url
-        : null;
-  if (avatarPath) {
-    if (/^https?:\/\//i.test(avatarPath)) {
-      avatarUrl = avatarPath;
-    } else {
-      const signed = await client.storage.from('avatars').createSignedUrl(avatarPath, 3600);
-      avatarUrl = signed.data?.signedUrl ?? null;
+export function invalidateSbUserCache(target?: { token?: string; userId?: string }): void {
+  if (!target) {
+    sbUserCache.clear();
+    return;
+  }
+  if (target.token) {
+    sbUserCache.delete(hashTokenKey(target.token));
+  }
+  if (target.userId) {
+    for (const [k, entry] of sbUserCache.entries()) {
+      if (entry.user?.id === target.userId) {
+        sbUserCache.delete(k);
+      }
     }
   }
+}
 
-  const username =
-    (typeof profileRow?.username === 'string' && profileRow.username) ||
-    (typeof userMeta.username === 'string' && userMeta.username) ||
-    (typeof userMeta.full_name === 'string' && userMeta.full_name) ||
-    (authData.user.email ? authData.user.email.split('@')[0] : '') ||
-    'Membre';
+export async function sbResolveUser(
+  token: string | null,
+  options?: { skipCache?: boolean }
+): Promise<{ user: UserProfile; client: SupabaseClient } | null> {
+  if (!token) return null;
+  if (!isLikelyValidJwt(token)) return null;
 
-  const createdAt =
-    (typeof profileRow?.created_at === 'string' && profileRow.created_at) ||
-    authData.user.created_at ||
-    new Date().toISOString();
+  const cacheKey = hashTokenKey(token);
+  if (!options?.skipCache) {
+    const hit = sbUserCache.get(cacheKey);
+    if (hit && hit.expiresAt > Date.now()) {
+      if (!hit.user) return null;
+      return { user: hit.user, client: createUserClient(token) };
+    }
+    if (hit) sbUserCache.delete(cacheKey);
+  }
 
-  return {
-    client,
-    user: {
+  try {
+    const client = createUserClient(token);
+    const { data: authData, error } = await client.auth.getUser(token);
+    if (error || !authData.user) {
+      if (sbUserCache.size > 500) sbUserCache.clear();
+      sbUserCache.set(cacheKey, {
+        expiresAt: Date.now() + SB_USER_NEGATIVE_TTL_MS,
+        user: null,
+      });
+      return null;
+    }
+
+    const uid = authData.user.id;
+    const adminSb = createAdminClient();
+    const dbReader = adminSb ?? client;
+
+    const [profileRes, rpcRoleRes, tableRoleRes] = await Promise.all([
+      dbReader.from('profiles').select('*').eq('id', uid).maybeSingle(),
+      client.rpc('has_role', { _user_id: uid, _role: 'admin' }),
+      dbReader
+        .from('user_roles')
+        .select('role')
+        .eq('user_id', uid)
+        .eq('role', 'admin')
+        .maybeSingle(),
+    ]);
+
+    const profileRow = (profileRes.data ?? null) as Record<string, unknown> | null;
+    const appMeta = (authData.user.app_metadata ?? {}) as Record<string, unknown>;
+    const userMeta = (authData.user.user_metadata ?? {}) as Record<string, unknown>;
+
+    const isAdmin = Boolean(
+      rpcRoleRes.data === true ||
+        tableRoleRes.data?.role === 'admin' ||
+        profileRow?.role === 'admin' ||
+        profileRow?.is_admin === true ||
+        appMeta.role === 'admin' ||
+        userMeta.role === 'admin' ||
+        (Array.isArray(appMeta.roles) && appMeta.roles.includes('admin'))
+    );
+
+    let avatarUrl: string | null = null;
+    const avatarPath =
+      typeof profileRow?.avatar_path === 'string'
+        ? profileRow.avatar_path
+        : typeof profileRow?.avatar_url === 'string'
+          ? profileRow.avatar_url
+          : null;
+    if (avatarPath) {
+      if (/^https?:\/\//i.test(avatarPath)) {
+        avatarUrl = avatarPath;
+      } else {
+        const signed = await client.storage.from('avatars').createSignedUrl(avatarPath, 3600);
+        avatarUrl = signed.data?.signedUrl ?? null;
+      }
+    }
+
+    const username =
+      (typeof profileRow?.username === 'string' && profileRow.username) ||
+      (typeof userMeta.username === 'string' && userMeta.username) ||
+      (typeof userMeta.full_name === 'string' && userMeta.full_name) ||
+      (authData.user.email ? authData.user.email.split('@')[0] : '') ||
+      'Membre';
+
+    const createdAt =
+      (typeof profileRow?.created_at === 'string' && profileRow.created_at) ||
+      authData.user.created_at ||
+      new Date().toISOString();
+
+    const user: UserProfile = {
       id: uid,
       email: authData.user.email ?? '',
       username,
       avatar: avatarUrl,
       role: isAdmin ? 'admin' : 'member',
       createdAt,
-    },
-  };
+    };
+
+    if (sbUserCache.size > 500) sbUserCache.clear();
+    sbUserCache.set(cacheKey, {
+      expiresAt: Date.now() + SB_USER_CACHE_TTL_MS,
+      user,
+    });
+
+    return { client, user };
+  } catch {
+    return null;
+  }
+}
+
+const SB_SETTINGS_TTL_MS = 60_000;
+const sbSettingsCache = new Map<string, { expiresAt: number; value: unknown }>();
+
+export function invalidateSbSettingsCache(): void {
+  sbSettingsCache.clear();
+}
+
+function getSbCached<T>(key: string): T | null {
+  const hit = sbSettingsCache.get(key);
+  if (!hit || hit.expiresAt < Date.now()) {
+    sbSettingsCache.delete(key);
+    return null;
+  }
+  return hit.value as T;
+}
+
+function setSbCached<T>(key: string, value: T): T {
+  sbSettingsCache.set(key, { expiresAt: Date.now() + SB_SETTINGS_TTL_MS, value });
+  return value;
 }
 
 export async function sbGetApiOrigin(fallbackOrigin: string): Promise<string> {
+  const cached = getSbCached<string>('api_origin');
+  if (cached) return cached;
   try {
     const sb = createAnonClient();
     const { data } = await sb
@@ -174,15 +273,17 @@ export async function sbGetApiOrigin(fallbackOrigin: string): Promise<string> {
       .eq('key', 'api_origin')
       .maybeSingle();
     if (data?.value && /^https?:\/\/[^/]+/.test(data.value)) {
-      return data.value.replace(/\/+$/, '');
+      return setSbCached('api_origin', data.value.replace(/\/+$/, ''));
     }
   } catch {
     // Fall back gracefully
   }
-  return fallbackOrigin;
+  return setSbCached('api_origin', fallbackOrigin);
 }
 
 export async function sbGetEmbedProvider(fallbackProvider: string): Promise<string> {
+  const cached = getSbCached<string>('embed_provider');
+  if (cached) return cached;
   try {
     const sb = createAnonClient();
     const { data } = await sb
@@ -191,15 +292,17 @@ export async function sbGetEmbedProvider(fallbackProvider: string): Promise<stri
       .eq('key', 'embed_provider')
       .maybeSingle();
     if (data?.value && /^https?:\/\/[^/]+/.test(data.value)) {
-      return data.value.replace(/\/+$/, '');
+      return setSbCached('embed_provider', data.value.replace(/\/+$/, ''));
     }
   } catch {
     // Fall back gracefully
   }
-  return fallbackProvider;
+  return setSbCached('embed_provider', fallbackProvider);
 }
 
 export async function sbGetTmdbApiKey(fallbackKey: string): Promise<string> {
+  const cached = getSbCached<string>('tmdb_api_key');
+  if (cached) return cached;
   try {
     const sb = createAnonClient();
     const { data } = await sb
@@ -208,15 +311,17 @@ export async function sbGetTmdbApiKey(fallbackKey: string): Promise<string> {
       .eq('key', 'tmdb_api_key')
       .maybeSingle();
     if (data?.value && String(data.value).trim()) {
-      return String(data.value).trim();
+      return setSbCached('tmdb_api_key', String(data.value).trim());
     }
   } catch {
     // Fall back gracefully
   }
-  return fallbackKey;
+  return setSbCached('tmdb_api_key', fallbackKey);
 }
 
 export async function sbGetSiteConfig(fallback: SiteConfig): Promise<SiteConfig> {
+  const cached = getSbCached<SiteConfig>('site_config');
+  if (cached) return cached;
   try {
     const sb = createAdminClient() ?? createAnonClient();
     const { data } = await sb
@@ -232,13 +337,15 @@ export async function sbGetSiteConfig(fallback: SiteConfig): Promise<SiteConfig>
         out.faviconUrl = row.value.trim();
       }
     }
-    return out;
+    return setSbCached('site_config', out);
   } catch {
-    return fallback;
+    return setSbCached('site_config', fallback);
   }
 }
 
 export async function sbGetPlayerTemplates(): Promise<PlayerTemplates> {
+  const cached = getSbCached<PlayerTemplates>('player_templates');
+  if (cached) return cached;
   const out = { ...DEFAULT_PLAYERS };
   try {
     const sb = createAnonClient();
@@ -254,7 +361,7 @@ export async function sbGetPlayerTemplates(): Promise<PlayerTemplates> {
   } catch {
     // Use defaults
   }
-  return out;
+  return setSbCached('player_templates', out);
 }
 
 export async function sbGetRankings(
@@ -397,17 +504,15 @@ export async function sbGetAdminOverview(client: SupabaseClient): Promise<{
 }> {
   const adminSb = createAdminClient();
   const dbReader = adminSb ?? client;
-  const now = Date.now();
 
   let users: AdminUserSummary[] = [];
   let source: 'supabase_auth' | 'supabase_rpc' | 'supabase_profiles' = 'supabase_rpc';
   let warning: string | null = null;
 
-  // Fetch auxiliary tables safely (presence, roles, profiles, watch events)
-  const [profilesRes, rolesRes, presenceRes, watchRes] = await Promise.all([
+  // Fetch auxiliary tables safely (roles, profiles, watch events — live presence removed)
+  const [profilesRes, rolesRes, watchRes] = await Promise.all([
     dbReader.from('profiles').select('*'),
     dbReader.from('user_roles').select('user_id,role'),
-    dbReader.from('user_presence').select('*'),
     dbReader
       .from('watch_events')
       .select('user_id,item,viewed_at')
@@ -424,23 +529,6 @@ export async function sbGetAdminOverview(client: SupabaseClient): Promise<{
     ((rolesRes.data ?? []) as Array<{ user_id: string; role: string }>)
       .filter((r) => r.role === 'admin')
       .map((r) => String(r.user_id))
-  );
-
-  const presenceById = new Map<
-    string,
-    { last_seen: string | null; current_item: Item | null; page: string | null }
-  >(
-    (
-      (presenceRes.data ?? []) as Array<{
-        user_id: string;
-        last_seen: string | null;
-        current_item: Item | null;
-        page?: string | null;
-      }>
-    ).map((p) => [
-      String(p.user_id),
-      { last_seen: p.last_seen, current_item: p.current_item ?? null, page: p.page ?? null },
-    ])
   );
 
   const watchRows = (watchRes.data ?? []) as Array<{
@@ -461,9 +549,6 @@ export async function sbGetAdminOverview(client: SupabaseClient): Promise<{
         source = 'supabase_auth';
         users = authListRes.data.users.map((au) => {
           const prof = profileById.get(au.id);
-          const pres = presenceById.get(au.id);
-          const lastSeen = pres?.last_seen ?? null;
-          const online = Boolean(lastSeen && now - new Date(lastSeen).getTime() < 90_000);
           const userMeta = (au.user_metadata ?? {}) as Record<string, unknown>;
           const appMeta = (au.app_metadata ?? {}) as Record<string, unknown>;
           const username =
@@ -484,10 +569,10 @@ export async function sbGetAdminOverview(client: SupabaseClient): Promise<{
             avatar: typeof prof?.avatar_url === 'string' ? prof.avatar_url : null,
             isAdmin: Boolean(isAdmin),
             createdAt: au.created_at || new Date().toISOString(),
-            lastSeen,
-            online,
-            currentItem: online ? (pres?.current_item ?? null) : null,
-            currentPage: online ? (pres?.page ?? null) : null,
+            lastSeen: null,
+            online: false,
+            currentItem: null,
+            currentPage: null,
             plays: playsById.get(au.id) ?? 0,
           };
         });
@@ -513,31 +598,24 @@ export async function sbGetAdminOverview(client: SupabaseClient): Promise<{
           is_admin: boolean;
           plays: number;
         }>
-      ).map((u) => {
-        const lastSeen = u.last_seen ?? presenceById.get(u.id)?.last_seen ?? null;
-        const online = Boolean(lastSeen && now - new Date(lastSeen).getTime() < 90_000);
-        return {
-          id: u.id,
-          email: u.email || '—',
-          username: u.username || 'Membre',
-          avatar: null,
-          isAdmin: Boolean(u.is_admin || adminSet.has(u.id)),
-          createdAt: u.created_at,
-          lastSeen,
-          online,
-          currentItem: online ? (u.current_item ?? null) : null,
-          currentPage: null,
-          plays: Number(u.plays) || playsById.get(u.id) || 0,
-        };
-      });
+      ).map((u) => ({
+        id: u.id,
+        email: u.email || '—',
+        username: u.username || 'Membre',
+        avatar: null,
+        isAdmin: Boolean(u.is_admin || adminSet.has(u.id)),
+        createdAt: u.created_at,
+        lastSeen: null,
+        online: false,
+        currentItem: null,
+        currentPage: null,
+        plays: Number(u.plays) || playsById.get(u.id) || 0,
+      }));
     } else if (profileRows.length > 0) {
       // Strategy 3: Direct profiles table read
       source = 'supabase_profiles';
       users = profileRows.map((p) => {
         const id = String(p.id);
-        const pres = presenceById.get(id);
-        const lastSeen = pres?.last_seen ?? null;
-        const online = Boolean(lastSeen && now - new Date(lastSeen).getTime() < 90_000);
         return {
           id,
           email: typeof p.email === 'string' && p.email ? p.email : 'Compte Supabase',
@@ -546,10 +624,10 @@ export async function sbGetAdminOverview(client: SupabaseClient): Promise<{
           isAdmin: Boolean(adminSet.has(id) || p.role === 'admin' || p.is_admin === true),
           createdAt:
             typeof p.created_at === 'string' ? p.created_at : new Date().toISOString(),
-          lastSeen,
-          online,
-          currentItem: online ? (pres?.current_item ?? null) : null,
-          currentPage: online ? (pres?.page ?? null) : null,
+          lastSeen: null,
+          online: false,
+          currentItem: null,
+          currentPage: null,
           plays: playsById.get(id) ?? 0,
         };
       });
@@ -564,11 +642,8 @@ export async function sbGetAdminOverview(client: SupabaseClient): Promise<{
     }
   }
 
-  // Sort active users first, then newest accounts
-  users.sort((a, b) => {
-    if (a.online !== b.online) return a.online ? -1 : 1;
-    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-  });
+  // Sort newest accounts first
+  users.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
   // Top 7 / Top 30 rankings (never fail overview if RPC isn't present)
   const mapTop = (rows: Array<{ item: Item; viewers: number; plays: number }>): RankingEntry[] =>

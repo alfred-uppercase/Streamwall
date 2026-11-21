@@ -31,7 +31,7 @@ import type {
 import { api } from '../lib/client';
 import { ProCrownBadge, UserAvatar } from './UserAvatar';
 
-type SortKey = 'default' | 'username' | 'online' | 'isPro' | 'plays' | 'createdAt';
+type SortKey = 'default' | 'username' | 'status' | 'isPro' | 'plays' | 'createdAt';
 type SortDir = 'asc' | 'desc';
 
 function ItemRow({ item, extra }: { item: Item; extra?: string }) {
@@ -95,7 +95,7 @@ export function AdminUsersTab({
 
   const [search, setSearch] = useState('');
   const [tierFilter, setTierFilter] = useState<'all' | 'pro' | 'free'>('all');
-  const [presenceFilter, setPresenceFilter] = useState<'all' | 'online' | 'offline' | 'banned'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'banned'>('all');
   const [roleFilter, setRoleFilter] = useState<'all' | 'admin' | 'member'>('all');
   const [sortKey, setSortKey] = useState<SortKey>('default');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
@@ -123,9 +123,8 @@ export function AdminUsersTab({
       }
       if (tierFilter === 'pro' && !u.isPro) return false;
       if (tierFilter === 'free' && u.isPro) return false;
-      if (presenceFilter === 'online' && !u.online) return false;
-      if (presenceFilter === 'offline' && u.online) return false;
-      if (presenceFilter === 'banned' && !u.banned) return false;
+      if (statusFilter === 'active' && u.banned) return false;
+      if (statusFilter === 'banned' && !u.banned) return false;
       if (roleFilter === 'admin' && !u.isAdmin) return false;
       if (roleFilter === 'member' && u.isAdmin) return false;
       return true;
@@ -138,8 +137,8 @@ export function AdminUsersTab({
       switch (sortKey) {
         case 'username':
           return a.username.localeCompare(b.username, 'fr') * dir;
-        case 'online':
-          return (Number(a.online) - Number(b.online)) * dir;
+        case 'status':
+          return (Number(Boolean(a.banned)) - Number(Boolean(b.banned))) * dir;
         case 'isPro':
           return (Number(Boolean(a.isPro)) - Number(Boolean(b.isPro))) * dir;
         case 'plays':
@@ -150,14 +149,14 @@ export function AdminUsersTab({
           return 0;
       }
     });
-  }, [users, search, tierFilter, presenceFilter, roleFilter, sortKey, sortDir]);
+  }, [users, search, tierFilter, statusFilter, roleFilter, sortKey, sortDir]);
 
   const totalPages = Math.max(1, Math.ceil(filteredUsers.length / pageSize));
   const safePage = Math.min(page, totalPages);
 
   useEffect(() => {
     setPage(1);
-  }, [search, tierFilter, presenceFilter, roleFilter, pageSize]);
+  }, [search, tierFilter, statusFilter, roleFilter, pageSize]);
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
@@ -280,10 +279,9 @@ export function AdminUsersTab({
   const hasFilters =
     Boolean(search.trim()) ||
     tierFilter !== 'all' ||
-    presenceFilter !== 'all' ||
+    statusFilter !== 'all' ||
     roleFilter !== 'all';
 
-  const watchingNow = users.filter((u) => u.online && u.currentItem).length;
   const rangeStart = filteredUsers.length === 0 ? 0 : (safePage - 1) * pageSize + 1;
   const rangeEnd = Math.min(filteredUsers.length, safePage * pageSize);
 
@@ -316,7 +314,7 @@ export function AdminUsersTab({
           <div>
             <h2 className="font-display text-xl font-semibold text-foreground tabular-nums">
               Utilisateurs ({filteredUsers.length}
-              {hasFilters ? ` / ${users.length}` : ''}) · {watchingNow} en lecture
+              {hasFilters ? ` / ${users.length}` : ''})
             </h2>
             <p className="text-xs text-muted-foreground">
               Cliquez sur un membre pour gérer son rôle, son abonnement Pro et consulter son historique.
@@ -363,15 +361,14 @@ export function AdminUsersTab({
 
           <select
             aria-label="Filtrer par statut"
-            value={presenceFilter}
+            value={statusFilter}
             onChange={(e) =>
-              setPresenceFilter(e.target.value as 'all' | 'online' | 'offline' | 'banned')
+              setStatusFilter(e.target.value as 'all' | 'active' | 'banned')
             }
             className="h-9 rounded-lg border border-input bg-background px-3 text-xs text-foreground focus:border-primary focus:outline-none"
           >
             <option value="all">Tous les statuts</option>
-            <option value="online">En ligne uniquement</option>
-            <option value="offline">Hors ligne</option>
+            <option value="active">Actifs uniquement</option>
             <option value="banned">Bannis uniquement</option>
           </select>
 
@@ -404,7 +401,7 @@ export function AdminUsersTab({
               onClick={() => {
                 setSearch('');
                 setTierFilter('all');
-                setPresenceFilter('all');
+                setStatusFilter('all');
                 setRoleFilter('all');
               }}
               className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-border bg-background px-3 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground whitespace-nowrap"
@@ -433,11 +430,11 @@ export function AdminUsersTab({
                 <th className="py-2.5 px-3 font-medium">
                   <button
                     type="button"
-                    onClick={() => toggleSort('online')}
+                    onClick={() => toggleSort('status')}
                     className="inline-flex items-center gap-1.5 hover:text-foreground"
                   >
                     <span>Statut</span>
-                    {renderSortIcon('online')}
+                    {renderSortIcon('status')}
                   </button>
                 </th>
                 <th className="py-2.5 px-3 font-medium">
@@ -527,16 +524,8 @@ export function AdminUsersTab({
                             <Ban className="size-3.5" />
                             <span>Banni</span>
                           </span>
-                        ) : u.online ? (
-                          <span className="font-semibold text-emerald-400">
-                            {u.currentItem ? `En lecture : ${u.currentItem.titre}` : 'En ligne'}
-                          </span>
-                        ) : u.lastSeen ? (
-                          <span className="text-muted-foreground">
-                            Vu {new Date(u.lastSeen).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
-                          </span>
                         ) : (
-                          <span className="text-muted-foreground">Hors ligne</span>
+                          <span className="font-medium text-emerald-400">Actif</span>
                         )}
                       </td>
 
@@ -734,7 +723,7 @@ export function AdminUsersTab({
                     {selectedUser.isPro && <ProCrownBadge />}
                   </div>
                   <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">
-                    {selectedUser.email} · {selectedUser.online ? 'Actuellement en ligne' : 'Hors ligne'} · Inscrit le{' '}
+                    {selectedUser.email} · {selectedUser.banned ? 'Compte banni' : 'Compte actif'} · Inscrit le{' '}
                     {new Date(selectedUser.createdAt).toLocaleDateString('fr-FR')}
                   </p>
                 </div>
@@ -967,41 +956,28 @@ export function AdminUsersTab({
               </div>
             </div>
 
-            <div className="grid gap-6 md:grid-cols-2">
-              <div>
-                <h4 className="mb-2 text-xs font-semibold text-muted-foreground">
-                  En cours de lecture
-                </h4>
-                {selectedUser.online && selectedUser.currentItem ? (
-                  <ItemRow item={selectedUser.currentItem} extra="En direct" />
-                ) : (
-                  <p className="text-sm text-muted-foreground">Aucune lecture active.</p>
-                )}
-              </div>
-
-              <div>
-                <h4 className="mb-2 text-xs font-semibold text-muted-foreground">
-                  Historique de visionnage
-                </h4>
-                {historyQuery.isLoading ? (
-                  <p className="text-sm text-muted-foreground">Chargement…</p>
-                ) : historyQuery.data?.history.length ? (
-                  <div className="max-h-72 space-y-1 overflow-y-auto pr-1">
-                    {historyQuery.data.history.map((h) => (
-                      <ItemRow
-                        key={h.id}
-                        item={h.item}
-                        extra={new Date(h.viewedAt).toLocaleString('fr-FR', {
-                          dateStyle: 'short',
-                          timeStyle: 'short',
-                        })}
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-sm text-muted-foreground">Aucun visionnage enregistré.</p>
-                )}
-              </div>
+            <div>
+              <h4 className="mb-2 text-xs font-semibold text-muted-foreground">
+                Historique de visionnage
+              </h4>
+              {historyQuery.isLoading ? (
+                <p className="text-sm text-muted-foreground">Chargement…</p>
+              ) : historyQuery.data?.history.length ? (
+                <div className="max-h-72 space-y-1 overflow-y-auto pr-1">
+                  {historyQuery.data.history.map((h) => (
+                    <ItemRow
+                      key={h.id}
+                      item={h.item}
+                      extra={new Date(h.viewedAt).toLocaleString('fr-FR', {
+                        dateStyle: 'short',
+                        timeStyle: 'short',
+                      })}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">Aucun visionnage enregistré.</p>
+              )}
             </div>
           </div>
         )}

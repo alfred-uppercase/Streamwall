@@ -121,7 +121,19 @@ const listModulesStmt = sqlite.prepare(
 
 const pendingSupabaseSync = new Map<string, NodeJS.Timeout>();
 
+// Only tiny, rarely-edited admin configuration modules should ever touch Supabase `app_settings`.
+// High-churn or multi-MB modules (`analytics`, `store`, `mail_logs`, `notifications`, etc.)
+// remain strictly in local SQLite WAL so concurrent visitors never lock or timeout `app_settings`.
+const REMOTE_MIRROR_ALLOWLIST = new Set(['billing', 'popups', 'privacy']);
+const MAX_REMOTE_MIRROR_BYTES = 100 * 1024;
+
+export function isRemoteMirrorAllowed(moduleKey: string): boolean {
+  return REMOTE_MIRROR_ALLOWLIST.has(moduleKey);
+}
+
 function scheduleSupabaseMirror(moduleKey: string, payload: string): void {
+  if (!isRemoteMirrorAllowed(moduleKey)) return;
+  if (Buffer.byteLength(payload, 'utf8') > MAX_REMOTE_MIRROR_BYTES) return;
   if (!isSupabaseEnabled()) return;
   const admin = createAdminClient();
   if (!admin) return;
@@ -144,7 +156,7 @@ function scheduleSupabaseMirror(moduleKey: string, payload: string): void {
         // Ignore transient remote sync failure
       }
     })();
-  }, 1500);
+  }, 5_000);
 
   pendingSupabaseSync.set(moduleKey, timer);
 }
@@ -196,14 +208,15 @@ export async function hydrateModulesFromSupabase(): Promise<void> {
   const admin = createAdminClient();
   if (!admin) return;
   try {
+    const allowedKeys = [...REMOTE_MIRROR_ALLOWLIST].map((k) => `tapenaka_module_${k}`);
     const { data, error } = await admin
       .from('app_settings')
       .select('key,value')
-      .like('key', 'tapenaka_module_%');
+      .in('key', allowedKeys);
     if (error || !Array.isArray(data)) return;
     for (const row of data as { key: string; value: string }[]) {
       const moduleKey = row.key.replace(/^tapenaka_module_/, '');
-      if (!moduleKey || typeof row.value !== 'string') continue;
+      if (!moduleKey || !isRemoteMirrorAllowed(moduleKey) || typeof row.value !== 'string') continue;
       const local = selectModuleStmt.get(moduleKey) as { payload?: string } | undefined;
       if (!local?.payload) {
         upsertModuleStmt.run(moduleKey, row.value, new Date().toISOString());

@@ -22,8 +22,6 @@ import {
   Film,
   Globe,
   Monitor,
-  Radio,
-  RefreshCw,
   Smartphone,
   Tablet,
   TrendingUp,
@@ -94,17 +92,9 @@ export function AdminAnalyticsTab() {
         start: periodKey === 'custom' ? customStart : undefined,
         end: periodKey === 'custom' ? customEnd : undefined,
       }),
-    refetchInterval: 30_000,
-  });
-
-  const realtimeQuery = useQuery({
-    queryKey: ['admin-analytics-realtime'],
-    queryFn: () => api.adminAnalyticsRealtime(),
-    refetchInterval: 5_000,
   });
 
   const data = analyticsQuery.data;
-  const realtime = realtimeQuery.data ?? data?.realtime;
 
   const summary = data?.summary;
   const newPct =
@@ -227,16 +217,6 @@ export function AdminAnalyticsTab() {
             </div>
 
             <div className="rounded-xl border border-border bg-card p-5">
-              <p className="text-xs font-medium text-muted-foreground">
-                Visiteurs actuellement en ligne
-              </p>
-              <p className="mt-2 font-display text-3xl font-bold text-emerald-400 tabular-nums">
-                {formatNumber(realtime?.activeCount ?? data.summary.activeNow)}
-              </p>
-              <p className="mt-1 text-xs text-muted-foreground">Activité &lt; 60 secondes</p>
-            </div>
-
-            <div className="rounded-xl border border-border bg-card p-5">
               <p className="text-xs font-medium text-muted-foreground">Durée moyenne des sessions</p>
               <p className="mt-2 font-display text-3xl font-bold text-foreground tabular-nums">
                 {formatDuration(data.summary.avgSessionDurationSec)}
@@ -274,92 +254,6 @@ export function AdminAnalyticsTab() {
                 <span>Récurrents ({retPct}%)</span>
               </p>
             </div>
-          </section>
-
-          {/* Real-Time Visitors Section */}
-          <section className="rounded-xl border border-border bg-card p-5">
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5">
-                <Radio className="size-4 text-emerald-400" />
-                <h3 className="font-display text-lg font-semibold text-foreground">
-                  Visiteurs en temps réel
-                </h3>
-                <span className="text-xs font-semibold text-emerald-400 tabular-nums">
-                  · {realtime?.activeCount ?? 0} actif(s)
-                </span>
-              </div>
-
-              <div className="flex items-center gap-3 text-xs text-muted-foreground tabular-nums">
-                <span>Actualisation auto (5s)</span>
-                {realtime?.checkedAt && (
-                  <span>
-                    Dernière sync :{' '}
-                    {new Date(realtime.checkedAt).toLocaleTimeString('fr-FR')}
-                  </span>
-                )}
-                <button
-                  type="button"
-                  onClick={() => void realtimeQuery.refetch()}
-                  className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2.5 py-1 text-foreground hover:bg-accent"
-                >
-                  <RefreshCw
-                    className={`size-3 ${realtimeQuery.isFetching ? 'animate-spin' : ''}`}
-                  />
-                  <span>Actualiser</span>
-                </button>
-              </div>
-            </div>
-
-            {realtime && realtime.visitors.length > 0 ? (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead className="border-b border-border text-muted-foreground">
-                    <tr>
-                      <th className="py-2.5 pr-4 font-medium">Pays & Région</th>
-                      <th className="py-2.5 px-4 font-medium">Page consultée</th>
-                      <th className="py-2.5 px-4 font-medium">Appareil</th>
-                      <th className="py-2.5 px-4 font-medium">Navigateur</th>
-                      <th className="py-2.5 pl-4 text-right font-medium">Dernière activité</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border">
-                    {realtime.visitors.map((v) => (
-                      <tr key={v.sessionId}>
-                        <td className="py-2.5 pr-4 font-medium text-foreground">
-                          <span>{v.countryName}</span>
-                          <span className="text-muted-foreground">
-                            {' '}
-                            · {v.region} ({v.city})
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-4">
-                          <span className="font-medium text-foreground">{v.currentTitle}</span>
-                          <span className="ml-2 font-mono text-[11px] text-muted-foreground">
-                            {v.currentPath}
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-4">
-                          <span className="inline-flex items-center gap-1.5 text-foreground">
-                            <DeviceIcon kind={v.deviceType} />
-                            <span>
-                              {deviceLabel(v.deviceType)} · {v.os}
-                            </span>
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-4 text-foreground">{v.browser}</td>
-                        <td className="py-2.5 pl-4 text-right font-mono text-muted-foreground tabular-nums">
-                          {new Date(v.lastActivityAt).toLocaleTimeString('fr-FR')}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <p className="text-xs text-muted-foreground">
-                Aucun visiteur actif détecté dans les 60 dernières secondes (votre propre navigation sur le site apparaît ici automatiquement dès qu’une page est consultée).
-              </p>
-            )}
           </section>
 
           {/* Traffic Evolution & Hourly Frequency Histogram */}

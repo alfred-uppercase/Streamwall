@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import type {
@@ -47,7 +47,6 @@ import type {
 import type {
   AnalyticsDashboardPayload,
   AnalyticsPeriodKey,
-  RealtimePayload,
 } from '../shared/analyticsTypes';
 
 const STORAGE_TOKEN_KEY = 'tapenaka_auth_token';
@@ -365,11 +364,6 @@ export const api = {
     apiRequest<{ ok: boolean }>(`/api/friends/${encodeURIComponent(friendId)}`, {
       method: 'DELETE',
     }),
-  heartbeat: (page: string, item: Item | null) =>
-    apiRequest<{ ok: boolean }>('/api/presence/heartbeat', {
-      method: 'POST',
-      body: JSON.stringify({ page, item }),
-    }),
   adminOverview: () => apiRequest<AdminOverview>('/api/admin/overview'),
   adminUserHistory: (userId: string) =>
     apiRequest<{ history: WatchEventRecord[] }>(
@@ -573,7 +567,6 @@ export const api = {
     if (params.end) p.set('end', params.end);
     return apiRequest<AnalyticsDashboardPayload>(`/api/admin/analytics?${p.toString()}`);
   },
-  adminAnalyticsRealtime: () => apiRequest<RealtimePayload>('/api/admin/analytics/realtime'),
 
   // Billing & Subscriptions
   billingPlans: () =>
@@ -788,8 +781,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [watchingItem, setWatchingItem] = useState<Item | null>(null);
   const queryClient = useQueryClient();
   const location = useLocation();
-  const watchingRef = useRef<Item | null>(null);
-  watchingRef.current = watchingItem;
 
   const refreshUser = useCallback(async () => {
     try {
@@ -811,16 +802,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     setWatchingItem(null);
   }, [location.pathname]);
-
-  // Heartbeat every 30s and on route/watching changes when signed in
-  useEffect(() => {
-    if (!user) return;
-    void api.heartbeat(location.pathname, watchingItem).catch(() => {});
-    const timer = window.setInterval(() => {
-      void api.heartbeat(location.pathname, watchingRef.current).catch(() => {});
-    }, 30_000);
-    return () => window.clearInterval(timer);
-  }, [user, location.pathname, watchingItem]);
 
   const setSession = useCallback(
     (token: string, nextUser: UserProfile) => {

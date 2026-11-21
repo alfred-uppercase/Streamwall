@@ -8,6 +8,12 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tapenaka-stores-test-'));
 process.env.TAPENAKA_DB_FILE = path.join(tempDir, 'stores.sqlite');
 process.env.TAPENAKA_SILENT_LOGS = '1';
 
+const {
+  isRemoteMirrorAllowed,
+  readModuleSnapshot,
+  writeModuleSnapshot,
+} = await import('../src/server/persistentDb.ts');
+const { sbResolveUser } = await import('../src/server/supabaseAdapter.ts');
 const { clearErrorLogs, listErrorLogs, recordErrorLog, sanitizeLogContext } = await import(
   '../src/server/errorLogger.ts'
 );
@@ -270,4 +276,33 @@ test('friendsStore handles requests, permission guards, decline, cancel, and mut
   cleanupUserFriendRequests(alice.id);
   cleanupUserFriendRequests(bob.id);
   cleanupUserFriendRequests(charlie.id);
+});
+
+test('persistentDb blocks high-churn analytics and store modules from Supabase app_settings mirroring', () => {
+  assert.equal(isRemoteMirrorAllowed('analytics'), false);
+  assert.equal(isRemoteMirrorAllowed('store'), false);
+  assert.equal(isRemoteMirrorAllowed('notifications'), false);
+  assert.equal(isRemoteMirrorAllowed('mail_logs'), false);
+  assert.equal(isRemoteMirrorAllowed('pending_signups'), false);
+  assert.equal(isRemoteMirrorAllowed('otp_challenges'), false);
+  assert.equal(isRemoteMirrorAllowed('email_cooldowns'), false);
+
+  assert.equal(isRemoteMirrorAllowed('billing'), true);
+  assert.equal(isRemoteMirrorAllowed('popups'), true);
+  assert.equal(isRemoteMirrorAllowed('privacy'), true);
+
+  writeModuleSnapshot('analytics', { test: true, count: 42 });
+  const loaded = readModuleSnapshot<{ test: boolean; count: number }>('analytics');
+  assert.deepEqual(loaded, { test: true, count: 42 });
+});
+
+test('sbResolveUser rejects malformed or expired JWTs locally without hitting Supabase Auth', async () => {
+  assert.equal(await sbResolveUser(null), null);
+  assert.equal(await sbResolveUser('not-a-jwt'), null);
+
+  const expiredPayload = Buffer.from(
+    JSON.stringify({ sub: 'user-1', exp: Math.floor(Date.now() / 1000) - 60 })
+  ).toString('base64url');
+  const expiredJwt = `eyJhbGciOiJIUzI1NiJ9.${expiredPayload}.sig`;
+  assert.equal(await sbResolveUser(expiredJwt), null);
 });

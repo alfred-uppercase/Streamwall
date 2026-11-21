@@ -111,7 +111,7 @@ export function Navbar() {
   const notificationsQuery = useQuery({
     queryKey: ['notifications', user?.id ?? 'guest'],
     queryFn: () => api.notifications(),
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
   });
 
   const markReadMutation = useMutation({

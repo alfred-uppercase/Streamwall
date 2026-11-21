@@ -319,3 +319,24 @@ test('Friend requests notify recipient, require acceptance, and create mutual fr
     false
   );
 });
+
+test('Presence heartbeat and analytics ping respond quickly as zero-DB no-ops', async () => {
+  const [hbRes, pingRes] = await Promise.all([
+    fetch(`${baseUrl}/api/presence/heartbeat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ page: '/', item: null }),
+    }),
+    fetch(`${baseUrl}/api/analytics/ping`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: 's_test', path: '/' }),
+    }),
+  ]);
+  assert.equal(hbRes.status, 200);
+  assert.equal(pingRes.status, 200);
+  const hbJson = (await hbRes.json()) as { ok: boolean };
+  const pingJson = (await pingRes.json()) as { ok: boolean };
+  assert.equal(hbJson.ok, true);
+  assert.equal(pingJson.ok, true);
+});

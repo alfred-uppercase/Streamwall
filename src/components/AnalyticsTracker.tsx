@@ -68,20 +68,18 @@ function resolveRouteTitle(pathname: string, siteName: string): string {
 export function AnalyticsTracker() {
   const location = useLocation();
   const { siteName } = useSiteConfig();
-  const lastPathRef = useRef<string>('');
-  const lastTitleRef = useRef<string>(siteName);
-  const lastPingAtRef = useRef<number>(Date.now());
+  const lastCollectedKeyRef = useRef<string>('');
 
   useEffect(() => {
     const visitorId = getOrCreateVisitorId();
     const sessionId = getOrCreateSessionId();
     const cleanPath = location.pathname || '/';
-    lastPathRef.current = cleanPath;
+    const collectKey = `${sessionId}:${cleanPath}`;
+    if (lastCollectedKeyRef.current === collectKey) return;
 
     const sendCollect = () => {
+      lastCollectedKeyRef.current = collectKey;
       const title = resolveRouteTitle(cleanPath, siteName);
-      lastTitleRef.current = title;
-      lastPingAtRef.current = Date.now();
       const screenResolution =
         typeof window !== 'undefined' && window.screen
           ? `${window.screen.width}×${window.screen.height}`
@@ -114,61 +112,6 @@ export function AnalyticsTracker() {
 
     return () => {
       window.clearTimeout(delayTimer);
-    };
-  }, [location.pathname, siteName]);
-
-  useEffect(() => {
-    const sendPing = (useBeacon: boolean) => {
-      if (document.visibilityState === 'hidden' && !useBeacon) return;
-      const sessionId = getOrCreateSessionId();
-      const now = Date.now();
-      const deltaSec = Math.max(1, Math.min(45, Math.round((now - lastPingAtRef.current) / 1000)));
-      lastPingAtRef.current = now;
-
-      const latestTitle = resolveRouteTitle(lastPathRef.current || location.pathname, siteName);
-      lastTitleRef.current = latestTitle;
-
-      const payload = JSON.stringify({
-        sessionId,
-        path: lastPathRef.current || location.pathname,
-        title: latestTitle,
-        deltaSec,
-      });
-
-      if (useBeacon && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
-        const blob = new Blob([payload], { type: 'application/json' });
-        navigator.sendBeacon('/api/analytics/ping', blob);
-        return;
-      }
-
-      void fetch('/api/analytics/ping', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: payload,
-        keepalive: true,
-      }).catch(() => {});
-    };
-
-    const interval = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        sendPing(false);
-      }
-    }, 15_000);
-
-    const onVisibility = () => {
-      if (document.visibilityState === 'hidden') {
-        sendPing(true);
-      }
-    };
-    const onPageHide = () => sendPing(true);
-
-    document.addEventListener('visibilitychange', onVisibility);
-    window.addEventListener('pagehide', onPageHide);
-
-    return () => {
-      window.clearInterval(interval);
-      document.removeEventListener('visibilitychange', onVisibility);
-      window.removeEventListener('pagehide', onPageHide);
     };
   }, [location.pathname, siteName]);
 

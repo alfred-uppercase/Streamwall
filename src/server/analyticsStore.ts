@@ -23,9 +23,8 @@ import { COUNTRIES_BY_CODE, TIMEZONE_TO_GEO } from '../shared/geoCountries.ts';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', '..', '.data');
 const ANALYTICS_FILE = path.join(DATA_DIR, 'tapenaka-analytics.json');
-const ACTIVE_WINDOW_MS = 60_000;
-const MAX_SESSIONS = 12_000;
-const MAX_PAGEVIEWS = 35_000;
+const MAX_SESSIONS = 4_000;
+const MAX_PAGEVIEWS = 10_000;
 
 export interface AnalyticsSessionRecord {
   sessionId: string;
@@ -364,7 +363,7 @@ function scheduleSave(state: AnalyticsDatabase): void {
   saveScheduled = setTimeout(() => {
     saveScheduled = null;
     saveAnalyticsDb(state);
-  }, 4_000);
+  }, 30_000);
 }
 
 const analyticsDb: AnalyticsDatabase = loadAnalyticsDb();
@@ -456,41 +455,13 @@ export function recordAnalyticsCollect(params: {
   scheduleSave(analyticsDb);
 }
 
-export function recordAnalyticsPing(params: {
+export function recordAnalyticsPing(_params: {
   sessionId: string;
   path?: string;
   title?: string;
   deltaSec?: number;
 }) {
-  const session = analyticsDb.sessions.find((s) => s.sessionId === params.sessionId);
-  if (!session) return;
-
-  const nowMs = Date.now();
-  session.lastActivityAt = new Date(nowMs).toISOString();
-  if (params.path) {
-    session.currentPath = params.path.slice(0, 160);
-    session.exitPath = session.currentPath;
-  }
-  if (params.title) {
-    session.currentTitle = params.title.slice(0, 120);
-  }
-
-  const delta = Math.max(1, Math.min(60, Number(params.deltaSec) || 15));
-  session.durationSec = Math.max(
-    session.durationSec + delta,
-    Math.round((nowMs - new Date(session.startedAt).getTime()) / 1000)
-  );
-
-  // Increment dwell time on the latest pageview of this session
-  for (let i = analyticsDb.pageViews.length - 1; i >= 0; i--) {
-    const pv = analyticsDb.pageViews[i];
-    if (pv.sessionId === params.sessionId) {
-      pv.durationSec = Math.min(3600, pv.durationSec + delta);
-      break;
-    }
-  }
-
-  scheduleSave(analyticsDb);
+  // Real-time dwell pings disabled to avoid periodic traffic bursts and disk/DB lock contention.
 }
 
 function resolveDateRange(
@@ -571,27 +542,10 @@ function resolveDateRange(
 }
 
 export function computeRealtimeAnalytics(): RealtimePayload {
-  const nowMs = Date.now();
-  const active = analyticsDb.sessions
-    .filter((s) => nowMs - new Date(s.lastActivityAt).getTime() <= ACTIVE_WINDOW_MS)
-    .sort((a, b) => new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime());
-
   return {
-    activeCount: active.length,
-    checkedAt: new Date(nowMs).toISOString(),
-    visitors: active.map((s) => ({
-      sessionId: s.sessionId.slice(0, 10),
-      countryCode: s.countryCode,
-      countryName: s.countryName,
-      region: s.region,
-      city: s.city,
-      currentPath: s.currentPath,
-      currentTitle: s.currentTitle,
-      deviceType: s.deviceType,
-      os: s.os,
-      browser: s.browser,
-      lastActivityAt: s.lastActivityAt,
-    })),
+    activeCount: 0,
+    checkedAt: new Date().toISOString(),
+    visitors: [],
   };
 }
 

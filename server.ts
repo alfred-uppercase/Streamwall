@@ -45,6 +45,8 @@ import {
 import {
   createAdminClient,
   createAnonClient,
+  invalidateSbSettingsCache,
+  invalidateSbUserCache,
   isSupabaseEnabled,
   sbGetAdminOverview,
   sbGetApiOrigin,
@@ -83,7 +85,6 @@ import {
   computeAnalyticsDashboard,
   computeRealtimeAnalytics,
   recordAnalyticsCollect,
-  recordAnalyticsPing,
 } from './src/server/analyticsStore.ts';
 import {
   assignUserPlan,
@@ -194,7 +195,6 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3000;
-const ONLINE_WINDOW_MS = 90_000;
 const DEFAULT_ORIGIN = (process.env.STREAMWALL_API_ORIGIN || 'https://streamwall.behoririka.mg').replace(
   /\/+$/,
   ''
@@ -2410,6 +2410,9 @@ export async function createApiApp(): Promise<express.Express> {
 
   app.post('/api/auth/logout', (req, res) => {
     const token = extractToken(req);
+    if (token) {
+      invalidateSbUserCache({ token });
+    }
     if (!isSupabaseEnabled() && token) {
       db.sessions = db.sessions.filter((s) => s.token !== token);
       saveDb(db);
@@ -2984,18 +2987,16 @@ export async function createApiApp(): Promise<express.Express> {
 
     if (auth) {
       if (isSupabaseEnabled() && auth.sbClient) {
-        await auth.sbClient.from('watch_events').insert({
-          user_id: auth.user.id,
-          item_id: rawItem.id,
-          item_type: rawItem.item_type,
-          item: rawItem,
-        });
-        await auth.sbClient.from('user_presence').upsert({
-          user_id: auth.user.id,
-          last_seen: new Date().toISOString(),
-          current_item: rawItem,
-          page: `/${rawItem.item_type}/${rawItem.id}`,
-        });
+        try {
+          await auth.sbClient.from('watch_events').insert({
+            user_id: auth.user.id,
+            item_id: rawItem.id,
+            item_type: rawItem.item_type,
+            item: rawItem,
+          });
+        } catch {
+          // Non-fatal if Supabase watch_events insert fails transiently
+        }
       } else {
         db.watchEvents.unshift({
           id: crypto.randomUUID(),
@@ -3006,12 +3007,6 @@ export async function createApiApp(): Promise<express.Express> {
           viewedAt: new Date().toISOString(),
         });
         if (db.watchEvents.length > 500) db.watchEvents = db.watchEvents.slice(0, 500);
-        db.presence[auth.user.id] = {
-          userId: auth.user.id,
-          lastSeen: new Date().toISOString(),
-          currentItem: rawItem,
-          page: `/${rawItem.item_type}/${rawItem.id}`,
-        };
       }
 
       // Watch history tracking — keep only the 5 most recent watched titles
@@ -3244,13 +3239,10 @@ export async function createApiApp(): Promise<express.Express> {
     const history = dedupTop5History(db.watchEvents.filter((w) => w.userId === auth.user.id));
 
     const friendLinks = db.friendships.filter((f) => f.userId === auth.user.id);
-    const now = Date.now();
     const friends = friendLinks
       .map((link) => {
         const fu = db.users.find((u) => u.id === link.friendId);
         if (!fu) return null;
-        const pres = db.presence[fu.id];
-        const online = Boolean(pres && now - new Date(pres.lastSeen).getTime() < ONLINE_WINDOW_MS);
         const recent = db.watchEvents
           .filter((w) => w.userId === fu.id)
           .sort((a, b) => new Date(b.viewedAt).getTime() - new Date(a.viewedAt).getTime())[0];
@@ -3259,8 +3251,8 @@ export async function createApiApp(): Promise<express.Express> {
           username: fu.username,
           avatar: resolveUserAvatar(fu.id, fu.avatar),
           isPro: isUserPro(fu.id),
-          online,
-          currentItem: online ? (pres?.currentItem ?? null) : null,
+          online: false,
+          currentItem: null,
           recentWatch: recent ? { item: recent.item, viewedAt: recent.viewedAt } : null,
         };
       })
@@ -3375,7 +3367,7 @@ export async function createApiApp(): Promise<express.Express> {
     const chosenAvatar = setUserAvatarChoice(auth.user.id, requestedAvatar);
 
     if (isSupabaseEnabled() && auth.sbClient) {
-      const refreshed = await sbResolveUser(auth.token);
+      const refreshed = await sbResolveUser(auth.token, { skipCache: true });
       res.json({
         profile: enrichUserProfile(
           refreshed?.user ?? { ...auth.user, avatar: chosenAvatar }
@@ -4402,32 +4394,9 @@ export async function createApiApp(): Promise<express.Express> {
     res.json({ ok: true });
   });
 
-  app.post('/api/presence/heartbeat', async (req, res) => {
-    const auth = await resolveAuth(req);
-    if (!auth) {
-      res.json({ ok: false });
-      return;
-    }
-    const page = String(req.body?.page ?? '/').slice(0, 200);
-    const item = (req.body?.item as Item | null) ?? null;
-
-    if (isSupabaseEnabled() && auth.sbClient) {
-      await auth.sbClient.from('user_presence').upsert({
-        user_id: auth.user.id,
-        last_seen: new Date().toISOString(),
-        current_item: item,
-        page,
-      });
-      res.json({ ok: true });
-      return;
-    }
-
-    db.presence[auth.user.id] = {
-      userId: auth.user.id,
-      lastSeen: new Date().toISOString(),
-      currentItem: item,
-      page,
-    };
+  // Live presence tracking removed to prevent concurrent database write contention.
+  // Keep endpoint as a zero-DB no-op so any cached client tabs do not receive 404 errors.
+  app.post('/api/presence/heartbeat', (_req, res) => {
     res.json({ ok: true });
   });
 
@@ -4509,11 +4478,8 @@ export async function createApiApp(): Promise<express.Express> {
       }
     }
 
-    const now = Date.now();
     const users = db.users.map((u) => {
       registerUserDirectoryEntry(u.id, u.email, u.username);
-      const pres = db.presence[u.id];
-      const online = Boolean(pres && now - new Date(pres.lastSeen).getTime() < ONLINE_WINDOW_MS);
       const plays = db.watchEvents.filter((w) => w.userId === u.id).length;
       const subscription = getUserSubscription(u.id);
       const ban = getUserBanInfo(u.id);
@@ -4526,10 +4492,10 @@ export async function createApiApp(): Promise<express.Express> {
         isPro: subscription.tier === 'pro',
         subscription,
         createdAt: u.createdAt,
-        lastSeen: pres?.lastSeen ?? null,
-        online,
-        currentItem: online ? (pres?.currentItem ?? null) : null,
-        currentPage: online ? (pres?.page ?? null) : null,
+        lastSeen: null,
+        online: false,
+        currentItem: null,
+        currentPage: null,
         plays,
         banned: Boolean(ban),
         bannedAt: ban?.bannedAt ?? null,
@@ -4621,6 +4587,7 @@ export async function createApiApp(): Promise<express.Express> {
           .eq('user_id', req.params.userId)
           .eq('role', 'admin');
       }
+      invalidateSbUserCache({ userId: req.params.userId });
       res.json({ ok: true, role: nextRole === 'admin' ? 'admin' : 'member' });
       return;
     }
@@ -4681,9 +4648,11 @@ export async function createApiApp(): Promise<express.Express> {
     }
 
     if (shouldBan) {
+      invalidateSbUserCache({ userId: targetId });
       const record = banUser(targetId, auth.user.id, reason);
       res.json({ ok: true, banned: true, bannedAt: record.bannedAt, banReason: record.reason });
     } else {
+      invalidateSbUserCache({ userId: targetId });
       unbanUser(targetId);
       res.json({ ok: true, banned: false, bannedAt: null, banReason: null });
     }
@@ -4899,6 +4868,7 @@ export async function createApiApp(): Promise<express.Express> {
     db.settings.site_name = rawName;
     db.settings.favicon_url = nextFaviconUrl;
     saveDb(db);
+    invalidateSbSettingsCache();
 
     res.json({
       site: {
@@ -5193,6 +5163,7 @@ export async function createApiApp(): Promise<express.Express> {
     }
     db.settings.embed_provider = clean;
     saveDb(db);
+    invalidateSbSettingsCache();
     res.json({ embedProvider: clean });
   });
 
@@ -5216,6 +5187,7 @@ export async function createApiApp(): Promise<express.Express> {
     }
     db.settings.tmdb_api_key = nextKey;
     saveDb(db);
+    invalidateSbSettingsCache();
     upstreamCache.clear();
     clearTmdbCache();
     res.json({ tmdbApiKey: nextKey });
@@ -5244,6 +5216,7 @@ export async function createApiApp(): Promise<express.Express> {
       db.settings.api_origin = clean;
       saveDb(db);
     }
+    invalidateSbSettingsCache();
     upstreamCache.clear();
     res.json({ origin: clean });
   });
@@ -5275,6 +5248,7 @@ export async function createApiApp(): Promise<express.Express> {
       db.settings.players = nextPlayers;
       saveDb(db);
     }
+    invalidateSbSettingsCache();
     res.json({ players: nextPlayers });
   });
 
@@ -5356,34 +5330,10 @@ export async function createApiApp(): Promise<express.Express> {
     res.json({ ok: true });
   });
 
-  app.post(
-    '/api/analytics/ping',
-    express.text({ type: 'text/plain', limit: '32kb' }),
-    (req, res) => {
-      let body: Record<string, unknown> = {};
-      if (typeof req.body === 'string') {
-        try {
-          body = JSON.parse(req.body) as Record<string, unknown>;
-        } catch {
-          body = {};
-        }
-      } else if (req.body && typeof req.body === 'object') {
-        body = req.body as Record<string, unknown>;
-      }
-      const sessionId = String(body.sessionId ?? '').trim().slice(0, 64);
-      if (!sessionId) {
-        res.status(400).json({ ok: false });
-        return;
-      }
-      recordAnalyticsPing({
-        sessionId,
-        path: body.path ? String(body.path) : undefined,
-        title: body.title ? String(body.title) : undefined,
-        deltaSec: body.deltaSec !== undefined ? Number(body.deltaSec) : 15,
-      });
-      res.json({ ok: true });
-    }
-  );
+  // Real-time dwell pings disabled to prevent concurrent visitor write bursts.
+  app.post('/api/analytics/ping', (_req, res) => {
+    res.json({ ok: true });
+  });
 
   app.get('/api/admin/analytics', async (req, res) => {
     const auth = await requireAdmin(req, res);

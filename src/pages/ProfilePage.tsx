@@ -1037,20 +1037,10 @@ export function ProfilePage() {
                     <div className="flex items-center gap-2">
                       <p className="truncate text-sm font-semibold text-foreground">
                         @{friend.username}
-                        <span className="ml-2 text-xs font-normal text-muted-foreground">
-                          {friend.online ? '· En ligne' : '· Hors ligne'}
-                        </span>
                       </p>
                       {friend.isPro && <ProCrownBadge />}
                     </div>
-                    {friend.currentItem ? (
-                      <Link
-                        to={`/${friend.currentItem.item_type}/${friend.currentItem.id}`}
-                        className="truncate text-xs text-primary hover:underline"
-                      >
-                        Regarde actuellement : {friend.currentItem.titre}
-                      </Link>
-                    ) : friend.recentWatch ? (
+                    {friend.recentWatch ? (
                       <Link
                         to={`/${friend.recentWatch.item.item_type}/${friend.recentWatch.item.id}`}
                         className="truncate text-xs text-muted-foreground hover:text-foreground"

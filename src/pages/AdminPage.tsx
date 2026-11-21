@@ -123,7 +123,6 @@ export function AdminPage() {
     queryKey: ['admin-overview'],
     queryFn: () => api.adminOverview(),
     enabled: isAdmin,
-    refetchInterval: 15_000,
   });
 
   const billingQuery = useQuery({
@@ -142,7 +141,6 @@ export function AdminPage() {
     queryKey: ['admin-requests'],
     queryFn: () => api.adminRequests(),
     enabled: isAdmin,
-    refetchInterval: 20_000,
   });
   const pendingRequestsCount = requestsCountQuery.data?.counts.totalPending ?? 0;
 
@@ -282,7 +280,6 @@ export function AdminPage() {
 
   const data = overviewQuery.data;
   const availablePlans = billingQuery.data?.plans ?? [];
-  const onlineUsers = data?.users.filter((u) => u.online) ?? [];
   const totalWeekPlays = (data?.top7 ?? []).reduce((sum, r) => sum + r.plays, 0);
 
   const mergedPlayers: PlayerTemplates | null = settingsQuery.data
@@ -321,12 +318,11 @@ export function AdminPage() {
         </div>
       </div>
 
-      {/* 4-column KPI Strip */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      {/* 3-column KPI Strip */}
+      <div className="grid gap-4 sm:grid-cols-3">
         {[
           { label: 'Membres inscrits', value: data?.users.length ?? 0 },
           { label: 'Membres Pro actifs', value: (data?.users ?? []).filter((u) => u.isPro).length },
-          { label: 'En ligne (90s)', value: onlineUsers.length },
           { label: 'Lectures cumulées (7j)', value: totalWeekPlays },
         ].map((kpi) => (
           <div key={kpi.label} className="rounded-xl border border-border bg-card p-5">
