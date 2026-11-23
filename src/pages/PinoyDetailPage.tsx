@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
+  Crown,
   Download,
   ExternalLink,
   Film,
@@ -77,7 +78,8 @@ const SimilarPinoyCard = memo(function SimilarPinoyCard({ film }: { film: PinoyF
 
 export function PinoyDetailPage() {
   const { slug = '' } = useParams<{ slug: string }>();
-  const { isMember } = useAuth();
+  const { isMember, isAdmin, isPro } = useAuth();
+  const canDownload = isAdmin || isPro;
   const [posterFailed, setPosterFailed] = useState(false);
   const [galleryHeroFailed, setGalleryHeroFailed] = useState(false);
   const [posterHeroFailed, setPosterHeroFailed] = useState(false);
@@ -120,7 +122,7 @@ export function PinoyDetailPage() {
   }, [playerModalOpen, reportModalOpen, guestAuthAlertOpen]);
 
   const detailQuery = useQuery({
-    queryKey: ['pinoy-detail', slug],
+    queryKey: ['pinoy-detail', slug, canDownload ? 'unlocked' : 'locked'],
     queryFn: () => api.pinoyDetail(slug),
     enabled: Boolean(slug),
     staleTime: 180_000,
@@ -136,6 +138,11 @@ export function PinoyDetailPage() {
   const downloadPlayers: PinoyPlayerSource[] = (data?.players.download ?? []).filter((p) =>
     Boolean(sanitizeHttpUrl(p.url))
   );
+  const isDownloadLocked =
+    Boolean(data?.downloadLocked) || (!canDownload && downloadPlayers.length > 0);
+  const downloadRestrictionMessage =
+    data?.downloadMessage?.trim() ||
+    'Le téléchargement direct est réservé aux membres Pro et aux administrateurs.';
   const primaryPlayer = embedPlayers[0] ?? null;
 
   function openReportModal() {
@@ -354,34 +361,75 @@ export function PinoyDetailPage() {
         </div>
       </section>
 
-      {/* Direct download links */}
-      {downloadPlayers.length > 0 && (
+      {/* Direct download links (Admin & Pro only) */}
+      {((canDownload && downloadPlayers.length > 0) || isDownloadLocked) && (
         <section className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
           <div className="rounded-xl border border-border bg-card p-5 space-y-3">
-            <h2 className="font-display text-lg font-semibold text-foreground">
-              Liens de téléchargement ({downloadPlayers.length})
-            </h2>
-            <div className="flex flex-wrap gap-2.5">
-              {downloadPlayers.map((dl, idx) => {
-                const safeHref = sanitizeHttpUrl(dl.url);
-                if (!safeHref) return null;
-                const meta = [dl.quality, dl.language].filter(Boolean).join(' · ');
-                return (
-                  <a
-                    key={`${dl.provider}-${idx}`}
-                    href={safeHref}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-4 py-2.5 text-xs font-semibold text-foreground transition-colors hover:border-primary/70 hover:bg-accent"
-                  >
-                    <Download className="size-3.5 text-primary" />
-                    <span>Télécharger · {dl.provider}</span>
-                    {meta && <span className="text-muted-foreground font-normal">({meta})</span>}
-                    <ExternalLink className="size-3 text-muted-foreground" />
-                  </a>
-                );
-              })}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="font-display text-lg font-semibold text-foreground">
+                {canDownload && downloadPlayers.length > 0
+                  ? `Liens de téléchargement (${downloadPlayers.length})`
+                  : 'Liens de téléchargement'}
+              </h2>
+              {isDownloadLocked && (
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-amber-400">
+                  <Crown className="size-3" />
+                  <span>Réservé Pro & Admin</span>
+                </span>
+              )}
             </div>
+
+            {canDownload && downloadPlayers.length > 0 ? (
+              <div className="flex flex-wrap gap-2.5">
+                {downloadPlayers.map((dl, idx) => {
+                  const safeHref = sanitizeHttpUrl(dl.url);
+                  if (!safeHref) return null;
+                  const meta = [dl.quality, dl.language].filter(Boolean).join(' · ');
+                  return (
+                    <a
+                      key={`${dl.provider}-${idx}`}
+                      href={safeHref}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-4 py-2.5 text-xs font-semibold text-foreground transition-colors hover:border-primary/70 hover:bg-accent"
+                    >
+                      <Download className="size-3.5 text-primary" />
+                      <span>Télécharger · {dl.provider}</span>
+                      {meta && <span className="text-muted-foreground font-normal">({meta})</span>}
+                      <ExternalLink className="size-3 text-muted-foreground" />
+                    </a>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3 rounded-lg border border-border bg-background/60 p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-start gap-3">
+                  <div className="grid size-9 shrink-0 place-items-center rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-400">
+                    <Lock className="size-4" />
+                  </div>
+                  <p className="text-sm leading-relaxed text-muted-foreground whitespace-pre-line">
+                    {downloadRestrictionMessage}
+                  </p>
+                </div>
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  {!isMember && (
+                    <Link
+                      to="/auth"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3.5 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-accent"
+                    >
+                      <span>Se connecter</span>
+                    </Link>
+                  )}
+                  <Link
+                    to="/pricing"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90"
+                  >
+                    <Crown className="size-3.5" />
+                    <span>Passer Pro</span>
+                  </Link>
+                </div>
+              </div>
+            )}
           </div>
         </section>
       )}

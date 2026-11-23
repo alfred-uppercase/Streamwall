@@ -801,6 +801,8 @@ export interface PinoyDetailResponse {
     embed: PinoyPlayerSource[];
     download: PinoyPlayerSource[];
   };
+  downloadLocked?: boolean;
+  downloadMessage?: string;
   similar: PinoyFilm[];
   error?: string;
 }

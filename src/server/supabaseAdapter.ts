@@ -445,6 +445,29 @@ export async function sbGetPinoyPlayerTemplate(fallbackTemplate: string): Promis
   });
 }
 
+export async function sbGetPinoyDownloadMessage(fallbackMessage: string): Promise<string> {
+  const cached = getSbCached<string>('pinoy_download_message');
+  if (cached !== null) return cached;
+  return sbCoalescer.run('setting:pinoy_download_message', async () => {
+    const recheck = getSbCached<string>('pinoy_download_message');
+    if (recheck !== null) return recheck;
+    try {
+      const sb = createAnonClient();
+      const { data } = await sb
+        .from('app_settings')
+        .select('value')
+        .eq('key', 'pinoy_download_message')
+        .maybeSingle();
+      if (typeof data?.value === 'string' && data.value.trim()) {
+        return setSbCached('pinoy_download_message', data.value.trim());
+      }
+    } catch {
+      // Fall back gracefully
+    }
+    return setSbCached('pinoy_download_message', fallbackMessage);
+  });
+}
+
 export async function sbGetSiteConfig(fallback: SiteConfig): Promise<SiteConfig> {
   const cached = getSbCached<SiteConfig>('site_config');
   if (cached) return cached;

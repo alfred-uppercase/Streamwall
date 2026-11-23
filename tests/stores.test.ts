@@ -50,6 +50,7 @@ const {
   listUserFriendRequests,
 } = await import('../src/server/friendsStore.ts');
 const {
+  DEFAULT_PINOY_DOWNLOAD_MESSAGE,
   DEFAULT_PINOY_MEDIA_BASE_URL,
   DEFAULT_PINOY_PLAYER_TEMPLATE,
   validatePinoyApiUrl,
@@ -58,6 +59,7 @@ const {
   resolvePinoyPlayerUrl,
   embedToDirectDownloadUrl,
   isDirectDownloadUrl,
+  sanitizePinoyDownloadMessage,
   sanitizeExternalHttpUrl,
   resolvePinoyMediaUrl,
   fetchPinoyFacets,
@@ -582,6 +584,14 @@ test('pinoyService validates URLs safely, sanitizes media/player URLs, and handl
   assert.equal(isDirectDownloadUrl('https://abstream.to/d/5q3v8q1q23zr'), true);
   assert.equal(isDirectDownloadUrl('https://random-mirror.example.com/watch/123'), false);
   assert.equal(isDirectDownloadUrl('https://voe.sx/e/3od2eqbnmolo'), false);
+
+  // Download restriction message sanitization
+  assert.equal(sanitizePinoyDownloadMessage(''), DEFAULT_PINOY_DOWNLOAD_MESSAGE);
+  assert.equal(sanitizePinoyDownloadMessage('   '), DEFAULT_PINOY_DOWNLOAD_MESSAGE);
+  assert.equal(
+    sanitizePinoyDownloadMessage('Téléchargement réservé\x00 aux membres Pro.'),
+    'Téléchargement réservé aux membres Pro.'
+  );
 
   // Empty URL returns unconfigured cleanly without network calls
   const facets = await fetchPinoyFacets('');

@@ -28,6 +28,7 @@ import type {
   Episode,
   Item,
   ItemType,
+  PinoyDetailResponse,
   PinoyListFilters,
   PlayerKey,
   PlayerTemplates,
@@ -59,6 +60,7 @@ import {
   sbGetEmbedProvider,
   sbGetMemberData,
   sbGetPinoyApiUrl,
+  sbGetPinoyDownloadMessage,
   sbGetPinoyMediaBaseUrl,
   sbGetPinoyPlayerTemplate,
   sbGetPlayerTemplates,
@@ -68,12 +70,14 @@ import {
   sbResolveUser,
 } from './src/server/supabaseAdapter.ts';
 import {
+  DEFAULT_PINOY_DOWNLOAD_MESSAGE as PINOY_DOWNLOAD_MESSAGE_DEFAULT,
   DEFAULT_PINOY_MEDIA_BASE_URL as PINOY_MEDIA_DEFAULT,
   DEFAULT_PINOY_PLAYER_TEMPLATE as PINOY_PLAYER_DEFAULT,
   clearPinoyCache,
   fetchPinoyDetail,
   fetchPinoyFacets,
   fetchPinoyList,
+  sanitizePinoyDownloadMessage,
   validatePinoyApiUrl,
   validatePinoyMediaBaseUrl,
   validatePinoyPlayerTemplate,
@@ -245,6 +249,9 @@ const DEFAULT_PINOY_MEDIA_BASE_URL = (
 const DEFAULT_PINOY_PLAYER_TEMPLATE = (
   process.env.PINOY_PLAYER_TEMPLATE || PINOY_PLAYER_DEFAULT
 ).trim();
+const DEFAULT_PINOY_DOWNLOAD_MESSAGE = sanitizePinoyDownloadMessage(
+  process.env.PINOY_DOWNLOAD_MESSAGE || PINOY_DOWNLOAD_MESSAGE_DEFAULT
+);
 
 interface StoredUser {
   id: string;
@@ -297,6 +304,7 @@ interface DatabaseShape {
     pinoy_api_url?: string;
     pinoy_media_base_url?: string;
     pinoy_player_template?: string;
+    pinoy_download_message?: string;
     site_name?: string;
     favicon_url?: string;
     players: PlayerTemplates;
@@ -699,6 +707,7 @@ function createSeedDb(): DatabaseShape {
       pinoy_api_url: DEFAULT_PINOY_API_URL,
       pinoy_media_base_url: DEFAULT_PINOY_MEDIA_BASE_URL,
       pinoy_player_template: DEFAULT_PINOY_PLAYER_TEMPLATE,
+      pinoy_download_message: DEFAULT_PINOY_DOWNLOAD_MESSAGE,
       site_name: 'StreamWall',
       favicon_url: '/favicon.ico',
       players: { ...DEFAULT_PLAYERS },
@@ -1013,6 +1022,16 @@ async function getPinoyPlayerTemplate(): Promise<string> {
     return sbGetPinoyPlayerTemplate(localTpl);
   }
   return localTpl;
+}
+
+async function getPinoyDownloadMessage(): Promise<string> {
+  const localMsg = sanitizePinoyDownloadMessage(
+    db.settings.pinoy_download_message ?? DEFAULT_PINOY_DOWNLOAD_MESSAGE
+  );
+  if (isSupabaseEnabled()) {
+    return sanitizePinoyDownloadMessage(await sbGetPinoyDownloadMessage(localMsg));
+  }
+  return localMsg;
 }
 
 async function getPlayerTemplates(): Promise<PlayerTemplates> {
@@ -3132,18 +3151,43 @@ export async function createApiApp(): Promise<express.Express> {
       res.status(400).json({ error: 'Identifiant de film Pinoy invalide.' });
       return;
     }
-    const [apiUrl, mediaBaseUrl, playerTemplate] = await Promise.all([
+    const [auth, apiUrl, mediaBaseUrl, playerTemplate, downloadMessage] = await Promise.all([
+      resolveAuth(req),
       getPinoyApiUrl(),
       getPinoyMediaBaseUrl(),
       getPinoyPlayerTemplate(),
+      getPinoyDownloadMessage(),
     ]);
     const detail = await fetchPinoyDetail(apiUrl, slug, 12, mediaBaseUrl, playerTemplate);
     if (detail.status === 'live' && !detail.film) {
       res.status(404).json({ error: 'Film Pinoy introuvable.' });
       return;
     }
-    res.setHeader('Cache-Control', 'public, max-age=120, s-maxage=600, stale-while-revalidate=1200');
-    res.json(detail);
+
+    const canDownload = Boolean(auth && (auth.user.role === 'admin' || auth.user.isPro));
+    const hasDownloads = detail.players.download.length > 0;
+    const responsePayload: PinoyDetailResponse = canDownload
+      ? {
+          ...detail,
+          downloadLocked: false,
+        }
+      : {
+          ...detail,
+          players: {
+            ...detail.players,
+            download: [],
+          },
+          downloadLocked: hasDownloads,
+          ...(hasDownloads ? { downloadMessage } : {}),
+        };
+
+    res.setHeader('Vary', 'Authorization, Cookie');
+    if (!auth && !extractToken(req)) {
+      res.setHeader('Cache-Control', 'public, max-age=120, s-maxage=600, stale-while-revalidate=1200');
+    } else {
+      res.setHeader('Cache-Control', 'private, no-store');
+    }
+    res.json(responsePayload);
   });
 
   app.get('/api/suggestions', async (req, res) => {
@@ -5140,6 +5184,7 @@ export async function createApiApp(): Promise<express.Express> {
       pinoyApiUrl: await getPinoyApiUrl(),
       pinoyMediaBaseUrl: await getPinoyMediaBaseUrl(),
       pinoyPlayerTemplate: await getPinoyPlayerTemplate(),
+      pinoyDownloadMessage: await getPinoyDownloadMessage(),
       smtp: getAdminSmtpStatus(),
       site: await getSiteConfig(),
       supabaseServiceRoleConfigured: Boolean(createAdminClient()),
@@ -5591,6 +5636,7 @@ export async function createApiApp(): Promise<express.Express> {
     const currentApiUrl = await getPinoyApiUrl();
     const currentMediaBaseUrl = await getPinoyMediaBaseUrl();
     const currentPlayerTemplate = await getPinoyPlayerTemplate();
+    const currentDownloadMessage = await getPinoyDownloadMessage();
 
     const nextRawApiUrl =
       req.body?.pinoyApiUrl !== undefined ? String(req.body.pinoyApiUrl).trim() : currentApiUrl;
@@ -5602,6 +5648,10 @@ export async function createApiApp(): Promise<express.Express> {
       req.body?.pinoyPlayerTemplate !== undefined
         ? String(req.body.pinoyPlayerTemplate).trim()
         : currentPlayerTemplate;
+    const nextDownloadMessage =
+      req.body?.pinoyDownloadMessage !== undefined
+        ? sanitizePinoyDownloadMessage(req.body.pinoyDownloadMessage)
+        : currentDownloadMessage;
 
     const apiValidation = validatePinoyApiUrl(nextRawApiUrl);
     if (!apiValidation.ok) {
@@ -5622,11 +5672,13 @@ export async function createApiApp(): Promise<express.Express> {
     }
 
     if (isSupabaseEnabled() && auth.sbClient) {
+      const writer = createAdminClient() ?? auth.sbClient;
       const now = new Date().toISOString();
-      const { error } = await auth.sbClient.from('app_settings').upsert([
+      const { error } = await writer.from('app_settings').upsert([
         { key: 'pinoy_api_url', value: apiValidation.url, updated_at: now },
         { key: 'pinoy_media_base_url', value: mediaValidation.url, updated_at: now },
         { key: 'pinoy_player_template', value: playerValidation.template, updated_at: now },
+        { key: 'pinoy_download_message', value: nextDownloadMessage, updated_at: now },
       ]);
       if (error) {
         res.status(400).json({ error: error.message });
@@ -5636,6 +5688,7 @@ export async function createApiApp(): Promise<express.Express> {
     db.settings.pinoy_api_url = apiValidation.url;
     db.settings.pinoy_media_base_url = mediaValidation.url;
     db.settings.pinoy_player_template = playerValidation.template;
+    db.settings.pinoy_download_message = nextDownloadMessage;
     saveDb(db);
     invalidateSbSettingsCache();
     clearPinoyCache();
@@ -5643,6 +5696,7 @@ export async function createApiApp(): Promise<express.Express> {
       pinoyApiUrl: apiValidation.url,
       pinoyMediaBaseUrl: mediaValidation.url,
       pinoyPlayerTemplate: playerValidation.template,
+      pinoyDownloadMessage: nextDownloadMessage,
     });
   });
 

@@ -20,6 +20,17 @@ const DETAIL_STALE_MS = 30 * 60_000;
 
 export const DEFAULT_PINOY_MEDIA_BASE_URL = 'https://streamwall.behoririka.mg/';
 export const DEFAULT_PINOY_PLAYER_TEMPLATE = 'https://streamwall.behoririka.mg/pinoy/{id}';
+export const DEFAULT_PINOY_DOWNLOAD_MESSAGE =
+  'Le téléchargement direct est réservé aux membres Pro et aux administrateurs.';
+
+export function sanitizePinoyDownloadMessage(raw: unknown): string {
+  if (typeof raw !== 'string') return DEFAULT_PINOY_DOWNLOAD_MESSAGE;
+  const cleaned = raw
+    .replace(/[\x00-\x09\x0b-\x1f\x7f]/g, '')
+    .trim()
+    .slice(0, 500);
+  return cleaned || DEFAULT_PINOY_DOWNLOAD_MESSAGE;
+}
 
 export function clearPinoyCache(): void {
   pinoyCache.clear();

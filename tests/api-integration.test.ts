@@ -580,7 +580,8 @@ test('Pinoy endpoints respond cleanly and admin Pinoy URL settings validate acce
   });
   assert.equal(ssrfPlayerPut.status, 400);
 
-  // Valid API URL, media base, and player template saved then restored
+  // Valid API URL, media base, player template, and download restriction message saved
+  const customDownloadMsg = 'Passez membre Pro pour débloquer le téléchargement HD.';
   const savePut = await fetch(`${baseUrl}/api/admin/settings/pinoy`, {
     method: 'PUT',
     headers: {
@@ -591,6 +592,7 @@ test('Pinoy endpoints respond cleanly and admin Pinoy URL settings validate acce
       pinoyApiUrl: 'https://example.com/korotoko_ph.php',
       pinoyMediaBaseUrl: 'https://cdn.behoririka.mg',
       pinoyPlayerTemplate: 'https://cdn.behoririka.mg/pinoy/{id}',
+      pinoyDownloadMessage: customDownloadMsg,
     }),
   });
   assert.equal(savePut.status, 200);
@@ -598,10 +600,139 @@ test('Pinoy endpoints respond cleanly and admin Pinoy URL settings validate acce
     pinoyApiUrl: string;
     pinoyMediaBaseUrl: string;
     pinoyPlayerTemplate: string;
+    pinoyDownloadMessage: string;
   };
   assert.equal(saveJson.pinoyApiUrl, 'https://example.com/korotoko_ph.php');
   assert.equal(saveJson.pinoyMediaBaseUrl, 'https://cdn.behoririka.mg/');
   assert.equal(saveJson.pinoyPlayerTemplate, 'https://cdn.behoririka.mg/pinoy/{id}');
+  assert.equal(saveJson.pinoyDownloadMessage, customDownloadMsg);
+
+  // Verify admin settings exposes pinoyDownloadMessage
+  const settingsGet = await fetch(`${baseUrl}/api/admin/settings`, {
+    headers: { Authorization: `Bearer ${adminAuth.token}` },
+  });
+  assert.equal(settingsGet.status, 200);
+  const settingsJson = (await settingsGet.json()) as { pinoyDownloadMessage?: string };
+  assert.equal(settingsJson.pinoyDownloadMessage, customDownloadMsg);
+
+  // Mock upstream Pinoy PHP response to test server-side Pro/Admin-only download gating
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const target = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (target.startsWith('https://example.com/korotoko_ph.php')) {
+      return new Response(
+        JSON.stringify({
+          status: 'success',
+          film: {
+            id: 15,
+            titre: 'Milf 2026',
+            titre_original: null,
+            slug: 'milf-2026',
+            url_source: null,
+            annee: 2026,
+            date_sortie: null,
+            sortie_le: null,
+            pays: 'PH',
+            duree: '90 min',
+            note: 7.5,
+            genres: ['Drame'],
+            synopsis: 'Synopsis test',
+            poster: 'uploads/pinoy/posters/milf-2026.jpg',
+            galerie: ['uploads/pinoy/galerie/frame-1.jpg'],
+          },
+          players: {
+            embed: [{ provider: 'Voe', url: 'https://voe.sx/e/3od2eqbnmolo', quality: 'HD', language: null }],
+            download: [],
+          },
+          similar: [],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return realFetch(input, init);
+  }) as typeof fetch;
+
+  try {
+    // 1. Guest receives no download URLs + downloadLocked + custom message
+    const guestDetailRes = await realFetch(`${baseUrl}/api/pinoy/detail/milf-2026`);
+    assert.equal(guestDetailRes.status, 200);
+    const guestDetail = (await guestDetailRes.json()) as {
+      players: { embed: unknown[]; download: unknown[] };
+      downloadLocked?: boolean;
+      downloadMessage?: string;
+    };
+    assert.equal(guestDetail.players.download.length, 0);
+    assert.equal(guestDetail.downloadLocked, true);
+    assert.equal(guestDetail.downloadMessage, customDownloadMsg);
+
+    // 2. Free member receives no download URLs + downloadLocked + custom message
+    const freeDetailRes = await realFetch(`${baseUrl}/api/pinoy/detail/milf-2026`, {
+      headers: { Authorization: `Bearer ${memberAuth.token}` },
+    });
+    assert.equal(freeDetailRes.status, 200);
+    const freeDetail = (await freeDetailRes.json()) as {
+      players: { download: unknown[] };
+      downloadLocked?: boolean;
+      downloadMessage?: string;
+    };
+    assert.equal(freeDetail.players.download.length, 0);
+    assert.equal(freeDetail.downloadLocked, true);
+    assert.equal(freeDetail.downloadMessage, customDownloadMsg);
+
+    // 3. Admin receives direct download URLs + downloadLocked=false
+    const adminDetailRes = await realFetch(`${baseUrl}/api/pinoy/detail/milf-2026`, {
+      headers: { Authorization: `Bearer ${adminAuth.token}` },
+    });
+    assert.equal(adminDetailRes.status, 200);
+    const adminDetail = (await adminDetailRes.json()) as {
+      players: { download: Array<{ url: string }> };
+      downloadLocked?: boolean;
+    };
+    assert.equal(adminDetail.downloadLocked, false);
+    assert.equal(adminDetail.players.download[0]?.url, 'https://voe.sx/3od2eqbnmolo/download');
+
+    // 4. Pro member receives direct download URLs + downloadLocked=false
+    const billingRes = await realFetch(`${baseUrl}/api/billing/plans`);
+    const billingJson = (await billingRes.json()) as {
+      plans: Array<{ id: string; tier: string }>;
+    };
+    const proPlan = billingJson.plans.find((p) => p.tier === 'pro');
+    assert.ok(proPlan);
+
+    const memberMeRes = await realFetch(`${baseUrl}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${memberAuth.token}` },
+    });
+    const memberMe = (await memberMeRes.json()) as { user: { id: string } };
+
+    const assignRes = await realFetch(`${baseUrl}/api/admin/users/${memberMe.user.id}/subscription`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminAuth.token}`,
+      },
+      body: JSON.stringify({ planId: proPlan.id, durationDays: 30, replaceExisting: true }),
+    });
+    assert.equal(assignRes.status, 200);
+
+    const proDetailRes = await realFetch(`${baseUrl}/api/pinoy/detail/milf-2026`, {
+      headers: { Authorization: `Bearer ${memberAuth.token}` },
+    });
+    assert.equal(proDetailRes.status, 200);
+    const proDetail = (await proDetailRes.json()) as {
+      players: { download: Array<{ url: string }> };
+      downloadLocked?: boolean;
+    };
+    assert.equal(proDetail.downloadLocked, false);
+    assert.equal(proDetail.players.download[0]?.url, 'https://voe.sx/3od2eqbnmolo/download');
+
+    // Revoke Pro so member returns to free tier
+    await realFetch(`${baseUrl}/api/admin/users/${memberMe.user.id}/revoke-pro`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminAuth.token}` },
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 
   const clearPut = await fetch(`${baseUrl}/api/admin/settings/pinoy`, {
     method: 'PUT',
@@ -613,6 +744,8 @@ test('Pinoy endpoints respond cleanly and admin Pinoy URL settings validate acce
       pinoyApiUrl: '',
       pinoyMediaBaseUrl: 'https://streamwall.behoririka.mg/',
       pinoyPlayerTemplate: 'https://streamwall.behoririka.mg/pinoy/{id}',
+      pinoyDownloadMessage:
+        'Le téléchargement direct est réservé aux membres Pro et aux administrateurs.',
     }),
   });
   assert.equal(clearPut.status, 200);
@@ -620,10 +753,15 @@ test('Pinoy endpoints respond cleanly and admin Pinoy URL settings validate acce
     pinoyApiUrl: string;
     pinoyMediaBaseUrl: string;
     pinoyPlayerTemplate: string;
+    pinoyDownloadMessage: string;
   };
   assert.equal(clearJson.pinoyApiUrl, '');
   assert.equal(clearJson.pinoyMediaBaseUrl, 'https://streamwall.behoririka.mg/');
   assert.equal(clearJson.pinoyPlayerTemplate, 'https://streamwall.behoririka.mg/pinoy/{id}');
+  assert.equal(
+    clearJson.pinoyDownloadMessage,
+    'Le téléchargement direct est réservé aux membres Pro et aux administrateurs.'
+  );
 
   // Pinoy comments and broken reports
   const commentRes = await fetch(`${baseUrl}/api/comments`, {

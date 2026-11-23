@@ -438,6 +438,7 @@ export const api = {
       pinoyApiUrl?: string;
       pinoyMediaBaseUrl?: string;
       pinoyPlayerTemplate?: string;
+      pinoyDownloadMessage?: string;
       smtp: AdminSmtpStatus;
       site: SiteConfig;
       supabaseServiceRoleConfigured?: boolean;
@@ -536,12 +537,18 @@ export const api = {
   adminSavePinoyApiUrl: (
     payload:
       | string
-      | { pinoyApiUrl?: string; pinoyMediaBaseUrl?: string; pinoyPlayerTemplate?: string }
+      | {
+          pinoyApiUrl?: string;
+          pinoyMediaBaseUrl?: string;
+          pinoyPlayerTemplate?: string;
+          pinoyDownloadMessage?: string;
+        }
   ) =>
     apiRequest<{
       pinoyApiUrl: string;
       pinoyMediaBaseUrl: string;
       pinoyPlayerTemplate: string;
+      pinoyDownloadMessage: string;
     }>('/api/admin/settings/pinoy', {
       method: 'PUT',
       body: JSON.stringify(
