@@ -50,7 +50,7 @@ function ReportRow({
               <ExternalLink className="size-3.5 text-primary" />
             </Link>
             <span className="text-xs font-medium text-primary">
-              {TYPE_LABELS[report.itemType]}
+              {report.itemType === 'pinoy' ? 'Pinoy' : TYPE_LABELS[report.itemType]}
               {report.season && report.episode
                 ? ` · S${report.season}·É${report.episode}`
                 : ''}

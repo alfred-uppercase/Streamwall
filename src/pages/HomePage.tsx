@@ -11,6 +11,33 @@ import { ProCrownBadge, UserAvatar } from '../components/UserAvatar';
 
 const FALLBACK_CINEMA_BACKDROP = '/src/assets/images/cinema_hero_backdrop_1794922115112.jpg';
 
+const HOME_CATEGORIES: readonly { genre: string; label: string }[] = [
+  { genre: 'Action', label: 'Action' },
+  { genre: 'Science-Fiction', label: 'Science-Fiction' },
+  { genre: 'Thriller', label: 'Thriller' },
+  { genre: 'Horreur', label: 'Horreur' },
+  { genre: 'Comédie', label: 'Comédie' },
+  { genre: 'Animation', label: 'Animation' },
+];
+
+function CategoryStripSection() {
+  return (
+    <section aria-label="Catégories" className="mb-14">
+      <div className="grid grid-cols-[repeat(3,auto)] justify-start gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-2.5">
+        {HOME_CATEGORIES.map((cat) => (
+          <Link
+            key={cat.genre}
+            to={`/catalogue?genre=${encodeURIComponent(cat.genre)}`}
+            className="inline-flex w-fit justify-self-start items-center rounded-xl border border-border bg-card px-3 py-2 text-xs font-semibold text-foreground transition-colors duration-150 hover:border-primary/70 hover:bg-accent hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary sm:px-4 sm:py-2.5 sm:text-sm"
+          >
+            <span className="whitespace-nowrap">{cat.label}</span>
+          </Link>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function HeroSlider({ slides }: { slides: Slide[] }) {
   const [index, setIndex] = useState(0);
   const [paused, setPaused] = useState(false);
@@ -283,7 +310,7 @@ export function HomePage() {
         {isMember && data && <ContinueWatchingSection items={data.continueWatching} />}
 
         {/* Derniers ajouts */}
-        <section className="mb-14">
+        <section className="mb-8">
           <div className="mb-5 flex items-baseline justify-between gap-4">
             <h2 className="font-display text-2xl font-bold text-foreground">Derniers ajouts</h2>
             <Link
@@ -305,6 +332,8 @@ export function HomePage() {
             <p className="text-sm text-muted-foreground">Aucun titre disponible pour le moment.</p>
           )}
         </section>
+
+        <CategoryStripSection />
 
         {/* Uniquement pour toi */}
         {isMember && Boolean(data?.forYou.length) && (

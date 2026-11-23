@@ -376,6 +376,75 @@ export async function sbGetTmdbApiKey(fallbackKey: string): Promise<string> {
   });
 }
 
+export async function sbGetPinoyApiUrl(fallbackUrl: string): Promise<string> {
+  const cached = getSbCached<string>('pinoy_api_url');
+  if (cached !== null) return cached;
+  return sbCoalescer.run('setting:pinoy_api_url', async () => {
+    const recheck = getSbCached<string>('pinoy_api_url');
+    if (recheck !== null) return recheck;
+    try {
+      const sb = createAnonClient();
+      const { data } = await sb
+        .from('app_settings')
+        .select('value')
+        .eq('key', 'pinoy_api_url')
+        .maybeSingle();
+      if (typeof data?.value === 'string') {
+        return setSbCached('pinoy_api_url', data.value.trim());
+      }
+    } catch {
+      // Fall back gracefully
+    }
+    return setSbCached('pinoy_api_url', fallbackUrl);
+  });
+}
+
+export async function sbGetPinoyMediaBaseUrl(fallbackUrl: string): Promise<string> {
+  const cached = getSbCached<string>('pinoy_media_base_url');
+  if (cached !== null) return cached;
+  return sbCoalescer.run('setting:pinoy_media_base_url', async () => {
+    const recheck = getSbCached<string>('pinoy_media_base_url');
+    if (recheck !== null) return recheck;
+    try {
+      const sb = createAnonClient();
+      const { data } = await sb
+        .from('app_settings')
+        .select('value')
+        .eq('key', 'pinoy_media_base_url')
+        .maybeSingle();
+      if (typeof data?.value === 'string') {
+        return setSbCached('pinoy_media_base_url', data.value.trim());
+      }
+    } catch {
+      // Fall back gracefully
+    }
+    return setSbCached('pinoy_media_base_url', fallbackUrl);
+  });
+}
+
+export async function sbGetPinoyPlayerTemplate(fallbackTemplate: string): Promise<string> {
+  const cached = getSbCached<string>('pinoy_player_template');
+  if (cached !== null) return cached;
+  return sbCoalescer.run('setting:pinoy_player_template', async () => {
+    const recheck = getSbCached<string>('pinoy_player_template');
+    if (recheck !== null) return recheck;
+    try {
+      const sb = createAnonClient();
+      const { data } = await sb
+        .from('app_settings')
+        .select('value')
+        .eq('key', 'pinoy_player_template')
+        .maybeSingle();
+      if (typeof data?.value === 'string') {
+        return setSbCached('pinoy_player_template', data.value.trim());
+      }
+    } catch {
+      // Fall back gracefully
+    }
+    return setSbCached('pinoy_player_template', fallbackTemplate);
+  });
+}
+
 export async function sbGetSiteConfig(fallback: SiteConfig): Promise<SiteConfig> {
   const cached = getSbCached<SiteConfig>('site_config');
   if (cached) return cached;

@@ -421,7 +421,7 @@ export interface UserProfile {
 
 export interface CommentRecord {
   id: string;
-  itemType: ItemType;
+  itemType: ItemType | 'pinoy';
   itemId: string;
   itemTitle?: string;
   userId: string;
@@ -602,7 +602,7 @@ export type BrokenReportStatus = 'pending' | 'resolved' | 'rejected';
 
 export interface BrokenReportRecord {
   id: string;
-  itemType: ItemType;
+  itemType: ItemType | 'pinoy';
   itemId: string;
   itemTitle: string;
   season: number | null;
@@ -743,5 +743,64 @@ export interface ErrorLogListResponse {
   };
 }
 
+export interface PinoyFilm {
+  id: number;
+  titre: string;
+  titre_original: string | null;
+  slug: string;
+  url_source: string | null;
+  annee: number | null;
+  date_sortie: string | null;
+  sortie_le: string | null;
+  pays: string | null;
+  duree: string | null;
+  note: number | null;
+  genres: string[];
+  synopsis: string | null;
+  poster: string | null;
+  galerie: string[];
+}
 
+export interface PinoyPlayerSource {
+  provider: string;
+  url: string;
+  quality: string | null;
+  language: string | null;
+}
 
+export interface PinoyFacetsResponse {
+  status: 'live' | 'unconfigured' | 'fallback';
+  genres: { nom: string; total: number }[];
+  pays: { code: string; total: number }[];
+  annees: { min: number | null; max: number | null };
+}
+
+export interface PinoyListFilters {
+  q: string;
+  genre: string;
+  pays: string;
+  annee: string;
+  sort: 'recent' | 'oldest' | 'az' | 'za' | 'note';
+  page: number;
+}
+
+export interface PinoyListResponse {
+  status: 'live' | 'unconfigured' | 'fallback';
+  page: number;
+  per_page: number;
+  total: number;
+  total_pages: number;
+  items: PinoyFilm[];
+  error?: string;
+}
+
+export interface PinoyDetailResponse {
+  status: 'live' | 'unconfigured' | 'fallback';
+  film: PinoyFilm | null;
+  players: {
+    embed: PinoyPlayerSource[];
+    download: PinoyPlayerSource[];
+  };
+  similar: PinoyFilm[];
+  error?: string;
+}

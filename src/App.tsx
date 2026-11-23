@@ -24,6 +24,8 @@ import { AdminPage } from './pages/AdminPage';
 import { PricingPage } from './pages/PricingPage';
 import { PrivacyPage } from './pages/PrivacyPage';
 import { AuthPage, ResetPasswordPage } from './pages/AuthPage';
+import { PinoyCataloguePage } from './pages/PinoyCataloguePage';
+import { PinoyDetailPage } from './pages/PinoyDetailPage';
 import { AnalyticsTracker } from './components/AnalyticsTracker';
 import { OfflineIndicator } from './components/PWAInstallButton';
 import { PopupManager } from './components/PopupManager';
@@ -101,6 +103,8 @@ function AppShell() {
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/catalogue" element={<CataloguePage />} />
+          <Route path="/pinoy" element={<PinoyCataloguePage />} />
+          <Route path="/pinoy/:slug" element={<PinoyDetailPage />} />
           <Route path="/suggestion" element={<SuggestionPage />} />
           <Route path="/demandes" element={<RequestsPage />} />
           <Route path="/abonnement" element={<PricingPage />} />
@@ -145,6 +149,9 @@ function AppShell() {
             <div className="flex flex-wrap items-center gap-5">
               <Link to="/catalogue" className="hover:text-foreground whitespace-nowrap">
                 Catalogue
+              </Link>
+              <Link to="/pinoy" className="hover:text-foreground whitespace-nowrap">
+                Pinoy
               </Link>
               <Link to="/suggestion" className="hover:text-foreground whitespace-nowrap">
                 Suggestion

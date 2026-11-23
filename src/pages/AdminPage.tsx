@@ -151,6 +151,12 @@ export function AdminPage() {
   const [originInput, setOriginInput] = useState('');
   const [embedProviderInput, setEmbedProviderInput] = useState('');
   const [tmdbKeyInput, setTmdbKeyInput] = useState('');
+  const [pinoyApiUrlInput, setPinoyApiUrlInput] = useState('');
+  const [pinoyMediaBaseUrlInput, setPinoyMediaBaseUrlInput] = useState('https://streamwall.behoririka.mg/');
+  const [pinoyPlayerTemplateInput, setPinoyPlayerTemplateInput] = useState(
+    'https://streamwall.behoririka.mg/pinoy/{id}'
+  );
+  const pinoyInitRef = useRef(false);
   const [healthReport, setHealthReport] = useState<ApiHealthReport | null>(null);
   const [playerEdits, setPlayerEdits] = useState<Partial<PlayerTemplates>>({});
 
@@ -178,6 +184,18 @@ export function AdminPage() {
       setTmdbKeyInput(settingsQuery.data.tmdbApiKey);
     }
   }, [settingsQuery.data?.tmdbApiKey, tmdbKeyInput]);
+
+  useEffect(() => {
+    if (!settingsQuery.data || pinoyInitRef.current) return;
+    pinoyInitRef.current = true;
+    setPinoyApiUrlInput(settingsQuery.data.pinoyApiUrl ?? '');
+    setPinoyMediaBaseUrlInput(
+      settingsQuery.data.pinoyMediaBaseUrl ?? 'https://streamwall.behoririka.mg/'
+    );
+    setPinoyPlayerTemplateInput(
+      settingsQuery.data.pinoyPlayerTemplate ?? 'https://streamwall.behoririka.mg/pinoy/{id}'
+    );
+  }, [settingsQuery.data]);
 
   const saveSiteConfigMutation = useMutation({
     mutationFn: (payload: {
@@ -226,6 +244,25 @@ export function AdminPage() {
       toast.success('Clé API TMDB enregistrée');
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : 'Clé API TMDB invalide'),
+  });
+
+  const savePinoyApiMutation = useMutation({
+    mutationFn: (payload: {
+      pinoyApiUrl: string;
+      pinoyMediaBaseUrl: string;
+      pinoyPlayerTemplate: string;
+    }) => api.adminSavePinoyApiUrl(payload),
+    onSuccess: (res) => {
+      setPinoyApiUrlInput(res.pinoyApiUrl);
+      setPinoyMediaBaseUrlInput(res.pinoyMediaBaseUrl);
+      setPinoyPlayerTemplateInput(res.pinoyPlayerTemplate);
+      void queryClient.invalidateQueries({ queryKey: ['admin-settings'] });
+      void queryClient.invalidateQueries({ queryKey: ['pinoy-facets'] });
+      void queryClient.invalidateQueries({ queryKey: ['pinoy-list'] });
+      void queryClient.invalidateQueries({ queryKey: ['pinoy-detail'] });
+      toast.success('Configuration Pinoy enregistrée');
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : 'Configuration Pinoy invalide'),
   });
 
   const healthMutation = useMutation({
@@ -703,6 +740,82 @@ export function AdminPage() {
               >
                 {saveTmdbMutation.isPending ? 'Enregistrement…' : 'Enregistrer la clé TMDB'}
               </button>
+            </form>
+          </section>
+
+          <section className="rounded-xl border border-border bg-card p-6">
+            <h2 className="mb-1 font-display text-xl font-semibold text-foreground">
+              API Films Pinoy (korotoko_ph.php)
+            </h2>
+            <p className="mb-4 text-sm text-muted-foreground">
+              Configurez l’URL de votre point d’accès <code className="font-mono text-primary">korotoko_ph.php</code> ainsi que le domaine utilisé pour les images (<code className="font-mono text-primary">uploads/pinoy/...</code>).
+            </p>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                savePinoyApiMutation.mutate({
+                  pinoyApiUrl: pinoyApiUrlInput.trim(),
+                  pinoyMediaBaseUrl: pinoyMediaBaseUrlInput.trim(),
+                  pinoyPlayerTemplate: pinoyPlayerTemplateInput.trim(),
+                });
+              }}
+              className="space-y-4"
+            >
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                  URL de l’API (korotoko_ph.php)
+                </label>
+                <input
+                  type="url"
+                  value={pinoyApiUrlInput}
+                  onChange={(e) => setPinoyApiUrlInput(e.target.value)}
+                  placeholder="https://monsite.com/korotoko_ph.php"
+                  className="w-full rounded-lg border border-input bg-background px-3.5 py-2.5 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                  Domaine des médias Pinoy (posters & galerie)
+                </label>
+                <input
+                  type="url"
+                  value={pinoyMediaBaseUrlInput}
+                  onChange={(e) => setPinoyMediaBaseUrlInput(e.target.value)}
+                  placeholder="https://streamwall.behoririka.mg/"
+                  className="w-full rounded-lg border border-input bg-background px-3.5 py-2.5 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                  Lecteur Pinoy (variable <code className="font-mono text-primary">{'{id}'}</code>)
+                </label>
+                <div className="flex flex-wrap gap-3">
+                  <input
+                    type="text"
+                    value={pinoyPlayerTemplateInput}
+                    onChange={(e) => setPinoyPlayerTemplateInput(e.target.value)}
+                    placeholder="https://streamwall.behoririka.mg/pinoy/{id}"
+                    className="min-w-64 flex-1 rounded-lg border border-input bg-background px-3.5 py-2.5 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
+                  />
+                  <button
+                    type="submit"
+                    disabled={savePinoyApiMutation.isPending}
+                    className="rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap shrink-0"
+                  >
+                    {savePinoyApiMutation.isPending ? 'Enregistrement…' : 'Enregistrer l’API Pinoy'}
+                  </button>
+                </div>
+                {pinoyPlayerTemplateInput.trim() && (
+                  <p className="mt-1.5 font-mono text-xs text-muted-foreground">
+                    Aperçu (film ID 15) :{' '}
+                    {/\{id\}/i.test(pinoyPlayerTemplateInput)
+                      ? pinoyPlayerTemplateInput.trim().replace(/\{id\}/gi, '15')
+                      : `${pinoyPlayerTemplateInput.trim().replace(/\/+$/, '')}/15`}
+                  </p>
+                )}
+              </div>
             </form>
           </section>
 

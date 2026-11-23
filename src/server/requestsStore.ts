@@ -25,6 +25,12 @@ function sanitizeItemType(raw: unknown): ItemType {
   return 'film';
 }
 
+function sanitizeReportItemType(raw: unknown): ItemType | 'pinoy' {
+  const val = String(raw ?? '').trim().toLowerCase();
+  if (val === 'pinoy') return 'pinoy';
+  return sanitizeItemType(val);
+}
+
 function sanitizeTmdbPosterUrl(raw: unknown): string | null {
   const val = String(raw ?? '').trim();
   if (!val) return null;
@@ -49,7 +55,7 @@ function sanitizeCatalogLink(raw: unknown): string | null {
 function mapReportRow(row: Record<string, unknown>): BrokenReportRecord {
   return {
     id: String(row.id),
-    itemType: sanitizeItemType(row.item_type),
+    itemType: sanitizeReportItemType(row.item_type),
     itemId: String(row.item_id),
     itemTitle: String(row.item_title),
     season: typeof row.season === 'number' ? row.season : null,
@@ -128,7 +134,7 @@ export function createBrokenReport(input: {
 }): BrokenReportRecord {
   const now = new Date().toISOString();
   const id = `rep_${crypto.randomBytes(6).toString('hex')}`;
-  const itemType = sanitizeItemType(input.itemType);
+  const itemType = sanitizeReportItemType(input.itemType);
   const itemId = String(input.itemId || '').trim().slice(0, 80);
   const itemTitle = String(input.itemTitle || '').trim().slice(0, 180) || `${itemType} #${itemId}`;
   const season =

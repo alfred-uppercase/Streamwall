@@ -29,6 +29,10 @@ import type {
   MailLogEntry,
   NotificationRecord,
   PaymentOrder,
+  PinoyDetailResponse,
+  PinoyFacetsResponse,
+  PinoyListFilters,
+  PinoyListResponse,
   PlanTier,
   PlayerTemplates,
   PopupConfig,
@@ -213,6 +217,20 @@ export const api = {
     return apiRequest<CataloguePage>(`/api/catalogue?${p.toString()}`);
   },
   genres: () => apiRequest<{ genres: string[] }>('/api/catalogue/genres'),
+  pinoyFacets: () => apiRequest<PinoyFacetsResponse>('/api/pinoy/facets'),
+  pinoyList: (filters: PinoyListFilters) => {
+    const p = new URLSearchParams({
+      q: filters.q,
+      genre: filters.genre,
+      pays: filters.pays,
+      annee: filters.annee,
+      sort: filters.sort,
+      page: String(filters.page),
+    });
+    return apiRequest<PinoyListResponse>(`/api/pinoy/list?${p.toString()}`);
+  },
+  pinoyDetail: (slug: string) =>
+    apiRequest<PinoyDetailResponse>(`/api/pinoy/detail/${encodeURIComponent(slug)}`),
   suggestions: (type: string, genre: string) => {
     const p = new URLSearchParams({ type, genre });
     return apiRequest<{ upstreamStatus: 'live' | 'fallback'; spotlight: Item | null; items: Item[] }>(
@@ -417,6 +435,9 @@ export const api = {
       embedProvider: string;
       players: PlayerTemplates;
       tmdbApiKey: string;
+      pinoyApiUrl?: string;
+      pinoyMediaBaseUrl?: string;
+      pinoyPlayerTemplate?: string;
       smtp: AdminSmtpStatus;
       site: SiteConfig;
       supabaseServiceRoleConfigured?: boolean;
@@ -511,6 +532,21 @@ export const api = {
     apiRequest<{ origin: string }>('/api/admin/settings/origin', {
       method: 'PUT',
       body: JSON.stringify({ origin }),
+    }),
+  adminSavePinoyApiUrl: (
+    payload:
+      | string
+      | { pinoyApiUrl?: string; pinoyMediaBaseUrl?: string; pinoyPlayerTemplate?: string }
+  ) =>
+    apiRequest<{
+      pinoyApiUrl: string;
+      pinoyMediaBaseUrl: string;
+      pinoyPlayerTemplate: string;
+    }>('/api/admin/settings/pinoy', {
+      method: 'PUT',
+      body: JSON.stringify(
+        typeof payload === 'string' ? { pinoyApiUrl: payload } : payload
+      ),
     }),
   adminSaveEmbedProvider: (embedProvider: string) =>
     apiRequest<{ embedProvider: string }>('/api/admin/settings/embed-provider', {

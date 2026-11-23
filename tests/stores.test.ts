@@ -49,6 +49,21 @@ const {
   declineFriendRequest,
   listUserFriendRequests,
 } = await import('../src/server/friendsStore.ts');
+const {
+  DEFAULT_PINOY_MEDIA_BASE_URL,
+  DEFAULT_PINOY_PLAYER_TEMPLATE,
+  validatePinoyApiUrl,
+  validatePinoyMediaBaseUrl,
+  validatePinoyPlayerTemplate,
+  resolvePinoyPlayerUrl,
+  embedToDirectDownloadUrl,
+  isDirectDownloadUrl,
+  sanitizeExternalHttpUrl,
+  resolvePinoyMediaUrl,
+  fetchPinoyFacets,
+  fetchPinoyList,
+  fetchPinoyDetail,
+} = await import('../src/server/pinoyService.ts');
 
 test.after(() => {
   fs.rmSync(tempDir, { recursive: true, force: true });
@@ -478,4 +493,105 @@ test('Security module enforces single-use SVG CAPTCHA, 3-attempt login lockout, 
   assert.equal(consumeRateLimit('test-ip', 2, 10_000).allowed, true);
   assert.equal(consumeRateLimit('test-ip', 2, 10_000).allowed, false);
 });
+
+test('pinoyService validates URLs safely, sanitizes media/player URLs, and handles unconfigured state', async () => {
+  // SSRF / internal addresses & bad schemes blocked
+  assert.equal(validatePinoyApiUrl('http://127.0.0.1/korotoko_ph.php').ok, false);
+  assert.equal(validatePinoyApiUrl('http://localhost/korotoko_ph.php').ok, false);
+  assert.equal(validatePinoyApiUrl('http://169.254.169.254/latest/meta-data').ok, false);
+  assert.equal(validatePinoyApiUrl('http://192.168.1.10/korotoko_ph.php').ok, false);
+  assert.equal(validatePinoyApiUrl('ftp://example.com/korotoko_ph.php').ok, false);
+  assert.equal(validatePinoyApiUrl('https://user:pass@example.com/korotoko_ph.php').ok, false);
+
+  // Empty allowed (clears configuration) and public HTTPS allowed
+  assert.deepEqual(validatePinoyApiUrl(''), { ok: true, url: '' });
+  const valid = validatePinoyApiUrl('https://example.com/korotoko_ph.php#frag');
+  assert.equal(valid.ok, true);
+  if (valid.ok) {
+    assert.equal(valid.url, 'https://example.com/korotoko_ph.php');
+  }
+
+  // External HTTP(S) sanitization & media domain resolution
+  assert.equal(sanitizeExternalHttpUrl('javascript:alert(1)'), null);
+  assert.equal(sanitizeExternalHttpUrl('data:text/html,<script>alert(1)</script>'), null);
+  assert.equal(sanitizeExternalHttpUrl('https://cdn.example.com/poster.jpg'), 'https://cdn.example.com/poster.jpg');
+
+  assert.equal(validatePinoyMediaBaseUrl('http://127.0.0.1/').ok, false);
+  const validMedia = validatePinoyMediaBaseUrl('https://streamwall.behoririka.mg');
+  assert.equal(validMedia.ok, true);
+  if (validMedia.ok) {
+    assert.equal(validMedia.url, DEFAULT_PINOY_MEDIA_BASE_URL);
+  }
+  assert.equal(
+    resolvePinoyMediaUrl('uploads/pinoy/posters/milf-2026.jpg', DEFAULT_PINOY_MEDIA_BASE_URL),
+    'https://streamwall.behoririka.mg/uploads/pinoy/posters/milf-2026.jpg'
+  );
+  assert.equal(
+    resolvePinoyMediaUrl('/uploads/pinoy/galerie/frame-1.jpg', 'https://cdn.example.com/media'),
+    'https://cdn.example.com/media/uploads/pinoy/galerie/frame-1.jpg'
+  );
+  assert.equal(
+    resolvePinoyMediaUrl(
+      'https://api.example.com/sub/uploads/pinoy/posters/milf-2026.jpg',
+      'https://streamwall.behoririka.mg/',
+      'https://api.example.com/sub/korotoko_ph.php'
+    ),
+    'https://streamwall.behoririka.mg/uploads/pinoy/posters/milf-2026.jpg'
+  );
+  assert.equal(
+    resolvePinoyMediaUrl('https://image.tmdb.org/t/p/w500/poster.jpg', 'https://streamwall.behoririka.mg/'),
+    'https://image.tmdb.org/t/p/w500/poster.jpg'
+  );
+  assert.equal(resolvePinoyMediaUrl('../secret/passwd', DEFAULT_PINOY_MEDIA_BASE_URL), null);
+  assert.equal(resolvePinoyMediaUrl('javascript:alert(1)', DEFAULT_PINOY_MEDIA_BASE_URL), null);
+
+  // Pinoy player template validation & {id} substitution
+  assert.equal(validatePinoyPlayerTemplate('http://127.0.0.1/pinoy/{id}').ok, false);
+  assert.equal(validatePinoyPlayerTemplate(DEFAULT_PINOY_PLAYER_TEMPLATE).ok, true);
+  assert.equal(
+    resolvePinoyPlayerUrl(DEFAULT_PINOY_PLAYER_TEMPLATE, { id: 15, slug: 'milf-2026' }),
+    'https://streamwall.behoririka.mg/pinoy/15'
+  );
+  assert.equal(
+    resolvePinoyPlayerUrl('https://player.example.com/pinoy', { id: 15, slug: 'milf-2026' }),
+    'https://player.example.com/pinoy/15'
+  );
+
+  // Embed -> direct download link conversions (VOE, StreamHLS, Dood/Playmogo, Abstream)
+  assert.equal(
+    embedToDirectDownloadUrl('https://voe.sx/e/3od2eqbnmolo', 'Voe'),
+    'https://voe.sx/3od2eqbnmolo/download'
+  );
+  assert.equal(
+    embedToDirectDownloadUrl('https://streamhls.to/e/1ghcfvwm4xlk', 'StreamHLS'),
+    'https://savefiles.com/d/1ghcfvwm4xlk_n'
+  );
+  assert.equal(
+    embedToDirectDownloadUrl('https://playmogo.com/e/46l0enjz7f65', 'Dood'),
+    'https://playmogo.com/d/46l0enjz7f65'
+  );
+  assert.equal(
+    embedToDirectDownloadUrl('https://abstream.to/embed/5q3v8q1q23zr', 'Abstream'),
+    'https://abstream.to/d/5q3v8q1q23zr'
+  );
+
+  // Only direct download links are allowed in the download section
+  assert.equal(isDirectDownloadUrl('https://voe.sx/3od2eqbnmolo/download'), true);
+  assert.equal(isDirectDownloadUrl('https://savefiles.com/d/1ghcfvwm4xlk_n'), true);
+  assert.equal(isDirectDownloadUrl('https://playmogo.com/d/46l0enjz7f65'), true);
+  assert.equal(isDirectDownloadUrl('https://abstream.to/d/5q3v8q1q23zr'), true);
+  assert.equal(isDirectDownloadUrl('https://random-mirror.example.com/watch/123'), false);
+  assert.equal(isDirectDownloadUrl('https://voe.sx/e/3od2eqbnmolo'), false);
+
+  // Empty URL returns unconfigured cleanly without network calls
+  const facets = await fetchPinoyFacets('');
+  assert.equal(facets.status, 'unconfigured');
+  const list = await fetchPinoyList('', { page: 1, q: '', genre: '', pays: '', annee: '', sort: 'recent' });
+  assert.equal(list.status, 'unconfigured');
+  assert.deepEqual(list.items, []);
+  const detail = await fetchPinoyDetail('', 'demo-film');
+  assert.equal(detail.status, 'unconfigured');
+  assert.equal(detail.film, null);
+});
+
 

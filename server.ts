@@ -28,6 +28,7 @@ import type {
   Episode,
   Item,
   ItemType,
+  PinoyListFilters,
   PlayerKey,
   PlayerTemplates,
   RankingEntry,
@@ -57,12 +58,26 @@ import {
   sbGetComments,
   sbGetEmbedProvider,
   sbGetMemberData,
+  sbGetPinoyApiUrl,
+  sbGetPinoyMediaBaseUrl,
+  sbGetPinoyPlayerTemplate,
   sbGetPlayerTemplates,
   sbGetRankings,
   sbGetSiteConfig,
   sbGetTmdbApiKey,
   sbResolveUser,
 } from './src/server/supabaseAdapter.ts';
+import {
+  DEFAULT_PINOY_MEDIA_BASE_URL as PINOY_MEDIA_DEFAULT,
+  DEFAULT_PINOY_PLAYER_TEMPLATE as PINOY_PLAYER_DEFAULT,
+  clearPinoyCache,
+  fetchPinoyDetail,
+  fetchPinoyFacets,
+  fetchPinoyList,
+  validatePinoyApiUrl,
+  validatePinoyMediaBaseUrl,
+  validatePinoyPlayerTemplate,
+} from './src/server/pinoyService.ts';
 import { InFlightCoalescer, TimedLruCache } from './src/server/cacheUtils.ts';
 import {
   antiBotAndRateLimitMiddleware,
@@ -223,6 +238,13 @@ const DEFAULT_ORIGIN = (process.env.STREAMWALL_API_ORIGIN || 'https://streamwall
 const DEFAULT_TMDB_API_KEY = (
   process.env.TMDB_API_KEY || 'cba03e8974108acd7a3b1442dccc6712'
 ).trim();
+const DEFAULT_PINOY_API_URL = (process.env.PINOY_API_URL || '').trim();
+const DEFAULT_PINOY_MEDIA_BASE_URL = (
+  process.env.PINOY_MEDIA_BASE_URL || PINOY_MEDIA_DEFAULT
+).trim();
+const DEFAULT_PINOY_PLAYER_TEMPLATE = (
+  process.env.PINOY_PLAYER_TEMPLATE || PINOY_PLAYER_DEFAULT
+).trim();
 
 interface StoredUser {
   id: string;
@@ -272,6 +294,9 @@ interface DatabaseShape {
     api_origin: string;
     embed_provider?: string;
     tmdb_api_key?: string;
+    pinoy_api_url?: string;
+    pinoy_media_base_url?: string;
+    pinoy_player_template?: string;
     site_name?: string;
     favicon_url?: string;
     players: PlayerTemplates;
@@ -671,6 +696,9 @@ function createSeedDb(): DatabaseShape {
       api_origin: DEFAULT_ORIGIN,
       embed_provider: DEFAULT_ORIGIN,
       tmdb_api_key: DEFAULT_TMDB_API_KEY,
+      pinoy_api_url: DEFAULT_PINOY_API_URL,
+      pinoy_media_base_url: DEFAULT_PINOY_MEDIA_BASE_URL,
+      pinoy_player_template: DEFAULT_PINOY_PLAYER_TEMPLATE,
       site_name: 'StreamWall',
       favicon_url: '/favicon.ico',
       players: { ...DEFAULT_PLAYERS },
@@ -961,6 +989,30 @@ async function getTmdbApiKey(): Promise<string> {
     return sbGetTmdbApiKey(localKey);
   }
   return localKey;
+}
+
+async function getPinoyApiUrl(): Promise<string> {
+  const localUrl = (db.settings.pinoy_api_url || DEFAULT_PINOY_API_URL).trim();
+  if (isSupabaseEnabled()) {
+    return sbGetPinoyApiUrl(localUrl);
+  }
+  return localUrl;
+}
+
+async function getPinoyMediaBaseUrl(): Promise<string> {
+  const localUrl = (db.settings.pinoy_media_base_url ?? DEFAULT_PINOY_MEDIA_BASE_URL).trim();
+  if (isSupabaseEnabled()) {
+    return sbGetPinoyMediaBaseUrl(localUrl);
+  }
+  return localUrl;
+}
+
+async function getPinoyPlayerTemplate(): Promise<string> {
+  const localTpl = (db.settings.pinoy_player_template ?? DEFAULT_PINOY_PLAYER_TEMPLATE).trim();
+  if (isSupabaseEnabled()) {
+    return sbGetPinoyPlayerTemplate(localTpl);
+  }
+  return localTpl;
 }
 
 async function getPlayerTemplates(): Promise<PlayerTemplates> {
@@ -3041,6 +3093,59 @@ export async function createApiApp(): Promise<express.Express> {
     res.json({ genres });
   });
 
+  app.get('/api/pinoy/facets', async (_req, res) => {
+    const apiUrl = await getPinoyApiUrl();
+    const facets = await fetchPinoyFacets(apiUrl);
+    res.setHeader('Cache-Control', 'public, max-age=180, s-maxage=600, stale-while-revalidate=1800');
+    res.json(facets);
+  });
+
+  app.get('/api/pinoy/list', async (req, res) => {
+    const [apiUrl, mediaBaseUrl] = await Promise.all([getPinoyApiUrl(), getPinoyMediaBaseUrl()]);
+    const rawSort = String(req.query.sort ?? 'recent').trim();
+    const sort: PinoyListFilters['sort'] = ['recent', 'oldest', 'az', 'za', 'note'].includes(
+      rawSort
+    )
+      ? (rawSort as PinoyListFilters['sort'])
+      : 'recent';
+
+    const filters: PinoyListFilters = {
+      q: String(req.query.q ?? '').trim().slice(0, 120),
+      genre: String(req.query.genre ?? '').trim().slice(0, 80),
+      pays: /^[A-Za-z0-9_-]{1,8}$/.test(String(req.query.pays ?? '').trim())
+        ? String(req.query.pays).trim()
+        : '',
+      annee: /^\d{4}$/.test(String(req.query.annee ?? '').trim())
+        ? String(req.query.annee).trim()
+        : '',
+      sort,
+      page: Math.max(1, Math.min(500, Number(req.query.page) || 1)),
+    };
+    const data = await fetchPinoyList(apiUrl, filters, mediaBaseUrl);
+    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
+    res.json(data);
+  });
+
+  app.get('/api/pinoy/detail/:slug', async (req, res) => {
+    const slug = String(req.params.slug ?? '').trim().slice(0, 200);
+    if (!slug || !/^[a-zA-Z0-9._-]+$/.test(slug)) {
+      res.status(400).json({ error: 'Identifiant de film Pinoy invalide.' });
+      return;
+    }
+    const [apiUrl, mediaBaseUrl, playerTemplate] = await Promise.all([
+      getPinoyApiUrl(),
+      getPinoyMediaBaseUrl(),
+      getPinoyPlayerTemplate(),
+    ]);
+    const detail = await fetchPinoyDetail(apiUrl, slug, 12, mediaBaseUrl, playerTemplate);
+    if (detail.status === 'live' && !detail.film) {
+      res.status(404).json({ error: 'Film Pinoy introuvable.' });
+      return;
+    }
+    res.setHeader('Cache-Control', 'public, max-age=120, s-maxage=600, stale-while-revalidate=1200');
+    res.json(detail);
+  });
+
   app.get('/api/suggestions', async (req, res) => {
     const type = ['all', 'film', 'serie', 'anime'].includes(String(req.query.type))
       ? String(req.query.type)
@@ -4205,10 +4310,10 @@ export async function createApiApp(): Promise<express.Express> {
       res.status(401).json({ error: 'Connexion requise pour commenter' });
       return;
     }
-    const itemType = (['film', 'serie', 'anime'].includes(req.body?.itemType)
+    const itemType = (['film', 'serie', 'anime', 'pinoy'].includes(req.body?.itemType)
       ? req.body.itemType
-      : 'film') as ItemType;
-    const itemId = stripDangerousText(req.body?.itemId ?? '', 64);
+      : 'film') as CommentRecord['itemType'];
+    const itemId = stripDangerousText(req.body?.itemId ?? '', 160);
     const itemTitle = stripDangerousText(req.body?.itemTitle ?? '', 120);
     const body = stripDangerousText(req.body?.body ?? '', 1000);
     const parentId = req.body?.parentId ? stripDangerousText(req.body.parentId, 80) : null;
@@ -5032,6 +5137,9 @@ export async function createApiApp(): Promise<express.Express> {
       embedProvider: await getEmbedProvider(),
       players: await getPlayerTemplates(),
       tmdbApiKey: await getTmdbApiKey(),
+      pinoyApiUrl: await getPinoyApiUrl(),
+      pinoyMediaBaseUrl: await getPinoyMediaBaseUrl(),
+      pinoyPlayerTemplate: await getPinoyPlayerTemplate(),
       smtp: getAdminSmtpStatus(),
       site: await getSiteConfig(),
       supabaseServiceRoleConfigured: Boolean(createAdminClient()),
@@ -5476,6 +5584,68 @@ export async function createApiApp(): Promise<express.Express> {
     res.json({ origin: clean });
   });
 
+  app.put('/api/admin/settings/pinoy', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+
+    const currentApiUrl = await getPinoyApiUrl();
+    const currentMediaBaseUrl = await getPinoyMediaBaseUrl();
+    const currentPlayerTemplate = await getPinoyPlayerTemplate();
+
+    const nextRawApiUrl =
+      req.body?.pinoyApiUrl !== undefined ? String(req.body.pinoyApiUrl).trim() : currentApiUrl;
+    const nextRawMediaBaseUrl =
+      req.body?.pinoyMediaBaseUrl !== undefined
+        ? String(req.body.pinoyMediaBaseUrl).trim()
+        : currentMediaBaseUrl;
+    const nextRawPlayerTemplate =
+      req.body?.pinoyPlayerTemplate !== undefined
+        ? String(req.body.pinoyPlayerTemplate).trim()
+        : currentPlayerTemplate;
+
+    const apiValidation = validatePinoyApiUrl(nextRawApiUrl);
+    if (!apiValidation.ok) {
+      res.status(400).json({ error: apiValidation.error });
+      return;
+    }
+
+    const mediaValidation = validatePinoyMediaBaseUrl(nextRawMediaBaseUrl);
+    if (!mediaValidation.ok) {
+      res.status(400).json({ error: mediaValidation.error });
+      return;
+    }
+
+    const playerValidation = validatePinoyPlayerTemplate(nextRawPlayerTemplate);
+    if (!playerValidation.ok) {
+      res.status(400).json({ error: playerValidation.error });
+      return;
+    }
+
+    if (isSupabaseEnabled() && auth.sbClient) {
+      const now = new Date().toISOString();
+      const { error } = await auth.sbClient.from('app_settings').upsert([
+        { key: 'pinoy_api_url', value: apiValidation.url, updated_at: now },
+        { key: 'pinoy_media_base_url', value: mediaValidation.url, updated_at: now },
+        { key: 'pinoy_player_template', value: playerValidation.template, updated_at: now },
+      ]);
+      if (error) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+    }
+    db.settings.pinoy_api_url = apiValidation.url;
+    db.settings.pinoy_media_base_url = mediaValidation.url;
+    db.settings.pinoy_player_template = playerValidation.template;
+    saveDb(db);
+    invalidateSbSettingsCache();
+    clearPinoyCache();
+    res.json({
+      pinoyApiUrl: apiValidation.url,
+      pinoyMediaBaseUrl: mediaValidation.url,
+      pinoyPlayerTemplate: playerValidation.template,
+    });
+  });
+
   app.put('/api/admin/settings/players', async (req, res) => {
     const auth = await requireAdmin(req, res);
     if (!auth) return;
@@ -5512,6 +5682,7 @@ export async function createApiApp(): Promise<express.Express> {
     if (!auth) return;
     const currentOrigin = await getOrigin();
     const currentEmbed = await getEmbedProvider();
+    const currentPinoyUrl = await getPinoyApiUrl();
     const candidateOrigin = String(req.body?.origin ?? currentOrigin)
       .trim()
       .replace(/\/+$/, '');
@@ -5523,6 +5694,15 @@ export async function createApiApp(): Promise<express.Express> {
       { name: 'Fiche détail', base: candidateOrigin, path: '/details_api.php?id=24044&type=film' },
       { name: 'Embed Film', base: currentEmbed, path: '/film/54552' },
       { name: 'Embed Série', base: currentEmbed, path: '/tvs/658/1/1' },
+      ...(currentPinoyUrl
+        ? [
+            {
+              name: 'API Films Pinoy',
+              base: currentPinoyUrl.split('?')[0],
+              path: '?action=facets',
+            },
+          ]
+        : []),
     ];
 
     const endpoints: EndpointCheck[] = await Promise.all(

@@ -497,4 +497,177 @@ test('Catalogue enforces 2-page cap for guests, 10-page cap for members, and unr
   assert.equal(adminP11.status, 200);
 });
 
+test('Pinoy endpoints respond cleanly and admin Pinoy URL settings validate access & SSRF', async () => {
+  // Public Pinoy endpoints respond 200 with public Cache-Control (unconfigured by default)
+  const facetsRes = await fetch(`${baseUrl}/api/pinoy/facets`);
+  assert.equal(facetsRes.status, 200);
+  assert.match(facetsRes.headers.get('cache-control') || '', /public/);
+  const facetsJson = (await facetsRes.json()) as { status: string };
+  assert.equal(facetsJson.status, 'unconfigured');
+
+  const listRes = await fetch(`${baseUrl}/api/pinoy/list?page=1&sort=recent`);
+  assert.equal(listRes.status, 200);
+  assert.match(listRes.headers.get('cache-control') || '', /public/);
+  const listJson = (await listRes.json()) as { status: string; items: unknown[] };
+  assert.equal(listJson.status, 'unconfigured');
+  assert.deepEqual(listJson.items, []);
+
+  // Invalid slug rejected with 400
+  const badSlugRes = await fetch(`${baseUrl}/api/pinoy/detail/invalid%24slug!`);
+  assert.equal(badSlugRes.status, 400);
+
+  // Unauthenticated PUT /api/admin/settings/pinoy rejected
+  const unauthPut = await fetch(`${baseUrl}/api/admin/settings/pinoy`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pinoyApiUrl: 'https://example.com/korotoko_ph.php' }),
+  });
+  assert.ok(unauthPut.status === 401 || unauthPut.status === 403);
+
+  // Member PUT /api/admin/settings/pinoy rejected with 403
+  const memberLogin = await fetch(`${baseUrl}/api/auth/demo-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: 'member' }),
+  });
+  const memberAuth = (await memberLogin.json()) as { token: string };
+  const memberPut = await fetch(`${baseUrl}/api/admin/settings/pinoy`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${memberAuth.token}`,
+    },
+    body: JSON.stringify({ pinoyApiUrl: 'https://example.com/korotoko_ph.php' }),
+  });
+  assert.equal(memberPut.status, 403);
+
+  // Admin login
+  const adminLogin = await fetch(`${baseUrl}/api/auth/demo-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: 'admin' }),
+  });
+  const adminAuth = (await adminLogin.json()) as { token: string };
+
+  // SSRF URL blocked (API URL & Media domain)
+  const ssrfPut = await fetch(`${baseUrl}/api/admin/settings/pinoy`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({ pinoyApiUrl: 'http://127.0.0.1/korotoko_ph.php' }),
+  });
+  assert.equal(ssrfPut.status, 400);
+
+  const ssrfMediaPut = await fetch(`${baseUrl}/api/admin/settings/pinoy`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({ pinoyMediaBaseUrl: 'http://127.0.0.1/' }),
+  });
+  assert.equal(ssrfMediaPut.status, 400);
+
+  const ssrfPlayerPut = await fetch(`${baseUrl}/api/admin/settings/pinoy`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({ pinoyPlayerTemplate: 'http://localhost/pinoy/{id}' }),
+  });
+  assert.equal(ssrfPlayerPut.status, 400);
+
+  // Valid API URL, media base, and player template saved then restored
+  const savePut = await fetch(`${baseUrl}/api/admin/settings/pinoy`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({
+      pinoyApiUrl: 'https://example.com/korotoko_ph.php',
+      pinoyMediaBaseUrl: 'https://cdn.behoririka.mg',
+      pinoyPlayerTemplate: 'https://cdn.behoririka.mg/pinoy/{id}',
+    }),
+  });
+  assert.equal(savePut.status, 200);
+  const saveJson = (await savePut.json()) as {
+    pinoyApiUrl: string;
+    pinoyMediaBaseUrl: string;
+    pinoyPlayerTemplate: string;
+  };
+  assert.equal(saveJson.pinoyApiUrl, 'https://example.com/korotoko_ph.php');
+  assert.equal(saveJson.pinoyMediaBaseUrl, 'https://cdn.behoririka.mg/');
+  assert.equal(saveJson.pinoyPlayerTemplate, 'https://cdn.behoririka.mg/pinoy/{id}');
+
+  const clearPut = await fetch(`${baseUrl}/api/admin/settings/pinoy`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({
+      pinoyApiUrl: '',
+      pinoyMediaBaseUrl: 'https://streamwall.behoririka.mg/',
+      pinoyPlayerTemplate: 'https://streamwall.behoririka.mg/pinoy/{id}',
+    }),
+  });
+  assert.equal(clearPut.status, 200);
+  const clearJson = (await clearPut.json()) as {
+    pinoyApiUrl: string;
+    pinoyMediaBaseUrl: string;
+    pinoyPlayerTemplate: string;
+  };
+  assert.equal(clearJson.pinoyApiUrl, '');
+  assert.equal(clearJson.pinoyMediaBaseUrl, 'https://streamwall.behoririka.mg/');
+  assert.equal(clearJson.pinoyPlayerTemplate, 'https://streamwall.behoririka.mg/pinoy/{id}');
+
+  // Pinoy comments and broken reports
+  const commentRes = await fetch(`${baseUrl}/api/comments`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${memberAuth.token}`,
+    },
+    body: JSON.stringify({
+      itemType: 'pinoy',
+      itemId: 'milf-2026',
+      itemTitle: 'Milf 2026',
+      body: 'Super film Pinoy !',
+      parentId: null,
+    }),
+  });
+  assert.equal(commentRes.status, 200);
+  const commentJson = (await commentRes.json()) as { comment: { itemType: string; itemId: string } };
+  assert.equal(commentJson.comment.itemType, 'pinoy');
+  assert.equal(commentJson.comment.itemId, 'milf-2026');
+
+  const getCommentsRes = await fetch(`${baseUrl}/api/comments/pinoy/milf-2026`);
+  assert.equal(getCommentsRes.status, 200);
+  const getCommentsJson = (await getCommentsRes.json()) as { comments: Array<{ body: string }> };
+  assert.ok(getCommentsJson.comments.some((c) => c.body === 'Super film Pinoy !'));
+
+  const pinoyReportRes = await fetch(`${baseUrl}/api/reports/broken`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${memberAuth.token}`,
+    },
+    body: JSON.stringify({
+      itemType: 'pinoy',
+      itemId: 'milf-2026',
+      itemTitle: 'Milf 2026',
+      reason: 'Lien mort / ne charge pas',
+    }),
+  });
+  assert.equal(pinoyReportRes.status, 200);
+  const pinoyReportJson = (await pinoyReportRes.json()) as { report: { itemType: string } };
+  assert.equal(pinoyReportJson.report.itemType, 'pinoy');
+});
+
+
+
 

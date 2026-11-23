@@ -21,7 +21,9 @@ export function AuthPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const [mode, setMode] = useState<'login' | 'signup' | 'forgot'>('login');
+  const [mode, setMode] = useState<'login' | 'signup' | 'forgot'>(() =>
+    searchParams.get('mode') === 'signup' ? 'signup' : 'login'
+  );
   const [username, setUsername] = useState('');
   const [usernameStatus, setUsernameStatus] = useState<{
     checking: boolean;

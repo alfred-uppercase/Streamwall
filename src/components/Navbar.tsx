@@ -9,6 +9,7 @@ import {
   CheckCheck,
   Clock,
   Crown,
+  Film,
   Heart,
   Home,
   LayoutGrid,
@@ -103,7 +104,7 @@ export function Navbar() {
   );
 
   const isOverlayRoute =
-    location.pathname === '/' || /^\/(film|serie|anime)\/[^/]+$/.test(location.pathname);
+    location.pathname === '/' || /^\/(film|serie|anime|pinoy)\/[^/]+$/.test(location.pathname);
   const isTransparent = isOverlayRoute && !scrolled;
 
   useEffect(() => {
@@ -215,6 +216,7 @@ export function Navbar() {
 
   const desktopNavItems = [
     { to: '/catalogue', label: 'Catalogue', icon: LayoutGrid, exact: false },
+    { to: '/pinoy', label: 'Pinoy', icon: Film, exact: false },
     { to: '/suggestion', label: 'Suggestion', icon: Sparkles, exact: false },
     ...(isMember ? [{ to: '/favoris', label: 'Ma liste', icon: Heart, exact: false }] : []),
     ...(showProMenu ? [{ to: '/abonnement', label: 'Devenir Pro', icon: Crown, exact: false }] : []),
@@ -225,6 +227,7 @@ export function Navbar() {
     { to: '/', label: 'Accueil', icon: Home, exact: true },
     { to: '/favoris', label: 'Favoris', icon: Heart, exact: false },
     { to: '/catalogue', label: 'Catalogue', icon: LayoutGrid, exact: false },
+    { to: '/pinoy', label: 'Pinoy', icon: Film, exact: false },
     { to: '/suggestion', label: 'Suggestion', icon: Sparkles, exact: false },
     {
       to: isMember ? '/profil' : '/auth',
@@ -529,9 +532,9 @@ export function Navbar() {
       {/* Mobile Floating Bottom Navigation Dock (modern mobile app style) */}
       <nav
         aria-label="Navigation mobile"
-        className="fixed bottom-3 inset-x-3 z-40 mx-auto max-w-md rounded-2xl border border-border/90 bg-card/92 px-1.5 py-1.5 shadow-2xl backdrop-blur-md md:hidden"
+        className="fixed bottom-3 inset-x-3 z-40 mx-auto max-w-md rounded-2xl border border-border/90 bg-card/92 px-1 py-1.5 shadow-2xl backdrop-blur-md md:hidden"
       >
-        <ul className="grid grid-cols-5 items-center gap-0.5">
+        <ul className="grid grid-cols-6 items-center gap-0.5">
           {mobileDockItems.map((item) => {
             const Icon = item.icon;
             const isActive = item.isAccount
