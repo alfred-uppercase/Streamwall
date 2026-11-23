@@ -649,21 +649,45 @@ test('Pinoy endpoints respond cleanly and admin Pinoy URL settings validate acce
         { status: 200, headers: { 'Content-Type': 'application/json' } }
       );
     }
+    if (target === 'https://cdn.behoririka.mg/pinoy/15') {
+      return new Response(
+        `<!doctype html><html><body><div class="hero" style="background-image:url('/uploads/pinoy/posters/milf-2026.jpg')">Player OK</div></body></html>`,
+        {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'X-Frame-Options': 'SAMEORIGIN',
+          },
+        }
+      );
+    }
     return realFetch(input, init);
   }) as typeof fetch;
 
   try {
-    // 1. Guest receives no download URLs + downloadLocked + custom message
+    // 1. Guest receives same-origin Pinoy player URL, no download URLs + downloadLocked + custom message
     const guestDetailRes = await realFetch(`${baseUrl}/api/pinoy/detail/milf-2026`);
     assert.equal(guestDetailRes.status, 200);
     const guestDetail = (await guestDetailRes.json()) as {
-      players: { embed: unknown[]; download: unknown[] };
+      players: { embed: Array<{ provider: string; url: string }>; download: unknown[] };
       downloadLocked?: boolean;
       downloadMessage?: string;
     };
+    assert.equal(guestDetail.players.embed[0]?.provider, 'Lecteur Pinoy');
+    assert.equal(guestDetail.players.embed[0]?.url, '/api/public/watch/pinoy/15/milf-2026');
     assert.equal(guestDetail.players.download.length, 0);
     assert.equal(guestDetail.downloadLocked, true);
     assert.equal(guestDetail.downloadMessage, customDownloadMsg);
+
+    // Same-origin Pinoy watch proxy strips X-Frame-Options and rewrites /uploads/
+    const watchProxyRes = await realFetch(`${baseUrl}/api/public/watch/pinoy/15/milf-2026`);
+    assert.equal(watchProxyRes.status, 200);
+    assert.equal(watchProxyRes.headers.get('x-frame-options'), null);
+    const watchHtml = await watchProxyRes.text();
+    assert.ok(watchHtml.includes('https://cdn.behoririka.mg/uploads/pinoy/posters/milf-2026.jpg'));
+
+    const badWatchProxyRes = await realFetch(`${baseUrl}/api/public/watch/pinoy/not-numeric`);
+    assert.equal(badWatchProxyRes.status, 400);
 
     // 2. Free member receives no download URLs + downloadLocked + custom message
     const freeDetailRes = await realFetch(`${baseUrl}/api/pinoy/detail/milf-2026`, {

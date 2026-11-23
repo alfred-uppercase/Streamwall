@@ -77,6 +77,7 @@ import {
   fetchPinoyDetail,
   fetchPinoyFacets,
   fetchPinoyList,
+  resolvePinoyPlayerUrl,
   sanitizePinoyDownloadMessage,
   validatePinoyApiUrl,
   validatePinoyMediaBaseUrl,
@@ -3164,17 +3165,32 @@ export async function createApiApp(): Promise<express.Express> {
       return;
     }
 
+    const effectiveEmbed = detail.players.embed.map((src, index) => {
+      if (index === 0 && src.provider === 'Lecteur Pinoy' && detail.film) {
+        return {
+          ...src,
+          url: `/api/public/watch/pinoy/${detail.film.id}/${encodeURIComponent(detail.film.slug)}`,
+        };
+      }
+      return src;
+    });
+
     const canDownload = Boolean(auth && (auth.user.role === 'admin' || auth.user.isPro));
     const hasDownloads = detail.players.download.length > 0;
     const responsePayload: PinoyDetailResponse = canDownload
       ? {
           ...detail,
+          players: {
+            ...detail.players,
+            embed: effectiveEmbed,
+          },
           downloadLocked: false,
         }
       : {
           ...detail,
           players: {
             ...detail.players,
+            embed: effectiveEmbed,
             download: [],
           },
           downloadLocked: hasDownloads,
@@ -3448,16 +3464,28 @@ export async function createApiApp(): Promise<express.Express> {
     });
   });
 
-  app.all(['/player/proxy/*', '/proxy/*', '/report.php', '/api/loader.php'], async (req, res) => {
+  app.all(['/player/proxy/*', '/proxy/*', '/report.php', '/pinoy_report.php', '/api/loader.php'], async (req, res) => {
     const embedProvider = await getEmbedProvider();
-    const targetUrl = `${embedProvider}${req.originalUrl}`;
+    let upstreamBase = embedProvider;
+    const refererHeader = String(req.headers.referer ?? '');
+    if (req.path === '/pinoy_report.php' || refererHeader.includes('/api/public/watch/pinoy/')) {
+      const pinoyTpl = await getPinoyPlayerTemplate();
+      if (pinoyTpl) {
+        try {
+          upstreamBase = new URL(pinoyTpl.replace(/\{id\}/gi, '1').replace(/\{slug\}/gi, 'film')).origin;
+        } catch {
+          upstreamBase = embedProvider;
+        }
+      }
+    }
+    const targetUrl = `${upstreamBase}${req.originalUrl}`;
     try {
       const upstream = await fetch(targetUrl, {
         method: req.method,
         headers: {
           'user-agent': 'Mozilla/5.0 (Tapenaka StreamWall Proxy)',
-          referer: `${embedProvider}/`,
-          origin: embedProvider,
+          referer: `${upstreamBase}/`,
+          origin: upstreamBase,
           ...(req.headers['content-type'] ? { 'content-type': String(req.headers['content-type']) } : {}),
         },
         body: ['GET', 'HEAD'].includes(req.method) ? undefined : JSON.stringify(req.body ?? {}),
@@ -3468,6 +3496,74 @@ export async function createApiApp(): Promise<express.Express> {
       res.status(upstream.status).setHeader('content-type', contentType).send(buf);
     } catch {
       res.status(502).json({ error: 'Upstream player resolver unreachable' });
+    }
+  });
+
+  app.get(['/api/public/watch/pinoy/:id', '/api/public/watch/pinoy/:id/:slug'], async (req, res) => {
+    const rawId = String(req.params.id ?? '').trim();
+    if (!/^\d{1,12}$/.test(rawId)) {
+      res.status(400).send('Identifiant Pinoy invalide');
+      return;
+    }
+    const rawSlug = String(req.params.slug ?? 'film').trim().slice(0, 200);
+    const safeSlug = /^[a-zA-Z0-9._-]+$/.test(rawSlug) ? rawSlug : 'film';
+
+    const [playerTemplate, mediaBaseUrl] = await Promise.all([
+      getPinoyPlayerTemplate(),
+      getPinoyMediaBaseUrl(),
+    ]);
+    const targetUrl = resolvePinoyPlayerUrl(playerTemplate, {
+      id: Number(rawId),
+      slug: safeSlug,
+    });
+    if (!targetUrl) {
+      res.status(404).send('Lecteur Pinoy non configuré');
+      return;
+    }
+
+    try {
+      const parsedTarget = new URL(targetUrl);
+      const upstreamOrigin = parsedTarget.origin;
+      const effectiveMediaOrigin = (mediaBaseUrl || upstreamOrigin).replace(/\/+$/, '');
+      const upstream = await fetch(targetUrl, {
+        headers: {
+          'user-agent': 'Mozilla/5.0 (Tapenaka StreamWall Proxy)',
+          referer: `${upstreamOrigin}/`,
+        },
+        signal: AbortSignal.timeout(12_000),
+      });
+      if (!upstream.ok) throw new Error(`HTTP ${upstream.status}`);
+      let html = await upstream.text();
+      html = html.replace(/(["'])\/assets\//g, '$1/api/embed-assets/');
+      html = html.replace(/url\(\s*\/assets\//gi, 'url(/api/embed-assets/');
+      html = html.replace(/(["'(])\/uploads\//g, `$1${effectiveMediaOrigin}/uploads/`);
+      res
+        .status(200)
+        .setHeader('content-type', 'text/html; charset=utf-8')
+        .setHeader('cache-control', 'private, no-store')
+        .send(html);
+    } catch {
+      res
+        .status(200)
+        .setHeader('content-type', 'text/html; charset=utf-8')
+        .send(`<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { margin: 0; height: 100vh; display: grid; place-items: center; background: #0b0e17; color: #f3f4f6; font-family: system-ui, sans-serif; text-align: center; padding: 24px; }
+    .box { max-width: 460px; border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; padding: 28px; background: #131826; }
+    h2 { margin: 0 0 10px; font-size: 18px; color: #f5b938; }
+    p { margin: 0; font-size: 14px; line-height: 1.6; color: #9ca3af; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>Lecteur Pinoy temporairement indisponible</h2>
+    <p>Le serveur vidéo distant n’a pas répondu dans le délai imparti. Réessayez dans quelques instants.</p>
+  </div>
+</body>
+</html>`);
     }
   });
 

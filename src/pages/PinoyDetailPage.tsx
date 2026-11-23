@@ -31,6 +31,13 @@ function sanitizeHttpUrl(raw: string | null | undefined): string | null {
   return /^https?:\/\//i.test(trimmed) ? trimmed : null;
 }
 
+function sanitizePlayerUrl(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (/^\/api\/public\/watch\/[a-zA-Z0-9/._-]+$/.test(trimmed)) return trimmed;
+  return /^https?:\/\//i.test(trimmed) ? trimmed : null;
+}
+
 const SimilarPinoyCard = memo(function SimilarPinoyCard({ film }: { film: PinoyFilm }) {
   const [imgFailed, setImgFailed] = useState(false);
   const safePoster = sanitizeHttpUrl(film.poster);
@@ -133,7 +140,7 @@ export function PinoyDetailPage() {
   useDocumentTitle(film ? `${film.titre} · Pinoy` : 'Film Pinoy');
 
   const embedPlayers: PinoyPlayerSource[] = (data?.players.embed ?? []).filter((p) =>
-    Boolean(sanitizeHttpUrl(p.url))
+    Boolean(sanitizePlayerUrl(p.url))
   );
   const downloadPlayers: PinoyPlayerSource[] = (data?.players.download ?? []).filter((p) =>
     Boolean(sanitizeHttpUrl(p.url))
@@ -490,7 +497,7 @@ export function PinoyDetailPage() {
           <div className="relative flex-1 bg-black">
             <iframe
               key={primaryPlayer.url}
-              src={sanitizeHttpUrl(primaryPlayer.url) ?? undefined}
+              src={sanitizePlayerUrl(primaryPlayer.url) ?? undefined}
               title={`Regarder — ${film.titre}`}
               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
               allowFullScreen
