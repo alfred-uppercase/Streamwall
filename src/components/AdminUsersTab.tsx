@@ -20,7 +20,7 @@ import {
   X,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { TYPE_LABELS } from '../shared/types';
+import { getContentDetailPath, getContentTypeLabel } from '../shared/types';
 import type {
   AdminOverview,
   AdminUserSummary,
@@ -37,7 +37,7 @@ type SortDir = 'asc' | 'desc';
 function ItemRow({ item, extra }: { item: Item; extra?: string }) {
   return (
     <Link
-      to={`/${item.item_type}/${item.id}`}
+      to={getContentDetailPath(item.item_type, item.id)}
       className="flex items-center gap-3 rounded-lg p-2.5 transition-colors hover:bg-accent"
     >
       {item.poster && (
@@ -51,7 +51,7 @@ function ItemRow({ item, extra }: { item: Item; extra?: string }) {
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium text-foreground">{item.titre}</p>
         <p className="text-xs text-muted-foreground">
-          {TYPE_LABELS[item.item_type] ?? item.item_type}
+          {getContentTypeLabel(item.item_type)}
           {item.annee ? ` · ${item.annee}` : ''}
         </p>
       </div>
@@ -123,7 +123,7 @@ export function AdminUsersTab({
       }
       if (tierFilter === 'pro' && !u.isPro) return false;
       if (tierFilter === 'free' && u.isPro) return false;
-      if (statusFilter === 'active' && u.banned) return false;
+      if (statusFilter === 'active' && (u.banned || !u.online)) return false;
       if (statusFilter === 'banned' && !u.banned) return false;
       if (roleFilter === 'admin' && !u.isAdmin) return false;
       if (roleFilter === 'member' && u.isAdmin) return false;
@@ -137,8 +137,10 @@ export function AdminUsersTab({
       switch (sortKey) {
         case 'username':
           return a.username.localeCompare(b.username, 'fr') * dir;
-        case 'status':
-          return (Number(Boolean(a.banned)) - Number(Boolean(b.banned))) * dir;
+        case 'status': {
+          const rank = (u: AdminUserSummary) => (u.banned ? 2 : u.online ? 0 : 1);
+          return (rank(a) - rank(b)) * dir;
+        }
         case 'isPro':
           return (Number(Boolean(a.isPro)) - Number(Boolean(b.isPro))) * dir;
         case 'plays':
@@ -321,18 +323,33 @@ export function AdminUsersTab({
             </p>
           </div>
 
-          {data?.source && (
-            <span className="rounded-md border border-border bg-background px-2.5 py-1 text-xs text-muted-foreground">
-              Source :{' '}
-              {data.source === 'supabase_auth'
-                ? 'Supabase Auth'
-                : data.source === 'supabase_rpc'
-                  ? 'Supabase RPC'
-                  : data.source === 'supabase_profiles'
-                    ? 'Supabase Profiles'
-                    : 'Local'}
-            </span>
-          )}
+          <div className="flex flex-wrap items-center gap-2">
+            {data?.activeStats && (
+              <>
+                <span className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-400 tabular-nums">
+                  <span className="size-1.5 rounded-full bg-emerald-400" />
+                  <span>Membre actif : {data.activeStats.activeMembers}</span>
+                </span>
+                <span className="inline-flex items-center gap-1.5 rounded-md border border-sky-500/30 bg-sky-500/10 px-2.5 py-1 text-xs font-medium text-sky-400 tabular-nums">
+                  <span className="size-1.5 rounded-full bg-sky-400" />
+                  <span>Invité actif : {data.activeStats.activeGuests}</span>
+                </span>
+              </>
+            )}
+
+            {data?.source && (
+              <span className="rounded-md border border-border bg-background px-2.5 py-1 text-xs text-muted-foreground">
+                Source :{' '}
+                {data.source === 'supabase_auth'
+                  ? 'Supabase Auth'
+                  : data.source === 'supabase_rpc'
+                    ? 'Supabase RPC'
+                    : data.source === 'supabase_profiles'
+                      ? 'Supabase Profiles'
+                      : 'Local'}
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Search & Filter Toolbar */}
@@ -368,7 +385,7 @@ export function AdminUsersTab({
             className="h-9 rounded-lg border border-input bg-background px-3 text-xs text-foreground focus:border-primary focus:outline-none"
           >
             <option value="all">Tous les statuts</option>
-            <option value="active">Actifs uniquement</option>
+            <option value="active">Actifs (en ligne)</option>
             <option value="banned">Bannis uniquement</option>
           </select>
 
@@ -524,8 +541,16 @@ export function AdminUsersTab({
                             <Ban className="size-3.5" />
                             <span>Banni</span>
                           </span>
+                        ) : u.online ? (
+                          <span
+                            title={u.currentPage ? `Actif sur ${u.currentPage}` : 'Actif en ligne'}
+                            className="inline-flex items-center gap-1.5 font-medium text-emerald-400"
+                          >
+                            <span className="size-1.5 rounded-full bg-emerald-400" />
+                            <span>Actif</span>
+                          </span>
                         ) : (
-                          <span className="font-medium text-emerald-400">Actif</span>
+                          <span className="text-muted-foreground">—</span>
                         )}
                       </td>
 
@@ -723,8 +748,13 @@ export function AdminUsersTab({
                     {selectedUser.isPro && <ProCrownBadge />}
                   </div>
                   <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">
-                    {selectedUser.email} · {selectedUser.banned ? 'Compte banni' : 'Compte actif'} · Inscrit le{' '}
-                    {new Date(selectedUser.createdAt).toLocaleDateString('fr-FR')}
+                    {selectedUser.email}
+                    {selectedUser.banned
+                      ? ' · Compte banni'
+                      : selectedUser.online
+                        ? ' · Actif'
+                        : ''}{' '}
+                    · Inscrit le {new Date(selectedUser.createdAt).toLocaleDateString('fr-FR')}
                   </p>
                 </div>
               </div>

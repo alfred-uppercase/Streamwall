@@ -165,13 +165,18 @@ export function AdminCustomApisTab() {
       }),
     onSuccess: (res) => {
       setDraft(res.module);
+      const routePreview = res.module.slug === 'pinoy' ? '/pinoy' : `/c/${res.module.slug}`;
       void queryClient.invalidateQueries({ queryKey: ['admin-custom-modules'] });
       void queryClient.invalidateQueries({ queryKey: ['admin-navigation'] });
       void queryClient.invalidateQueries({ queryKey: ['site-navigation'] });
+      void queryClient.invalidateQueries({ queryKey: ['admin-settings'] });
+      void queryClient.invalidateQueries({ queryKey: ['pinoy-facets'] });
+      void queryClient.invalidateQueries({ queryKey: ['pinoy-list'] });
+      void queryClient.invalidateQueries({ queryKey: ['pinoy-detail'] });
       void queryClient.invalidateQueries({ queryKey: ['custom-facets', res.module.slug] });
       void queryClient.invalidateQueries({ queryKey: ['custom-list', res.module.slug] });
       void queryClient.invalidateQueries({ queryKey: ['custom-detail', res.module.slug] });
-      toast.success(`Module « ${res.module.name} » enregistré et prêt sur /c/${res.module.slug}`);
+      toast.success(`Module « ${res.module.name} » enregistré et prêt sur ${routePreview}`);
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : 'Erreur d’enregistrement'),
   });
@@ -184,6 +189,10 @@ export function AdminCustomApisTab() {
       void queryClient.invalidateQueries({ queryKey: ['admin-custom-modules'] });
       void queryClient.invalidateQueries({ queryKey: ['admin-navigation'] });
       void queryClient.invalidateQueries({ queryKey: ['site-navigation'] });
+      void queryClient.invalidateQueries({ queryKey: ['admin-settings'] });
+      void queryClient.invalidateQueries({ queryKey: ['pinoy-facets'] });
+      void queryClient.invalidateQueries({ queryKey: ['pinoy-list'] });
+      void queryClient.invalidateQueries({ queryKey: ['pinoy-detail'] });
       toast.success('Module supprimé');
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : 'Suppression impossible'),
@@ -295,7 +304,9 @@ export function AdminCustomApisTab() {
                         {m.enabled ? 'Actif' : 'Désactivé'}
                       </span>
                     </div>
-                    <p className="mt-0.5 font-mono text-[11px] text-primary">/c/{m.slug}</p>
+                    <p className="mt-0.5 font-mono text-[11px] text-primary">
+                      {m.slug === 'pinoy' ? '/pinoy' : `/c/${m.slug}`}
+                    </p>
                   </button>
                 </li>
               ))}
@@ -313,7 +324,10 @@ export function AdminCustomApisTab() {
                 {draft.id ? `Éditer : ${draft.name}` : 'Créer un module API & Lecteur'}
               </h2>
               <p className="text-xs text-muted-foreground">
-                Route catalogue : <code className="font-mono text-primary">/c/{draft.slug || 'slug'}</code>
+                Route catalogue :{' '}
+                <code className="font-mono text-primary">
+                  {draft.slug === 'pinoy' ? '/pinoy' : `/c/${draft.slug || 'slug'}`}
+                </code>
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -327,7 +341,7 @@ export function AdminCustomApisTab() {
               </button>
               {draft.id && draft.enabled && (
                 <Link
-                  to={`/c/${encodeURIComponent(draft.slug)}`}
+                  to={draft.slug === 'pinoy' ? '/pinoy' : `/c/${encodeURIComponent(draft.slug)}`}
                   target="_blank"
                   className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-2 text-xs font-medium text-foreground hover:bg-accent"
                 >
@@ -400,10 +414,13 @@ export function AdminCustomApisTab() {
                 </label>
 
                 <label className="block text-xs">
-                  <span className="mb-1 block font-medium text-foreground">Slug URL (/c/&lt;slug&gt;)</span>
+                  <span className="mb-1 block font-medium text-foreground">
+                    {draft.slug === 'pinoy' ? 'Slug URL (/pinoy)' : 'Slug URL (/c/<slug>)'}
+                  </span>
                   <input
                     value={draft.slug}
                     maxLength={40}
+                    disabled={draft.id === 'mod_pinoy_builtin'}
                     onChange={(e) =>
                       setDraft({
                         ...draft,
@@ -411,7 +428,7 @@ export function AdminCustomApisTab() {
                       })
                     }
                     placeholder="drama"
-                    className="h-9 w-full rounded-lg border border-input bg-background px-3 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
+                    className="h-9 w-full rounded-lg border border-input bg-background px-3 font-mono text-sm text-foreground focus:border-primary focus:outline-none disabled:opacity-60"
                   />
                 </label>
 
@@ -855,7 +872,8 @@ export function AdminCustomApisTab() {
 
               <div className="space-y-2 border-t border-border pt-4">
                 <p className="text-xs font-semibold text-foreground">
-                  Sections actives sur la page Détail (/c/{draft.slug}/:id)
+                  Sections actives sur la page Détail (
+                  {draft.slug === 'pinoy' ? '/pinoy/:id' : `/c/${draft.slug}/:id`})
                 </p>
                 <div className="grid gap-2.5 sm:grid-cols-2 text-xs text-foreground">
                   {(
@@ -921,7 +939,7 @@ export function AdminCustomApisTab() {
                     ['useSameOriginProxy', 'Utiliser le proxy same-origin anti X-Frame-Options'],
                     ['showServerSwitcherInModal', 'Afficher sélecteur de serveurs dans la popup lecteur'],
                     ['includeUpstreamEmbeds', 'Inclure aussi les lecteurs embed retournés par l’API'],
-                    ['downloadProOnly', 'Téléchargement réservé aux membres Pro & Admin'],
+                    ['downloadProOnly', 'Téléchargement réservé aux membres Pro'],
                     ['onlyDirectDownloads', 'Filtrer uniquement les liens de téléchargement direct'],
                   ] as const
                 ).map(([k, lbl]) => (

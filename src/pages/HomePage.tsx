@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowRight, ChevronLeft, ChevronRight, Play, X } from 'lucide-react';
-import { TYPE_LABELS } from '../shared/types';
+import { getContentDetailPath, getContentTypeLabel } from '../shared/types';
 import type { Slide, WatchProgress } from '../shared/types';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
@@ -61,7 +61,7 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
 
   const metaParts = [
     `À la une`,
-    TYPE_LABELS[current.item_type] ?? current.item_type,
+    getContentTypeLabel(current.item_type),
     current.annee ? String(current.annee) : null,
     current.qualite || null,
     current.langue || null,
@@ -111,7 +111,7 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
 
             <div className="pt-2 flex flex-wrap items-center gap-3">
               <Link
-                to={`/${current.item_type}/${current.id}`}
+                to={getContentDetailPath(current.item_type, current.id)}
                 className="inline-flex items-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 whitespace-nowrap shrink-0"
               >
                 <Play className="size-4 fill-current" />
@@ -129,7 +129,7 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
 
           {current.poster && (
             <Link
-              to={`/${current.item_type}/${current.id}`}
+              to={getContentDetailPath(current.item_type, current.id)}
               className="hidden lg:block shrink-0 overflow-hidden rounded-xl border border-white/15 dark:border-border shadow-2xl transition-transform duration-200 hover:scale-[1.02]"
             >
               <img
@@ -198,17 +198,17 @@ function ContinueWatchingSection({ items }: { items: WatchProgress[] }) {
 
   if (items.length === 0) return null;
 
-  const recentFive = items.slice(0, 5);
+  const recentSix = items.slice(0, 6);
 
   return (
     <section className="mb-12">
       <div className="mb-5 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
         <div className="min-w-0">
           <h2 className="font-display text-2xl font-bold text-foreground">
-            Dernières lectures ({recentFive.length}/5)
+            Dernières lectures
           </h2>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            Vos 5 derniers titres visionnés · La reprise exacte est gérée automatiquement par le lecteur.
+            Vos 6 derniers titres visionnés
           </p>
         </div>
         <Link
@@ -219,18 +219,25 @@ function ContinueWatchingSection({ items }: { items: WatchProgress[] }) {
         </Link>
       </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {recentFive.map((entry) => {
-          const isEpisodic = entry.item.item_type !== 'film';
+        {recentSix.map((entry) => {
+          const isEpisodic =
+            entry.item.item_type === 'serie' || entry.item.item_type === 'anime';
           const resumeLabel = isEpisodic
             ? `Saison ${entry.season} · Épisode ${entry.episode}`
             : new Date(entry.updatedAt).toLocaleDateString('fr-FR');
+          const basePath = getContentDetailPath(entry.item.item_type, entry.item.id);
+          const watchTo = isEpisodic
+            ? `${basePath}?autoplay=1&s=${entry.season}&e=${entry.episode}`
+            : entry.item.item_type === 'film'
+              ? `${basePath}?autoplay=1`
+              : basePath;
           return (
             <div
               key={`${entry.item.item_type}:${entry.item.id}`}
               className="group relative flex min-w-0 w-full items-center gap-3 sm:gap-4 overflow-hidden rounded-xl border border-border bg-card p-3 sm:p-3.5 transition-colors hover:border-primary/70"
             >
               <Link
-                to={`/${entry.item.item_type}/${entry.item.id}?autoplay=1&s=${entry.season}&e=${entry.episode}`}
+                to={watchTo}
                 className="flex min-w-0 flex-1 items-center gap-3 sm:gap-4"
               >
                 <div className="relative h-20 w-14 shrink-0 overflow-hidden rounded-md bg-background border border-border">
@@ -248,7 +255,7 @@ function ContinueWatchingSection({ items }: { items: WatchProgress[] }) {
                     {entry.item.titre}
                   </p>
                   <p className="mt-0.5 truncate text-xs text-muted-foreground tabular-nums">
-                    {TYPE_LABELS[entry.item.item_type]} · {resumeLabel}
+                    {getContentTypeLabel(entry.item.item_type)} · {resumeLabel}
                   </p>
                   <span className="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-primary">
                     <Play className="size-3.5 fill-current" />
@@ -374,7 +381,7 @@ export function HomePage() {
             {data!.friendsActivity.map((act, idx) => (
               <Link
                 key={`${act.username}-${act.item.id}-${idx}`}
-                to={`/${act.item.item_type}/${act.item.id}`}
+                to={getContentDetailPath(act.item.item_type, act.item.id)}
                 className="flex min-w-0 w-full items-center gap-3 sm:gap-4 overflow-hidden rounded-xl border border-border bg-card p-3.5 sm:p-4 transition-colors hover:border-primary/70"
               >
                 {act.item.poster && (
@@ -415,18 +422,22 @@ export function HomePage() {
           <div>
             <h2 className="font-display text-2xl font-bold text-foreground">Top de la semaine</h2>
             <p className="mt-0.5 text-sm text-muted-foreground">
-              Classement par nombre de spectateurs distincts sur 7 jours
+              Les 6 titres les plus vus du catalogue
             </p>
           </div>
         </div>
         {data?.week.length ? (
           <div className="grid grid-cols-3 gap-2.5 sm:gap-5 md:grid-cols-4 lg:grid-cols-6">
-            {data.week.map((entry, idx) => (
+            {data.week.slice(0, 6).map((entry, idx) => (
               <PosterCard
                 key={`wk-${entry.item.item_type}:${entry.item.id}`}
                 item={entry.item}
                 rankNumber={idx + 1}
-                subtitleOverride={`${entry.viewers} spectateur${entry.viewers > 1 ? 's' : ''}`}
+                subtitleOverride={
+                  entry.viewers > 0
+                    ? `${entry.viewers} spectateur${entry.viewers > 1 ? 's' : ''}`
+                    : undefined
+                }
               />
             ))}
           </div>

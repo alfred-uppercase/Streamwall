@@ -17,6 +17,7 @@ import { readModuleSnapshot, writeModuleSnapshot } from './persistentDb.ts';
 import {
   DEFAULT_PINOY_DOWNLOAD_MESSAGE,
   DEFAULT_PINOY_MEDIA_BASE_URL,
+  DEFAULT_PINOY_PLAYER_TEMPLATE,
   validatePinoyApiUrl,
   validatePinoyMediaBaseUrl,
   validatePinoyPlayerTemplate,
@@ -56,7 +57,6 @@ const RESERVED_SLUGS = new Set([
   'film',
   'serie',
   'anime',
-  'pinoy',
   'catalogue',
   'favoris',
   'profil',
@@ -66,6 +66,7 @@ const RESERVED_SLUGS = new Set([
   'pricing',
   'suggestion',
   'demandes',
+  'communaute',
   'confidentialite',
   'reset-password',
   'api',
@@ -138,6 +139,7 @@ export function createDefaultNavigationConfig(): SiteNavigationConfig {
   const now = new Date().toISOString();
   return {
     updatedAt: now,
+    communityNavSeeded: true,
     items: [
       {
         id: 'nav_accueil',
@@ -208,6 +210,20 @@ export function createDefaultNavigationConfig(): SiteNavigationConfig {
         order: 50,
         authRule: 'all',
         systemKey: 'suggestion',
+      },
+      {
+        id: 'nav_communaute',
+        label: 'Communauté',
+        path: '/communaute',
+        icon: 'message-square',
+        exact: false,
+        enabled: true,
+        desktop: false,
+        mobile: true,
+        footer: true,
+        order: 55,
+        authRule: 'all',
+        systemKey: 'community',
       },
       {
         id: 'nav_demandes',
@@ -326,7 +342,37 @@ function loadNavigationConfig(): SiteNavigationConfig {
       .filter((x): x is MenuLinkConfig => Boolean(x))
       .sort((a, b) => a.order - b.order);
     if (cleaned.length > 0) {
-      return { items: cleaned, updatedAt: stored.updatedAt || new Date().toISOString() };
+      let mutated = false;
+      if (
+        !stored.communityNavSeeded &&
+        !cleaned.some((i) => i.path === '/communaute' || i.id === 'nav_communaute')
+      ) {
+        cleaned.push({
+          id: 'nav_communaute',
+          label: 'Communauté',
+          path: '/communaute',
+          icon: 'message-square',
+          exact: false,
+          enabled: true,
+          desktop: false,
+          mobile: true,
+          footer: true,
+          order: 55,
+          authRule: 'all',
+          systemKey: 'community',
+        });
+        cleaned.sort((a, b) => a.order - b.order);
+        mutated = true;
+      }
+      const next: SiteNavigationConfig = {
+        items: cleaned,
+        updatedAt: stored.updatedAt || new Date().toISOString(),
+        communityNavSeeded: true,
+      };
+      if (mutated || !stored.communityNavSeeded) {
+        writeModuleSnapshot('navigation', next);
+      }
+      return next;
     }
   }
   const defaults = createDefaultNavigationConfig();
@@ -373,6 +419,7 @@ export function updateSiteNavigation(
   const next: SiteNavigationConfig = {
     items: cleaned,
     updatedAt: new Date().toISOString(),
+    communityNavSeeded: true,
   };
   navigationState = next;
   writeModuleSnapshot('navigation', next);
@@ -392,6 +439,64 @@ export function resetSiteNavigation(): SiteNavigationConfig {
 
 interface CustomModulesDatabase {
   modules: CustomApiModuleConfig[];
+  pinoyDeleted?: boolean;
+}
+
+export const PINOY_BUILTIN_MODULE_ID = 'mod_pinoy_builtin';
+
+export function buildDefaultPinoyModuleConfig(overrides?: {
+  apiUrl?: string;
+  mediaBaseUrl?: string;
+  playerUrlTemplate?: string;
+  downloadRestrictionMessage?: string;
+}): CustomApiModuleConfig {
+  const now = new Date().toISOString();
+  const baseEndpoints = createDefaultEndpointsConfig();
+  const basePlayer = createDefaultPlayerConfig();
+  const baseSections = createDefaultSectionsConfig('Pinoy');
+  const apiUrlCheck = validatePinoyApiUrl(overrides?.apiUrl ?? process.env.PINOY_API_URL ?? '');
+  const mediaCheck = validatePinoyMediaBaseUrl(
+    overrides?.mediaBaseUrl ?? process.env.PINOY_MEDIA_BASE_URL ?? DEFAULT_PINOY_MEDIA_BASE_URL
+  );
+  const playerCheck = validatePinoyPlayerTemplate(
+    overrides?.playerUrlTemplate ?? process.env.PINOY_PLAYER_TEMPLATE ?? DEFAULT_PINOY_PLAYER_TEMPLATE
+  );
+
+  return {
+    id: PINOY_BUILTIN_MODULE_ID,
+    slug: 'pinoy',
+    name: 'Pinoy',
+    enabled: true,
+    badgeText: 'Pinoy',
+    icon: 'film',
+    endpoints: {
+      ...baseEndpoints,
+      apiUrl: apiUrlCheck.ok ? apiUrlCheck.url : '',
+      mediaBaseUrl: mediaCheck.ok ? mediaCheck.url : DEFAULT_PINOY_MEDIA_BASE_URL,
+    },
+    fields: createDefaultFieldMapping(),
+    filters: createDefaultFiltersConfig(),
+    sections: {
+      ...baseSections,
+      catalogueTitle: 'Films Pinoy',
+      catalogueSubtitle: 'Catalogue de films Pinoy avec lecteur intégré et liens de téléchargement.',
+    },
+    player: {
+      ...basePlayer,
+      playerUrlTemplate: playerCheck.ok ? playerCheck.template : DEFAULT_PINOY_PLAYER_TEMPLATE,
+      primaryPlayerLabel: 'Lecteur Pinoy',
+      useSameOriginProxy: true,
+      showServerSwitcherInModal: false,
+      downloadProOnly: true,
+      downloadRestrictionMessage:
+        (overrides?.downloadRestrictionMessage || process.env.PINOY_DOWNLOAD_MESSAGE || DEFAULT_PINOY_DOWNLOAD_MESSAGE)
+          .trim()
+          .slice(0, 500) || DEFAULT_PINOY_DOWNLOAD_MESSAGE,
+      onlyDirectDownloads: true,
+    },
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 export function createDefaultEndpointsConfig(): CustomApiEndpointsConfig {
@@ -736,10 +841,11 @@ function sanitizeCustomModule(
   };
 
   const now = new Date().toISOString();
+  const defaultId = slug === 'pinoy' ? PINOY_BUILTIN_MODULE_ID : `mod_${crypto.randomBytes(5).toString('hex')}`;
   return {
     ok: true,
     module: {
-      id: existing?.id ?? `mod_${crypto.randomBytes(5).toString('hex')}`,
+      id: existing?.id ?? defaultId,
       slug,
       name,
       enabled: r.enabled !== undefined ? Boolean(r.enabled) : (existing?.enabled ?? true),
@@ -756,6 +862,36 @@ function sanitizeCustomModule(
   };
 }
 
+function readLegacyPinoyStoreOverrides(): {
+  apiUrl?: string;
+  mediaBaseUrl?: string;
+  playerUrlTemplate?: string;
+  downloadRestrictionMessage?: string;
+} {
+  try {
+    const storeSnap = readModuleSnapshot<{
+      settings?: {
+        pinoy_api_url?: string;
+        pinoy_media_base_url?: string;
+        pinoy_player_template?: string;
+        pinoy_download_message?: string;
+      };
+    }>('store');
+    const s = storeSnap?.settings;
+    if (!s) return {};
+    return {
+      apiUrl: typeof s.pinoy_api_url === 'string' ? s.pinoy_api_url : undefined,
+      mediaBaseUrl: typeof s.pinoy_media_base_url === 'string' ? s.pinoy_media_base_url : undefined,
+      playerUrlTemplate:
+        typeof s.pinoy_player_template === 'string' ? s.pinoy_player_template : undefined,
+      downloadRestrictionMessage:
+        typeof s.pinoy_download_message === 'string' ? s.pinoy_download_message : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
 function loadCustomModulesDb(): CustomModulesDatabase {
   const stored = readModuleSnapshot<CustomModulesDatabase>('custom_modules');
   if (stored && Array.isArray(stored.modules)) {
@@ -764,9 +900,24 @@ function loadCustomModulesDb(): CustomModulesDatabase {
       const res = sanitizeCustomModule(m, null);
       if (res.ok) valid.push(res.module);
     }
-    return { modules: valid };
+    const pinoyDeleted = Boolean(stored.pinoyDeleted);
+    let mutated = false;
+    if (!pinoyDeleted && !valid.some((m) => m.slug === 'pinoy')) {
+      valid.unshift(buildDefaultPinoyModuleConfig(readLegacyPinoyStoreOverrides()));
+      mutated = true;
+    }
+    const result: CustomModulesDatabase = {
+      modules: valid,
+      ...(pinoyDeleted ? { pinoyDeleted: true } : {}),
+    };
+    if (mutated) {
+      writeModuleSnapshot('custom_modules', result);
+    }
+    return result;
   }
-  const initial: CustomModulesDatabase = { modules: [] };
+  const initial: CustomModulesDatabase = {
+    modules: [buildDefaultPinoyModuleConfig(readLegacyPinoyStoreOverrides())],
+  };
   writeModuleSnapshot('custom_modules', initial);
   return initial;
 }
@@ -775,6 +926,48 @@ const customModulesDb: CustomModulesDatabase = loadCustomModulesDb();
 
 function saveCustomModules(): void {
   writeModuleSnapshot('custom_modules', customModulesDb);
+}
+
+export function isPinoyModuleDeleted(): boolean {
+  return Boolean(customModulesDb.pinoyDeleted);
+}
+
+export function isPinoyModuleActive(): boolean {
+  if (customModulesDb.pinoyDeleted) return false;
+  const mod = getCustomModule('pinoy');
+  return mod ? mod.enabled : true;
+}
+
+export function syncPinoyModuleFromSettings(patch: {
+  apiUrl?: string;
+  mediaBaseUrl?: string;
+  playerUrlTemplate?: string;
+  downloadRestrictionMessage?: string;
+}): void {
+  if (customModulesDb.pinoyDeleted) return;
+  const existing = getCustomModule('pinoy');
+  if (!existing) return;
+  const next: CustomApiModuleConfig = {
+    ...existing,
+    endpoints: {
+      ...existing.endpoints,
+      ...(patch.apiUrl !== undefined ? { apiUrl: patch.apiUrl } : {}),
+      ...(patch.mediaBaseUrl !== undefined ? { mediaBaseUrl: patch.mediaBaseUrl } : {}),
+    },
+    player: {
+      ...existing.player,
+      ...(patch.playerUrlTemplate !== undefined ? { playerUrlTemplate: patch.playerUrlTemplate } : {}),
+      ...(patch.downloadRestrictionMessage !== undefined
+        ? { downloadRestrictionMessage: patch.downloadRestrictionMessage }
+        : {}),
+    },
+    updatedAt: new Date().toISOString(),
+  };
+  const idx = customModulesDb.modules.findIndex((m) => m.id === existing.id);
+  if (idx >= 0) {
+    customModulesDb.modules[idx] = next;
+    saveCustomModules();
+  }
 }
 
 export function listCustomModules(includeDisabled = true): CustomApiModuleConfig[] {
@@ -830,6 +1023,10 @@ export function upsertCustomModule(
     return { ok: false, error: `Un module utilise déjà le slug « ${validated.module.slug} ».` };
   }
 
+  if (validated.module.slug === 'pinoy') {
+    customModulesDb.pinoyDeleted = false;
+  }
+
   const idx = customModulesDb.modules.findIndex((m) => m.id === validated.module.id);
   if (idx >= 0) {
     customModulesDb.modules[idx] = validated.module;
@@ -856,16 +1053,23 @@ export function deleteCustomModule(slugOrId: string): boolean {
   );
   if (!target) return false;
   customModulesDb.modules = customModulesDb.modules.filter((m) => m.id !== target.id);
+  if (target.slug === 'pinoy') {
+    customModulesDb.pinoyDeleted = true;
+  }
   saveCustomModules();
 
   // Remove linked menu entry if present
   const nextItems = navigationState.items.filter(
-    (item) => item.customModuleSlug !== target.slug && item.path !== `/c/${target.slug}`
+    (item) =>
+      item.customModuleSlug !== target.slug &&
+      item.path !== `/c/${target.slug}` &&
+      !(target.slug === 'pinoy' && (item.path === '/pinoy' || item.systemKey === 'pinoy'))
   );
   if (nextItems.length !== navigationState.items.length) {
     navigationState = {
       items: nextItems,
       updatedAt: new Date().toISOString(),
+      communityNavSeeded: true,
     };
     writeModuleSnapshot('navigation', navigationState);
   }
@@ -877,10 +1081,14 @@ export function syncNavigationLinkForCustomModule(
   mod: CustomApiModuleConfig,
   surfaces: { desktop: boolean; mobile: boolean; footer: boolean }
 ): void {
-  const targetPath = `/c/${mod.slug}`;
+  const isPinoy = mod.slug === 'pinoy';
+  const targetPath = isPinoy ? '/pinoy' : `/c/${mod.slug}`;
   const current = [...navigationState.items];
   const idx = current.findIndex(
-    (item) => item.customModuleSlug === mod.slug || item.path === targetPath
+    (item) =>
+      item.customModuleSlug === mod.slug ||
+      item.path === targetPath ||
+      (isPinoy && (item.path === '/pinoy' || item.systemKey === 'pinoy'))
   );
 
   if (idx >= 0) {
@@ -891,11 +1099,12 @@ export function syncNavigationLinkForCustomModule(
       icon: mod.icon,
       enabled: mod.enabled,
       customModuleSlug: mod.slug,
+      ...(isPinoy ? { systemKey: 'pinoy' } : {}),
     };
   } else {
     const maxOrder = current.reduce((max, item) => Math.max(max, item.order), 40);
     current.push({
-      id: `nav_mod_${mod.slug}`,
+      id: isPinoy ? 'nav_pinoy' : `nav_mod_${mod.slug}`,
       label: mod.name,
       path: targetPath,
       icon: mod.icon,
@@ -904,15 +1113,17 @@ export function syncNavigationLinkForCustomModule(
       desktop: surfaces.desktop,
       mobile: surfaces.mobile,
       footer: surfaces.footer,
-      order: Math.min(85, maxOrder + 5),
+      order: isPinoy ? 40 : Math.min(85, maxOrder + 5),
       authRule: 'all',
       customModuleSlug: mod.slug,
+      ...(isPinoy ? { systemKey: 'pinoy' } : {}),
     });
   }
   current.sort((a, b) => a.order - b.order);
   navigationState = {
     items: current,
     updatedAt: new Date().toISOString(),
+    communityNavSeeded: true,
   };
   writeModuleSnapshot('navigation', navigationState);
 }

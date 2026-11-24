@@ -17,8 +17,8 @@ import {
   XCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { getContentDetailPath, getContentTypeLabel } from '../shared/types';
 import type { ContentRequestStatus, ItemType, TmdbSearchSuggestion } from '../shared/types';
-import { TYPE_LABELS } from '../shared/types';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
 
@@ -62,8 +62,8 @@ const REQUEST_STATUS_META: Record<
   },
 };
 
-export function RequestsPage() {
-  useDocumentTitle('Demander un titre');
+export function RequestsPage({ embedded = false }: { embedded?: boolean } = {}) {
+  useDocumentTitle(embedded ? 'Communauté' : 'Demander un titre');
   const [searchParams] = useSearchParams();
   const { isMember } = useAuth();
   const queryClient = useQueryClient();
@@ -187,13 +187,24 @@ export function RequestsPage() {
     setShowDropdown(false);
   }
 
+  const WrapperTag = embedded ? 'div' : 'main';
+  const wrapperClass = embedded
+    ? 'space-y-8'
+    : 'mx-auto max-w-6xl space-y-10 px-4 py-8 sm:px-6 sm:py-10';
+
   return (
-    <main className="mx-auto max-w-6xl space-y-10 px-4 py-8 sm:px-6 sm:py-10">
+    <WrapperTag className={wrapperClass}>
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="font-display text-3xl font-bold text-foreground sm:text-4xl">
-            Demander un titre manquant
-          </h1>
+          {embedded ? (
+            <h2 className="font-display text-2xl font-bold text-foreground sm:text-3xl">
+              Demander un titre manquant
+            </h2>
+          ) : (
+            <h1 className="font-display text-3xl font-bold text-foreground sm:text-4xl">
+              Demander un titre manquant
+            </h1>
+          )}
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
             Vous ne trouvez pas un film, une série ou un anime dans le catalogue ? Tapez son titre pour voir les suggestions TMDB, ou saisissez-le directement manuellement.
           </p>
@@ -366,7 +377,10 @@ export function RequestsPage() {
                               </div>
                             </div>
                             <Link
-                              to={`/${s.existingCatalogItem.item_type}/${s.existingCatalogItem.id}`}
+                              to={getContentDetailPath(
+                                s.existingCatalogItem.item_type,
+                                s.existingCatalogItem.id
+                              )}
                               className="inline-flex items-center gap-1 rounded-lg bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/25 whitespace-nowrap shrink-0"
                             >
                               <span>Ouvrir</span>
@@ -608,7 +622,7 @@ export function RequestsPage() {
                           {req.title}
                         </h3>
                         <p className="text-xs text-muted-foreground tabular-nums">
-                          {TYPE_LABELS[req.mediaType]}
+                          {getContentTypeLabel(req.mediaType)}
                           {req.year ? ` · ${req.year}` : ''}
                           {req.tmdbId ? ` · TMDB #${req.tmdbId}` : ''} · Par {req.username}
                         </p>
@@ -714,6 +728,6 @@ export function RequestsPage() {
           </div>
         </div>
       )}
-    </main>
+    </WrapperTag>
   );
 }

@@ -19,10 +19,11 @@ import {
   X,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import type { CustomApiItem, PinoyPlayerSource } from '../shared/types';
+import type { CustomApiItem, Item, PinoyPlayerSource } from '../shared/types';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
 import { CommentsSection } from '../components/CommentsSection';
+import { FavoriteButton } from '../components/PosterCard';
 
 const FALLBACK_CINEMA_BACKDROP = '/src/assets/images/cinema_hero_backdrop_1794922115112.jpg';
 
@@ -41,11 +42,31 @@ function sanitizePlayerUrl(raw: string | null | undefined): string | null {
   return /^https?:\/\//i.test(trimmed) ? trimmed : null;
 }
 
+function customToFavoriteItem(
+  slug: string,
+  item: CustomApiItem,
+  badgeText?: string | null
+): Item {
+  return {
+    id: item.routeKey,
+    titre: item.titre,
+    poster: sanitizeHttpUrl(item.poster),
+    qualite: badgeText || null,
+    langue: item.pays || null,
+    item_type: `custom:${slug}`,
+    saison: null,
+    genre: item.genres[0] ?? null,
+    annee: item.annee,
+  };
+}
+
 const SimilarCustomCard = memo(function SimilarCustomCard({
   slug,
+  badgeText,
   item,
 }: {
   slug: string;
+  badgeText?: string | null;
   item: CustomApiItem;
 }) {
   const [imgFailed, setImgFailed] = useState(false);
@@ -53,42 +74,48 @@ const SimilarCustomCard = memo(function SimilarCustomCard({
   const showImg = Boolean(safePoster && !imgFailed);
 
   return (
-    <Link
-      to={`/c/${encodeURIComponent(slug)}/${encodeURIComponent(item.routeKey)}`}
-      className="group block rounded-lg focus-visible:outline-2 focus-visible:outline-ring"
-    >
-      <div className="relative aspect-[2/3] w-full overflow-hidden rounded-lg border border-border bg-card transition-colors duration-200 group-hover:border-primary/80">
-        {showImg ? (
-          <img
-            src={safePoster!}
-            alt={item.titre}
-            loading="lazy"
-            decoding="async"
-            referrerPolicy="no-referrer"
-            onError={() => setImgFailed(true)}
-            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
-          />
-        ) : (
-          <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-gradient-to-b from-card to-background p-3 text-center">
-            <Film className="size-6 text-primary/70" />
-            <span className="line-clamp-3 font-display text-xs font-semibold text-foreground/90">
-              {item.titre}
+    <div className="group relative flex flex-col">
+      <Link
+        to={`/c/${encodeURIComponent(slug)}/${encodeURIComponent(item.routeKey)}`}
+        className="block rounded-lg focus-visible:outline-2 focus-visible:outline-ring"
+      >
+        <div className="relative aspect-[2/3] w-full overflow-hidden rounded-lg border border-border bg-card transition-colors duration-200 group-hover:border-primary/80">
+          {showImg ? (
+            <img
+              src={safePoster!}
+              alt={item.titre}
+              loading="lazy"
+              decoding="async"
+              referrerPolicy="no-referrer"
+              onError={() => setImgFailed(true)}
+              className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+            />
+          ) : (
+            <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-gradient-to-b from-card to-background p-3 text-center">
+              <Film className="size-6 text-primary/70" />
+              <span className="line-clamp-3 font-display text-xs font-semibold text-foreground/90">
+                {item.titre}
+              </span>
+            </div>
+          )}
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/45 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+            <span className="inline-flex size-10 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg">
+              <Play className="size-4 fill-current ml-0.5" />
             </span>
           </div>
-        )}
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/45 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
-          <span className="inline-flex size-10 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg">
-            <Play className="size-4 fill-current ml-0.5" />
-          </span>
         </div>
+        <h3 className="mt-2 line-clamp-1 text-xs sm:text-sm font-semibold text-foreground group-hover:text-primary transition-colors">
+          {item.titre}
+        </h3>
+        <p className="mt-0.5 truncate text-[11px] text-muted-foreground tabular-nums">
+          {[item.annee ? String(item.annee) : null, item.duree || null].filter(Boolean).join(' · ')}
+        </p>
+      </Link>
+
+      <div className="absolute right-1.5 top-1.5 sm:right-2 sm:top-2 z-10">
+        <FavoriteButton item={customToFavoriteItem(slug, item, badgeText)} compact />
       </div>
-      <h3 className="mt-2 line-clamp-1 text-xs sm:text-sm font-semibold text-foreground group-hover:text-primary transition-colors">
-        {item.titre}
-      </h3>
-      <p className="mt-0.5 truncate text-[11px] text-muted-foreground tabular-nums">
-        {[item.annee ? String(item.annee) : null, item.duree || null].filter(Boolean).join(' · ')}
-      </p>
-    </Link>
+    </div>
   );
 });
 
@@ -386,6 +413,8 @@ export function CustomDetailPage() {
                 </button>
               )}
 
+              <FavoriteButton item={customToFavoriteItem(slug, item, mod.badgeText)} />
+
               {mod.sections.detailShowReportButton && (
                 <button
                   type="button"
@@ -543,6 +572,7 @@ export function CustomDetailPage() {
               <SimilarCustomCard
                 key={`${sim.id}:${sim.routeKey}`}
                 slug={slug}
+                badgeText={mod.badgeText}
                 item={sim}
               />
             ))}

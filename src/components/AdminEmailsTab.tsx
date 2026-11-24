@@ -55,6 +55,136 @@ function renderPreviewText(raw: string, siteName: string): string {
   return raw.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, k: string) => sample[k] ?? `{{${k}}}`);
 }
 
+const DEFAULT_MAIL_COLORS = {
+  bgColor: '#0f121a',
+  cardBgColor: '#171c28',
+  textColor: '#d1d5db',
+  accentColor: '#e6a82e',
+};
+
+function escapePreviewHtml(raw: string): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function safePreviewHex(raw: string | undefined, fallback: string): string {
+  const trimmed = String(raw || '').trim();
+  return /^#[0-9a-fA-F]{6}$/.test(trimmed) ? trimmed : fallback;
+}
+
+function stripDangerousPreviewHtml(html: string): string {
+  return html
+    .replace(/<\s*(script|iframe|object|embed|applet|form|input|textarea|select|button|svg|math|style|link|meta|base)\b[^>]*>[\s\S]*?<\/\s*\1\s*>/gi, '')
+    .replace(/<\s*(script|iframe|object|embed|applet|form|input|textarea|select|button|svg|math|style|link|meta|base)\b[^>]*\/?>/gi, '')
+    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/(href|src)\s*=\s*(?:"\s*(?:javascript|vbscript|data:text\/html)[^"]*"|'\s*(?:javascript|vbscript|data:text\/html)[^']*')/gi, '$1="#"');
+}
+
+type TplDraftState = {
+  subject: string;
+  heading: string;
+  body: string;
+  ctaLabel: string;
+  bgColor: string;
+  cardBgColor: string;
+  textColor: string;
+  accentColor: string;
+  useCustomHtml: boolean;
+  customHtml: string;
+  enabled: boolean;
+};
+
+function buildStarterEmailHtml(draft: TplDraftState, key: EmailTemplateKey): string {
+  const bg = safePreviewHex(draft.bgColor, DEFAULT_MAIL_COLORS.bgColor);
+  const cardBg = safePreviewHex(draft.cardBgColor, DEFAULT_MAIL_COLORS.cardBgColor);
+  const text = safePreviewHex(draft.textColor, DEFAULT_MAIL_COLORS.textColor);
+  const accent = safePreviewHex(draft.accentColor, DEFAULT_MAIL_COLORS.accentColor);
+  const isCodeTpl = ['signup_verify', 'email_change', 'password_change', 'password_reset'].includes(key);
+  const paragraphs = draft.body
+    .split(/\n{2,}/)
+    .map((p) => `<p style="margin:0 0 14px;line-height:1.65;color:${text};">${escapePreviewHtml(p.trim()).replace(/\n/g, '<br/>')}</p>`)
+    .join('\n');
+  const codeBlock = isCodeTpl
+    ? `<div style="margin:20px 0;padding:18px;border-radius:10px;background:#090b10;border:1px solid #334155;text-align:center;">
+  <div style="font-size:11px;letter-spacing:2px;color:#9ca3af;text-transform:uppercase;">Code de vérification</div>
+  <div style="margin-top:8px;font-size:30px;font-weight:800;letter-spacing:8px;color:${accent};font-family:monospace;">{{code}}</div>
+</div>`
+    : '';
+  const ctaBlock =
+    !isCodeTpl && draft.ctaLabel.trim()
+      ? `<p style="margin:22px 0 8px;">
+  <a href="{{app_url}}" style="display:inline-block;padding:12px 22px;background:${accent};color:#0f172a;text-decoration:none;border-radius:8px;font-weight:700;font-size:14px;">${escapePreviewHtml(draft.ctaLabel)}</a>
+</p>`
+      : '';
+
+  return `<div style="background:${bg};padding:28px 14px;font-family:Arial,sans-serif;color:${text};">
+  <div style="max-width:540px;margin:0 auto;background:${cardBg};border:1px solid #283044;border-radius:14px;padding:26px;">
+    <div style="font-size:19px;font-weight:800;color:#ffffff;margin-bottom:14px;">{{site_name}}</div>
+    <h2 style="margin:0 0 14px;font-size:18px;color:#ffffff;">${escapePreviewHtml(draft.heading || '{{site_name}}')}</h2>
+    ${paragraphs}
+    ${codeBlock}
+    ${ctaBlock}
+    <hr style="border:none;border-top:1px solid #283044;margin:22px 0;" />
+    <p style="margin:0;font-size:12px;color:#94a3b8;">Cet email a été envoyé automatiquement par {{site_name}}.</p>
+  </div>
+</div>`;
+}
+
+function buildEmailPreviewHtml(
+  draft: TplDraftState,
+  key: EmailTemplateKey,
+  siteName: string
+): string {
+  const bg = safePreviewHex(draft.bgColor, DEFAULT_MAIL_COLORS.bgColor);
+  const cardBg = safePreviewHex(draft.cardBgColor, DEFAULT_MAIL_COLORS.cardBgColor);
+  const text = safePreviewHex(draft.textColor, DEFAULT_MAIL_COLORS.textColor);
+  const accent = safePreviewHex(draft.accentColor, DEFAULT_MAIL_COLORS.accentColor);
+
+  if (draft.useCustomHtml && draft.customHtml.trim()) {
+    const interpolated = draft.customHtml.replace(
+      /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g,
+      (_m, k: string) => escapePreviewHtml(renderPreviewText(`{{${k}}}`, siteName))
+    );
+    const cleaned = stripDangerousPreviewHtml(interpolated);
+    return `<!doctype html><html><body style="margin:0;background:${bg};color:${text};font-family:Inter,Arial,sans-serif;">${cleaned}</body></html>`;
+  }
+
+  const isCodeTpl = ['signup_verify', 'email_change', 'password_change', 'password_reset'].includes(key);
+  const heading = escapePreviewHtml(renderPreviewText(draft.heading, siteName));
+  const body = escapePreviewHtml(renderPreviewText(draft.body, siteName)).replace(/\n/g, '<br/>');
+  const codeBlock =
+    isCodeTpl && !draft.body.includes('{{code}}')
+      ? `<div style="margin:16px 0;padding:16px;border-radius:10px;background:#090b10;border:1px solid #334155;text-align:center;">
+          <div style="font-size:10px;letter-spacing:2px;color:#9ca3af;text-transform:uppercase;">Code de vérification</div>
+          <div style="margin-top:6px;font-size:26px;font-weight:800;letter-spacing:8px;color:${accent};font-family:monospace;">482915</div>
+          <div style="margin-top:4px;font-size:10px;color:#9ca3af;">Valable pendant 15 minutes</div>
+        </div>`
+      : '';
+  const ctaLabel = draft.ctaLabel.trim()
+    ? escapePreviewHtml(renderPreviewText(draft.ctaLabel, siteName))
+    : '';
+  const ctaBlock =
+    !isCodeTpl && ctaLabel
+      ? `<div style="margin-top:18px;"><span style="display:inline-block;padding:10px 18px;border-radius:8px;background:${accent};color:#0f172a;font-size:12px;font-weight:700;">${ctaLabel}</span></div>`
+      : '';
+
+  return `<!doctype html><html><body style="margin:0;padding:20px;background:${bg};color:${text};font-family:Inter,Arial,sans-serif;">
+    <div style="max-width:540px;margin:0 auto;border-radius:12px;border:1px solid #283044;background:${cardBg};padding:22px;">
+      <div style="font-size:17px;font-weight:800;color:#ffffff;">${escapePreviewHtml(siteName)}</div>
+      <h4 style="margin:12px 0 0;font-size:15px;font-weight:600;color:#ffffff;">${heading}</h4>
+      <div style="margin-top:12px;font-size:13px;line-height:1.65;color:${text};">${body}</div>
+      ${codeBlock}
+      ${ctaBlock}
+      <hr style="margin:18px 0;border:none;border-top:1px solid #283044;" />
+      <p style="margin:0;font-size:11px;color:#9ca3af;">Cet email a été envoyé automatiquement par ${escapePreviewHtml(siteName)}.</p>
+    </div>
+  </body></html>`;
+}
+
 export function AdminEmailsTab({
   smtpStatus,
   supabaseServiceRoleConfigured,
@@ -149,13 +279,7 @@ export function AdminEmailsTab({
   });
 
   const [selectedKey, setSelectedKey] = useState<EmailTemplateKey>('signup_welcome');
-  const [tplDraft, setTplDraft] = useState<{
-    subject: string;
-    heading: string;
-    body: string;
-    ctaLabel: string;
-    enabled: boolean;
-  } | null>(null);
+  const [tplDraft, setTplDraft] = useState<TplDraftState | null>(null);
 
   const selectedTemplate: EmailTemplateConfig | undefined = useMemo(
     () => templatesQuery.data?.templates.find((t) => t.key === selectedKey) ?? templatesQuery.data?.templates[0],
@@ -169,6 +293,12 @@ export function AdminEmailsTab({
         heading: selectedTemplate.heading,
         body: selectedTemplate.body,
         ctaLabel: selectedTemplate.ctaLabel,
+        bgColor: selectedTemplate.bgColor || DEFAULT_MAIL_COLORS.bgColor,
+        cardBgColor: selectedTemplate.cardBgColor || DEFAULT_MAIL_COLORS.cardBgColor,
+        textColor: selectedTemplate.textColor || DEFAULT_MAIL_COLORS.textColor,
+        accentColor: selectedTemplate.accentColor || DEFAULT_MAIL_COLORS.accentColor,
+        useCustomHtml: Boolean(selectedTemplate.useCustomHtml),
+        customHtml: selectedTemplate.customHtml || '',
         enabled: selectedTemplate.enabled,
       });
     }
@@ -180,9 +310,37 @@ export function AdminEmailsTab({
       patch,
     }: {
       key: EmailTemplateKey;
-      patch: Partial<Pick<EmailTemplateConfig, 'subject' | 'heading' | 'body' | 'ctaLabel' | 'enabled'>>;
+      patch: Partial<
+        Pick<
+          EmailTemplateConfig,
+          | 'subject'
+          | 'heading'
+          | 'body'
+          | 'ctaLabel'
+          | 'bgColor'
+          | 'cardBgColor'
+          | 'textColor'
+          | 'accentColor'
+          | 'useCustomHtml'
+          | 'customHtml'
+          | 'enabled'
+        >
+      >;
     }) => api.adminSaveEmailTemplate(key, patch),
-    onSuccess: () => {
+    onSuccess: (res) => {
+      setTplDraft({
+        subject: res.template.subject,
+        heading: res.template.heading,
+        body: res.template.body,
+        ctaLabel: res.template.ctaLabel,
+        bgColor: res.template.bgColor,
+        cardBgColor: res.template.cardBgColor,
+        textColor: res.template.textColor,
+        accentColor: res.template.accentColor,
+        useCustomHtml: res.template.useCustomHtml,
+        customHtml: res.template.customHtml,
+        enabled: res.template.enabled,
+      });
       void queryClient.invalidateQueries({ queryKey: ['admin-mail-templates'] });
       toast.success('Template email enregistré');
     },
@@ -197,6 +355,12 @@ export function AdminEmailsTab({
         heading: res.template.heading,
         body: res.template.body,
         ctaLabel: res.template.ctaLabel,
+        bgColor: res.template.bgColor,
+        cardBgColor: res.template.cardBgColor,
+        textColor: res.template.textColor,
+        accentColor: res.template.accentColor,
+        useCustomHtml: res.template.useCustomHtml,
+        customHtml: res.template.customHtml,
         enabled: res.template.enabled,
       });
       void queryClient.invalidateQueries({ queryKey: ['admin-mail-templates'] });
@@ -791,7 +955,11 @@ export function AdminEmailsTab({
                           type="button"
                           onClick={() =>
                             setTplDraft((prev) =>
-                              prev ? { ...prev, body: `${prev.body} {{${v}}}` } : prev
+                              prev
+                                ? prev.useCustomHtml
+                                  ? { ...prev, customHtml: `${prev.customHtml} {{${v}}}` }
+                                  : { ...prev, body: `${prev.body} {{${v}}}` }
+                                : prev
                             )
                           }
                           className="rounded border border-border bg-card px-2 py-1 font-mono text-[11px] text-primary hover:bg-accent"
@@ -830,7 +998,7 @@ export function AdminEmailsTab({
                       <label className="block text-xs">
                         <span className="mb-1 block font-medium text-foreground">Titre principal dans le mail</span>
                         <input
-                          required
+                          required={!tplDraft.useCustomHtml}
                           value={tplDraft.heading}
                           onChange={(e) =>
                             setTplDraft((prev) =>
@@ -856,11 +1024,68 @@ export function AdminEmailsTab({
                       </label>
                     </div>
 
+                    {/* Email Theme Colors */}
+                    <div className="rounded-lg border border-border bg-background/60 p-3.5 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-foreground">
+                          Couleurs de l’email (fond & texte)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setTplDraft((prev) =>
+                              prev ? { ...prev, ...DEFAULT_MAIL_COLORS } : prev
+                            )
+                          }
+                          className="text-[11px] font-medium text-primary hover:underline"
+                        >
+                          Couleurs par défaut
+                        </button>
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                        {(
+                          [
+                            ['bgColor', 'Fond global'],
+                            ['cardBgColor', 'Fond carte'],
+                            ['textColor', 'Couleur texte'],
+                            ['accentColor', 'Couleur accent'],
+                          ] as const
+                        ).map(([field, lbl]) => (
+                          <label key={field} className="block text-[11px]">
+                            <span className="mb-1 block text-muted-foreground">{lbl}</span>
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="color"
+                                value={safePreviewHex(tplDraft[field], DEFAULT_MAIL_COLORS[field])}
+                                onChange={(e) =>
+                                  setTplDraft((prev) =>
+                                    prev ? { ...prev, [field]: e.target.value } : prev
+                                  )
+                                }
+                                className="h-8 w-9 shrink-0 cursor-pointer rounded border border-input bg-background p-0.5"
+                              />
+                              <input
+                                type="text"
+                                maxLength={7}
+                                value={tplDraft[field]}
+                                onChange={(e) =>
+                                  setTplDraft((prev) =>
+                                    prev ? { ...prev, [field]: e.target.value } : prev
+                                  )
+                                }
+                                className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 font-mono text-xs text-foreground"
+                              />
+                            </div>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+
                     <label className="block text-xs">
-                      <span className="mb-1 block font-medium text-foreground">Contenu du message</span>
+                      <span className="mb-1 block font-medium text-foreground">Contenu du message (mode texte)</span>
                       <textarea
-                        required
-                        rows={6}
+                        required={!tplDraft.useCustomHtml}
+                        rows={5}
                         value={tplDraft.body}
                         onChange={(e) =>
                           setTplDraft((prev) =>
@@ -870,6 +1095,67 @@ export function AdminEmailsTab({
                         className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm leading-relaxed text-foreground focus:border-primary focus:outline-none"
                       />
                     </label>
+
+                    {/* Editable HTML Mode */}
+                    <div className="rounded-lg border border-border bg-background/60 p-3.5 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-semibold text-foreground">
+                          <input
+                            type="checkbox"
+                            checked={tplDraft.useCustomHtml}
+                            onChange={(e) => {
+                              const enabled = e.target.checked;
+                              setTplDraft((prev) => {
+                                if (!prev) return prev;
+                                const nextHtml =
+                                  enabled && !prev.customHtml.trim()
+                                    ? buildStarterEmailHtml(prev, selectedTemplate.key)
+                                    : prev.customHtml;
+                                return { ...prev, useCustomHtml: enabled, customHtml: nextHtml };
+                              });
+                            }}
+                            className="size-4 accent-primary"
+                          />
+                          <span>Utiliser du HTML personnalisé</span>
+                        </label>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setTplDraft((prev) =>
+                              prev
+                                ? {
+                                    ...prev,
+                                    customHtml: buildStarterEmailHtml(prev, selectedTemplate.key),
+                                  }
+                                : prev
+                            )
+                          }
+                          className="rounded-md border border-border bg-card px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-accent"
+                        >
+                          Insérer exemple HTML
+                        </button>
+                      </div>
+
+                      {tplDraft.useCustomHtml && (
+                        <div className="space-y-1.5">
+                          <textarea
+                            rows={9}
+                            value={tplDraft.customHtml}
+                            onChange={(e) =>
+                              setTplDraft((prev) =>
+                                prev ? { ...prev, customHtml: e.target.value } : prev
+                              )
+                            }
+                            placeholder="<div style='background:#0f121a;padding:24px;color:#d1d5db'>...</div>"
+                            className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs leading-relaxed text-foreground focus:border-primary focus:outline-none"
+                          />
+                          <p className="text-[11px] text-muted-foreground">
+                            Balises autorisées : HTML standard & styles inline. Les scripts/iframes sont bloqués automatiquement pour la sécurité.
+                          </p>
+                        </div>
+                      )}
+                    </div>
 
                     <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                       <div className="flex flex-wrap items-center gap-2">
@@ -918,53 +1204,20 @@ export function AdminEmailsTab({
                     </div>
                   </form>
 
-                  {/* Live Preview */}
-                  <div className="rounded-xl border border-border bg-[#0f121a] p-5 text-gray-100">
-                    <p className="mb-3 text-[11px] font-medium text-gray-400">
+                  {/* Sandboxed HTML Live Preview */}
+                  <div className="rounded-xl border border-border bg-background/80 p-4 space-y-3">
+                    <p className="text-[11px] font-medium text-muted-foreground">
                       Aperçu du rendu · Sujet :{' '}
-                      <span className="text-gray-200">
+                      <span className="text-foreground">
                         {renderPreviewText(tplDraft.subject, siteName)}
                       </span>
                     </p>
-                    <div className="mx-auto max-w-lg rounded-xl border border-[#283044] bg-[#171c28] p-6">
-                      <p className="text-lg font-bold text-white">{siteName}</p>
-                      <h4 className="mt-3 text-base font-semibold text-white">
-                        {renderPreviewText(tplDraft.heading, siteName)}
-                      </h4>
-                      <div className="mt-3 space-y-2.5 text-xs leading-relaxed text-gray-300 whitespace-pre-line">
-                        {renderPreviewText(tplDraft.body, siteName)}
-                      </div>
-                      {['signup_verify', 'email_change', 'password_change', 'password_reset'].includes(
-                        selectedTemplate.key
-                      ) &&
-                        !tplDraft.body.includes('{{code}}') && (
-                          <div className="my-4 rounded-lg border border-gray-700 bg-[#090b10] p-4 text-center">
-                            <div className="text-[10px] tracking-widest uppercase text-gray-400">
-                              Code de vérification
-                            </div>
-                            <div className="mt-1 font-mono text-2xl font-bold tracking-[0.4em] text-[#e6a82e]">
-                              482915
-                            </div>
-                            <div className="mt-1 text-[10px] text-gray-400">
-                              Valable pendant 15 minutes
-                            </div>
-                          </div>
-                        )}
-                      {tplDraft.ctaLabel.trim() &&
-                        !['signup_verify', 'email_change', 'password_change', 'password_reset'].includes(
-                          selectedTemplate.key
-                        ) && (
-                        <div className="mt-5">
-                          <span className="inline-block rounded-lg bg-[#e6a82e] px-4 py-2 text-xs font-bold text-[#0f172a]">
-                            {renderPreviewText(tplDraft.ctaLabel, siteName)}
-                          </span>
-                        </div>
-                      )}
-                      <hr className="my-5 border-[#283044]" />
-                      <p className="text-[11px] text-gray-400">
-                        Cet email a été envoyé automatiquement par {siteName}.
-                      </p>
-                    </div>
+                    <iframe
+                      title="Aperçu email"
+                      sandbox=""
+                      srcDoc={buildEmailPreviewHtml(tplDraft, selectedTemplate.key, siteName)}
+                      className="h-[420px] w-full rounded-lg border border-border bg-zinc-950"
+                    />
                   </div>
                 </>
               ) : (

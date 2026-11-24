@@ -18,10 +18,11 @@ import {
   X,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import type { PinoyFilm, PinoyPlayerSource } from '../shared/types';
+import type { Item, PinoyFilm, PinoyPlayerSource } from '../shared/types';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
 import { CommentsSection } from '../components/CommentsSection';
+import { FavoriteButton } from '../components/PosterCard';
 
 const FALLBACK_CINEMA_BACKDROP = '/src/assets/images/cinema_hero_backdrop_1794922115112.jpg';
 
@@ -38,48 +39,68 @@ function sanitizePlayerUrl(raw: string | null | undefined): string | null {
   return /^https?:\/\//i.test(trimmed) ? trimmed : null;
 }
 
+function pinoyToFavoriteItem(film: PinoyFilm): Item {
+  return {
+    id: film.slug || String(film.id),
+    titre: film.titre,
+    poster: sanitizeHttpUrl(film.poster),
+    qualite: film.note !== null ? `★ ${film.note.toFixed(1)}` : null,
+    langue: film.pays || null,
+    item_type: 'pinoy',
+    saison: null,
+    genre: film.genres[0] ?? null,
+    annee: film.annee,
+  };
+}
+
 const SimilarPinoyCard = memo(function SimilarPinoyCard({ film }: { film: PinoyFilm }) {
   const [imgFailed, setImgFailed] = useState(false);
   const safePoster = sanitizeHttpUrl(film.poster);
   const showImg = Boolean(safePoster && !imgFailed);
 
   return (
-    <Link
-      to={`/pinoy/${encodeURIComponent(film.slug)}`}
-      className="group block rounded-lg focus-visible:outline-2 focus-visible:outline-ring"
-    >
-      <div className="relative aspect-[2/3] w-full overflow-hidden rounded-lg border border-border bg-card transition-colors duration-200 group-hover:border-primary/80">
-        {showImg ? (
-          <img
-            src={safePoster!}
-            alt={film.titre}
-            loading="lazy"
-            decoding="async"
-            referrerPolicy="no-referrer"
-            onError={() => setImgFailed(true)}
-            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
-          />
-        ) : (
-          <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-gradient-to-b from-card to-background p-3 text-center">
-            <Film className="size-6 text-primary/70" />
-            <span className="line-clamp-3 font-display text-xs font-semibold text-foreground/90">
-              {film.titre}
+    <div className="group relative flex flex-col">
+      <Link
+        to={`/pinoy/${encodeURIComponent(film.slug)}`}
+        className="block rounded-lg focus-visible:outline-2 focus-visible:outline-ring"
+      >
+        <div className="relative aspect-[2/3] w-full overflow-hidden rounded-lg border border-border bg-card transition-colors duration-200 group-hover:border-primary/80">
+          {showImg ? (
+            <img
+              src={safePoster!}
+              alt={film.titre}
+              loading="lazy"
+              decoding="async"
+              referrerPolicy="no-referrer"
+              onError={() => setImgFailed(true)}
+              className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+            />
+          ) : (
+            <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-gradient-to-b from-card to-background p-3 text-center">
+              <Film className="size-6 text-primary/70" />
+              <span className="line-clamp-3 font-display text-xs font-semibold text-foreground/90">
+                {film.titre}
+              </span>
+            </div>
+          )}
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/45 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+            <span className="inline-flex size-10 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg">
+              <Play className="size-4 fill-current ml-0.5" />
             </span>
           </div>
-        )}
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/45 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
-          <span className="inline-flex size-10 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg">
-            <Play className="size-4 fill-current ml-0.5" />
-          </span>
         </div>
+        <h3 className="mt-2 line-clamp-1 text-xs sm:text-sm font-semibold text-foreground group-hover:text-primary transition-colors">
+          {film.titre}
+        </h3>
+        <p className="mt-0.5 truncate text-[11px] text-muted-foreground tabular-nums">
+          {[film.annee ? String(film.annee) : null, film.duree || null].filter(Boolean).join(' · ')}
+        </p>
+      </Link>
+
+      <div className="absolute right-1.5 top-1.5 sm:right-2 sm:top-2 z-10">
+        <FavoriteButton item={pinoyToFavoriteItem(film)} compact />
       </div>
-      <h3 className="mt-2 line-clamp-1 text-xs sm:text-sm font-semibold text-foreground group-hover:text-primary transition-colors">
-        {film.titre}
-      </h3>
-      <p className="mt-0.5 truncate text-[11px] text-muted-foreground tabular-nums">
-        {[film.annee ? String(film.annee) : null, film.duree || null].filter(Boolean).join(' · ')}
-      </p>
-    </Link>
+    </div>
   );
 });
 
@@ -133,6 +154,7 @@ export function PinoyDetailPage() {
     queryFn: () => api.pinoyDetail(slug),
     enabled: Boolean(slug),
     staleTime: 180_000,
+    retry: false,
   });
 
   const data = detailQuery.data;
@@ -363,6 +385,17 @@ export function PinoyDetailPage() {
                   <span>Regarder maintenant</span>
                 </button>
               )}
+
+              <FavoriteButton item={pinoyToFavoriteItem(film)} />
+
+              <button
+                type="button"
+                onClick={openReportModal}
+                className="inline-flex items-center gap-2 rounded-lg border border-white/20 bg-black/45 px-4 py-3 text-xs font-semibold text-white hover:bg-black/70 whitespace-nowrap shrink-0"
+              >
+                <Flag className="size-3.5 text-amber-400" />
+                <span>Signaler un lien</span>
+              </button>
             </div>
           </div>
         </div>
@@ -428,7 +461,7 @@ export function PinoyDetailPage() {
                     </Link>
                   )}
                   <Link
-                    to="/pricing"
+                    to="/abonnement"
                     className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90"
                   >
                     <Crown className="size-3.5" />

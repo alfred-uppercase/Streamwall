@@ -1043,6 +1043,265 @@ test('Navigation CMS & Custom API Modules enforce admin auth, block SSRF, and se
   assert.equal(navAfterDel.items.some((i) => i.path === '/c/asian'), false);
 });
 
+test('Top 6 week, 6 recent watches, Pinoy/custom favorites, Admin activeStats, Email custom HTML/colors, and Pinoy module delete/restore', async () => {
+  const [adminLogin, memberLogin] = await Promise.all([
+    fetch(`${baseUrl}/api/auth/demo-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'admin' }),
+    }),
+    fetch(`${baseUrl}/api/auth/demo-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'member' }),
+    }),
+  ]);
+  const adminAuth = (await adminLogin.json()) as { token: string; user: { id: string } };
+  const memberAuth = (await memberLogin.json()) as { token: string; user: { id: string } };
+
+  // 1. /api/home guarantees top 6 week items + /api/site/navigation includes /communaute
+  const [homeRes, navRes] = await Promise.all([
+    fetch(`${baseUrl}/api/home`),
+    fetch(`${baseUrl}/api/site/navigation`),
+  ]);
+  assert.equal(homeRes.status, 200);
+  const homeJson = (await homeRes.json()) as { week: Array<{ id: number }> };
+  assert.equal(homeJson.week.length, 6);
+
+  const navJson = (await navRes.json()) as { items: Array<{ path: string; id: string }> };
+  assert.ok(navJson.items.some((i) => i.id === 'nav_communaute' && i.path === '/communaute'));
+
+  // 2. Member opens 7 distinct items -> /api/member & /api/home retain top 6 recent watches
+  for (let i = 1; i <= 7; i++) {
+    const openRes = await fetch(`${baseUrl}/api/player/open`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberAuth.token}`,
+      },
+      body: JSON.stringify({
+        item: {
+          id: 9000 + i,
+          slug: `watch-test-${i}`,
+          titre: `Watch Test ${i}`,
+          item_type: 'film',
+          poster: '',
+        },
+      }),
+    });
+    assert.equal(openRes.status, 200);
+  }
+
+  const [memberRes, authHomeRes] = await Promise.all([
+    fetch(`${baseUrl}/api/member`, {
+      headers: { Authorization: `Bearer ${memberAuth.token}` },
+    }),
+    fetch(`${baseUrl}/api/home`, {
+      headers: { Authorization: `Bearer ${memberAuth.token}` },
+    }),
+  ]);
+  assert.equal(memberRes.status, 200);
+  const memberJson = (await memberRes.json()) as {
+    progress: Array<{ item_id: number }>;
+  };
+  assert.equal(memberJson.progress.length, 6);
+  const authHomeJson = (await authHomeRes.json()) as {
+    continueWatching: Array<{ id: number }>;
+  };
+  assert.equal(authHomeJson.continueWatching.length, 6);
+
+  // 3. Favorites toggle supports pinoy & custom:<slug> and rejects invalid item_type
+  const favPinoyRes = await fetch(`${baseUrl}/api/favorites/toggle`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${memberAuth.token}`,
+    },
+    body: JSON.stringify({
+      item: {
+        id: 15,
+        slug: 'milf-2026',
+        titre: 'Milf 2026',
+        item_type: 'pinoy',
+      },
+    }),
+  });
+  assert.equal(favPinoyRes.status, 200);
+  const favPinoyJson = (await favPinoyRes.json()) as {
+    saved: boolean;
+    favorites: Array<{ item_type: string }>;
+  };
+  assert.equal(favPinoyJson.saved, true);
+  assert.ok(favPinoyJson.favorites.some((f) => f.item_type === 'pinoy'));
+
+  const favCustomRes = await fetch(`${baseUrl}/api/favorites/toggle`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${memberAuth.token}`,
+    },
+    body: JSON.stringify({
+      item: {
+        id: 77,
+        slug: 'tokyo-drift',
+        titre: 'Tokyo Drift',
+        item_type: 'custom:asian',
+      },
+    }),
+  });
+  assert.equal(favCustomRes.status, 200);
+  const favCustomJson = (await favCustomRes.json()) as {
+    saved: boolean;
+    favorites: Array<{ item_type: string }>;
+  };
+  assert.equal(favCustomJson.saved, true);
+  assert.ok(favCustomJson.favorites.some((f) => f.item_type === 'custom:asian'));
+
+  const badFavRes = await fetch(`${baseUrl}/api/favorites/toggle`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${memberAuth.token}`,
+    },
+    body: JSON.stringify({
+      item: {
+        id: 1,
+        slug: 'bad',
+        titre: 'Bad',
+        item_type: 'javascript:evil',
+      },
+    }),
+  });
+  assert.equal(badFavRes.status, 400);
+
+  // 4. Touch presence for member + guest, then inspect /api/admin/overview activeStats & online flag
+  await Promise.all([
+    fetch(`${baseUrl}/api/analytics/collect`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberAuth.token}`,
+      },
+      body: JSON.stringify({
+        visitorId: 'vis-member-active',
+        sessionId: 'sess-member-active',
+        path: '/pinoy',
+      }),
+    }),
+    fetch(`${baseUrl}/api/analytics/collect`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        visitorId: 'vis-guest-active',
+        sessionId: 'sess-guest-active',
+        path: '/catalogue',
+      }),
+    }),
+  ]);
+
+  const overviewRes = await fetch(`${baseUrl}/api/admin/overview`, {
+    headers: { Authorization: `Bearer ${adminAuth.token}` },
+  });
+  assert.equal(overviewRes.status, 200);
+  const overviewJson = (await overviewRes.json()) as {
+    activeStats: { activeMembers: number; activeGuests: number };
+    users: Array<{ id: string; online?: boolean }>;
+  };
+  assert.ok(overviewJson.activeStats.activeMembers >= 1);
+  assert.ok(overviewJson.activeStats.activeGuests >= 1);
+  const activeMemberRow = overviewJson.users.find((u) => u.id === memberAuth.user.id);
+  assert.equal(activeMemberRow?.online, true);
+
+  // 5. Email template colors & custom sanitized HTML save & reset
+  const mailPutRes = await fetch(`${baseUrl}/api/admin/mail/templates/signup_welcome`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({
+      bgColor: '#111827',
+      cardBgColor: '#1F2937',
+      textColor: '#F3F4F6',
+      accentColor: '#E11D48',
+      useCustomHtml: true,
+      customHtml: '<section><script>alert(1)</script><p>Bienvenue {{userName}}</p></section>',
+    }),
+  });
+  assert.equal(mailPutRes.status, 200);
+  const mailPutJson = (await mailPutRes.json()) as {
+    template: {
+      bgColor: string;
+      cardBgColor: string;
+      textColor: string;
+      accentColor: string;
+      useCustomHtml: boolean;
+      customHtml: string;
+    };
+  };
+  assert.equal(mailPutJson.template.bgColor, '#111827');
+  assert.equal(mailPutJson.template.cardBgColor, '#1f2937');
+  assert.equal(mailPutJson.template.textColor, '#f3f4f6');
+  assert.equal(mailPutJson.template.accentColor, '#e11d48');
+  assert.equal(mailPutJson.template.useCustomHtml, true);
+  assert.equal(/<script/i.test(mailPutJson.template.customHtml), false);
+  assert.ok(mailPutJson.template.customHtml.includes('Bienvenue {{userName}}'));
+
+  const mailResetRes = await fetch(`${baseUrl}/api/admin/mail/templates/signup_welcome/reset`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${adminAuth.token}` },
+  });
+  assert.equal(mailResetRes.status, 200);
+
+  // 6. Admin custom modules includes pre-seeded pinoy; deleting pinoy disables /api/pinoy/list, re-creating restores it
+  const modulesRes = await fetch(`${baseUrl}/api/admin/custom-modules`, {
+    headers: { Authorization: `Bearer ${adminAuth.token}` },
+  });
+  assert.equal(modulesRes.status, 200);
+  const modulesJson = (await modulesRes.json()) as {
+    modules: Array<{ id: string; slug: string }>;
+  };
+  assert.ok(modulesJson.modules.some((m) => m.slug === 'pinoy'));
+
+  const deletePinoyRes = await fetch(`${baseUrl}/api/admin/custom-modules/pinoy`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${adminAuth.token}` },
+  });
+  assert.equal(deletePinoyRes.status, 200);
+
+  const disabledPinoyList = await fetch(`${baseUrl}/api/pinoy/list`);
+  assert.equal(disabledPinoyList.status, 404);
+
+  // Restore Pinoy cleanly
+  const restorePinoyRes = await fetch(`${baseUrl}/api/admin/custom-modules`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({
+      slug: 'pinoy',
+      name: 'Pinoy',
+      enabled: true,
+      endpoints: {
+        apiUrl: 'https://streamwall.behoririka.mg/pinoy_api.php',
+        mediaBaseUrl: 'https://streamwall.behoririka.mg/',
+      },
+      player: {
+        playerUrlTemplate: 'https://streamwall.behoririka.mg/pinoy/{id}',
+        useSameOriginProxy: true,
+        downloadProOnly: true,
+      },
+      syncMenu: true,
+      showDesktop: true,
+      showMobile: true,
+      showFooter: true,
+    }),
+  });
+  assert.equal(restorePinoyRes.status, 200);
+});
+
+
 
 
 

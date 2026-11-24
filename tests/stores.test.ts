@@ -708,6 +708,9 @@ test('customModulesStore & customApiService safely navigate JSON paths, block SS
     createDefaultNavigationConfig,
     deleteCustomModule,
     getSiteNavigation,
+    isPinoyModuleDeleted,
+    listCustomModules,
+    PINOY_BUILTIN_MODULE_ID,
     resetSiteNavigation,
     updateSiteNavigation,
     upsertCustomModule,
@@ -717,14 +720,17 @@ test('customModulesStore & customApiService safely navigate JSON paths, block SS
     '../src/server/customApiService.ts'
   );
 
-  // Reserved slugs rejected
-  assert.equal(validateCustomModuleSlug('pinoy').ok, false);
+  // Reserved slugs rejected (catalogue, communaute, admin), while pinoy is manageable as built-in module
+  assert.equal(validateCustomModuleSlug('catalogue').ok, false);
+  assert.equal(validateCustomModuleSlug('communaute').ok, false);
   assert.equal(validateCustomModuleSlug('admin').ok, false);
+  assert.equal(validateCustomModuleSlug('pinoy').ok, true);
   assert.equal(validateCustomModuleSlug('kdrama').ok, true);
 
-  // Navigation defaults & CRUD
+  // Navigation defaults include both /pinoy and /communaute
   const defNav = createDefaultNavigationConfig();
   assert.ok(defNav.items.some((i) => i.path === '/pinoy'));
+  assert.ok(defNav.items.some((i) => i.id === 'nav_communaute' && i.path === '/communaute'));
   const navUpdate = updateSiteNavigation({
     items: [
       ...defNav.items,
@@ -747,6 +753,38 @@ test('customModulesStore & customApiService safely navigate JSON paths, block SS
   assert.ok(getSiteNavigation().items.some((i) => i.id === 'nav_custom_test'));
   resetSiteNavigation();
   assert.equal(getSiteNavigation().items.some((i) => i.id === 'nav_custom_test'), false);
+  assert.ok(getSiteNavigation().items.some((i) => i.path === '/communaute'));
+
+  // Pinoy is pre-seeded inside Modules API and can be deleted & recreated
+  const seededModules = listCustomModules(true);
+  const preseededPinoy = seededModules.find((m) => m.slug === 'pinoy');
+  assert.ok(preseededPinoy);
+  assert.equal(preseededPinoy.id, PINOY_BUILTIN_MODULE_ID);
+  assert.equal(isPinoyModuleDeleted(), false);
+
+  assert.equal(deleteCustomModule('pinoy'), true);
+  assert.equal(isPinoyModuleDeleted(), true);
+  assert.equal(getSiteNavigation().items.some((i) => i.path === '/pinoy'), false);
+
+  // Re-adding Pinoy clears pinoyDeleted and restores nav link
+  const restoredPinoy = upsertCustomModule(
+    {
+      slug: 'pinoy',
+      name: 'Pinoy',
+      enabled: true,
+      endpoints: {
+        apiUrl: 'https://streamwall.behoririka.mg/pinoy_api.php',
+        mediaBaseUrl: 'https://streamwall.behoririka.mg/',
+      },
+      player: {
+        playerUrlTemplate: 'https://streamwall.behoririka.mg/pinoy/{id}',
+      },
+    },
+    { syncMenu: true, showDesktop: true, showMobile: true, showFooter: true }
+  );
+  assert.equal(restoredPinoy.ok, true);
+  assert.equal(isPinoyModuleDeleted(), false);
+  assert.ok(getSiteNavigation().items.some((i) => i.path === '/pinoy'));
 
   // SSRF URL rejected in custom module endpoints
   const ssrfAttempt = upsertCustomModule({
@@ -793,6 +831,69 @@ test('customModulesStore & customApiService safely navigate JSON paths, block SS
   assert.equal(deleteCustomModule('kdrama'), true);
   assert.equal(getSiteNavigation().items.some((i) => i.path === '/c/kdrama'), false);
 });
+
+test('analyticsStore active presence distinguishes members vs guests cleanly', async () => {
+  const {
+    getActivePresenceStats,
+    getOnlineMemberPresence,
+    touchActiveUserPresence,
+  } = await import('../src/server/analyticsStore.ts');
+
+  touchActiveUserPresence({ sessionId: 'user:usr_member_alpha', path: '/pinoy' });
+  touchActiveUserPresence({ sessionId: 'guest_sess_beta', path: '/catalogue' });
+
+  const stats = getActivePresenceStats();
+  assert.ok(stats.activeMembers >= 1);
+  assert.ok(stats.activeGuests >= 1);
+
+  const memberMap = getOnlineMemberPresence();
+  assert.ok(memberMap.has('usr_member_alpha'));
+  assert.equal(memberMap.has('guest_sess_beta'), false);
+});
+
+test('mailer sanitizes colors and custom HTML templates against XSS', async () => {
+  const {
+    getEmailTemplate,
+    resetEmailTemplate,
+    sanitizeEmailHtml,
+    sanitizeHexColor,
+    updateEmailTemplate,
+  } = await import('../src/server/mailer.ts');
+
+  assert.equal(sanitizeHexColor('#ABCDEF', '#000000'), '#abcdef');
+  assert.equal(sanitizeHexColor('javascript:alert(1)', '#112233'), '#112233');
+
+  const dirtyHtml =
+    '<div onclick="alert(1)"><script>evil()</script><iframe src="https://evil.com"></iframe><a href="javascript:alert(2)">Click</a><p style="color:#fff">Bonjour {{userName}}</p></div>';
+  const cleaned = sanitizeEmailHtml(dirtyHtml);
+  assert.equal(/<script/i.test(cleaned), false);
+  assert.equal(/<iframe/i.test(cleaned), false);
+  assert.equal(/onclick=/i.test(cleaned), false);
+  assert.equal(/javascript:/i.test(cleaned), false);
+  assert.ok(cleaned.includes('Bonjour {{userName}}'));
+
+  const updated = updateEmailTemplate('signup_welcome', {
+    bgColor: '#0B1120',
+    cardBgColor: '#1E293B',
+    textColor: '#F8FAFC',
+    accentColor: '#EF4444',
+    useCustomHtml: true,
+    customHtml: dirtyHtml,
+  });
+  assert.ok(updated);
+  assert.equal(updated.bgColor, '#0b1120');
+  assert.equal(updated.cardBgColor, '#1e293b');
+  assert.equal(updated.textColor, '#f8fafc');
+  assert.equal(updated.accentColor, '#ef4444');
+  assert.equal(updated.useCustomHtml, true);
+  assert.equal(/<script/i.test(updated.customHtml), false);
+  assert.ok(getEmailTemplate('signup_welcome').customHtml.includes('Bonjour {{userName}}'));
+
+  const reset = resetEmailTemplate('signup_welcome');
+  assert.ok(reset);
+  assert.equal(reset.useCustomHtml, false);
+});
+
 
 
 

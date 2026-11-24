@@ -32,6 +32,7 @@ const FALLBACK_NAV_ITEMS: MenuLinkConfig[] = [
   { id: 'nav_catalogue', label: 'Catalogue', path: '/catalogue', icon: 'layout-grid', exact: false, enabled: true, desktop: true, mobile: true, footer: true, order: 30, authRule: 'all' },
   { id: 'nav_pinoy', label: 'Pinoy', path: '/pinoy', icon: 'film', exact: false, enabled: true, desktop: true, mobile: true, footer: true, order: 40, authRule: 'all' },
   { id: 'nav_suggestion', label: 'Suggestion', path: '/suggestion', icon: 'sparkles', exact: false, enabled: true, desktop: true, mobile: true, footer: true, order: 50, authRule: 'all' },
+  { id: 'nav_communaute', label: 'Communauté', path: '/communaute', icon: 'message-square', exact: false, enabled: true, desktop: false, mobile: true, footer: true, order: 55, authRule: 'all' },
   { id: 'nav_abonnement', label: 'Devenir Pro', path: '/abonnement', icon: 'crown', exact: false, enabled: true, desktop: true, mobile: false, footer: true, order: 70, authRule: 'pro_offers' },
   { id: 'nav_admin', label: 'Admin', path: '/admin', icon: 'shield', exact: false, enabled: true, desktop: true, mobile: false, footer: false, order: 90, authRule: 'admin' },
   { id: 'nav_compte', label: 'Mon compte', path: '/profil', icon: 'user', exact: false, enabled: true, desktop: false, mobile: true, footer: true, order: 100, authRule: 'all', isAccount: true },
@@ -580,7 +581,9 @@ export function Navbar() {
                   <Link
                     to={item.to}
                     aria-current={isActive ? 'page' : undefined}
-                    className={`flex min-h-[44px] flex-col items-center justify-center gap-1 rounded-xl px-1 py-1 text-[10px] font-medium tracking-tight transition-colors ${
+                    className={`flex min-h-[44px] flex-col items-center justify-center gap-1 rounded-xl py-1 font-medium tracking-tight transition-colors ${
+                      mobileDockItems.length >= 7 ? 'px-0.5 text-[9.5px]' : 'px-1 text-[10px]'
+                    } ${
                       isActive
                         ? 'bg-primary/12 text-primary font-semibold'
                         : 'text-muted-foreground hover:text-foreground'

@@ -2,15 +2,33 @@ import React, { memo, useEffect, useMemo, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { Film, Play, RotateCcw, Search, Settings, Star } from 'lucide-react';
-import type { CustomApiItem, CustomApiPublicModule } from '../shared/types';
+import type { CustomApiItem, CustomApiPublicModule, Item } from '../shared/types';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
-import { PosterSkeletonGrid } from '../components/PosterCard';
+import { FavoriteButton, PosterSkeletonGrid } from '../components/PosterCard';
 
 function sanitizePosterUrl(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const trimmed = raw.trim();
   return /^https?:\/\//i.test(trimmed) ? trimmed : null;
+}
+
+function customToFavoriteItem(
+  slug: string,
+  item: CustomApiItem,
+  badgeText?: string | null
+): Item {
+  return {
+    id: item.routeKey,
+    titre: item.titre,
+    poster: sanitizePosterUrl(item.poster),
+    qualite: badgeText || null,
+    langue: item.pays || null,
+    item_type: `custom:${slug}`,
+    saison: null,
+    genre: item.genres[0] ?? null,
+    annee: item.annee,
+  };
 }
 
 const MOBILE_GRID_CLASS: Record<2 | 3, string> = {
@@ -98,6 +116,10 @@ const CustomItemCard = memo(function CustomItemCard({
           {metaParts.length > 0 && <span className="truncate">{metaParts.join(' · ')}</span>}
         </p>
       </Link>
+
+      <div className="absolute right-1.5 top-1.5 sm:right-2 sm:top-2 z-10">
+        <FavoriteButton item={customToFavoriteItem(slug, item, mod.badgeText)} compact />
+      </div>
     </div>
   );
 });

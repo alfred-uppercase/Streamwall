@@ -127,6 +127,9 @@ import type { AnalyticsPeriodKey } from './src/shared/analyticsTypes.ts';
 import {
   computeAnalyticsDashboard,
   computeRealtimeAnalytics,
+  getActivePresenceStats,
+  getOnlineMemberPresence,
+  getTopContentStats,
   parseUserAgent,
   recordAnalyticsCollect,
   resolveGeoFromRequest,
@@ -252,8 +255,11 @@ import {
   deleteCustomModule,
   getCustomModule,
   getSiteNavigation,
+  isPinoyModuleActive,
+  isPinoyModuleDeleted,
   listCustomModules,
   resetSiteNavigation,
+  syncPinoyModuleFromSettings,
   updateSiteNavigation,
   upsertCustomModule,
   validateCustomModuleDraft,
@@ -1010,7 +1016,7 @@ function resolveAppOrigin(req: express.Request): string {
   return built;
 }
 
-function dedupTop5History(events: WatchEventRecord[]): WatchEventRecord[] {
+function dedupTop6History(events: WatchEventRecord[]): WatchEventRecord[] {
   const out: WatchEventRecord[] = [];
   const seen = new Set<string>();
   const sorted = [...events].sort(
@@ -1021,7 +1027,7 @@ function dedupTop5History(events: WatchEventRecord[]): WatchEventRecord[] {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(ev);
-    if (out.length >= 5) break;
+    if (out.length >= 6) break;
   }
   return out;
 }
@@ -1035,6 +1041,11 @@ async function getTmdbApiKey(): Promise<string> {
 }
 
 async function getPinoyApiUrl(): Promise<string> {
+  if (isPinoyModuleDeleted()) return '';
+  const pinoyMod = getCustomModule('pinoy');
+  if (pinoyMod && pinoyMod.endpoints.apiUrl.trim()) {
+    return pinoyMod.endpoints.apiUrl.trim();
+  }
   const localUrl = (db.settings.pinoy_api_url || DEFAULT_PINOY_API_URL).trim();
   if (isSupabaseEnabled()) {
     return sbGetPinoyApiUrl(localUrl);
@@ -1043,6 +1054,10 @@ async function getPinoyApiUrl(): Promise<string> {
 }
 
 async function getPinoyMediaBaseUrl(): Promise<string> {
+  const pinoyMod = getCustomModule('pinoy');
+  if (pinoyMod && pinoyMod.endpoints.mediaBaseUrl.trim()) {
+    return pinoyMod.endpoints.mediaBaseUrl.trim();
+  }
   const localUrl = (db.settings.pinoy_media_base_url ?? DEFAULT_PINOY_MEDIA_BASE_URL).trim();
   if (isSupabaseEnabled()) {
     return sbGetPinoyMediaBaseUrl(localUrl);
@@ -1051,6 +1066,10 @@ async function getPinoyMediaBaseUrl(): Promise<string> {
 }
 
 async function getPinoyPlayerTemplate(): Promise<string> {
+  const pinoyMod = getCustomModule('pinoy');
+  if (pinoyMod && pinoyMod.player.playerUrlTemplate.trim()) {
+    return pinoyMod.player.playerUrlTemplate.trim();
+  }
   const localTpl = (db.settings.pinoy_player_template ?? DEFAULT_PINOY_PLAYER_TEMPLATE).trim();
   if (isSupabaseEnabled()) {
     return sbGetPinoyPlayerTemplate(localTpl);
@@ -1059,6 +1078,10 @@ async function getPinoyPlayerTemplate(): Promise<string> {
 }
 
 async function getPinoyDownloadMessage(): Promise<string> {
+  const pinoyMod = getCustomModule('pinoy');
+  if (pinoyMod && pinoyMod.player.downloadRestrictionMessage.trim()) {
+    return sanitizePinoyDownloadMessage(pinoyMod.player.downloadRestrictionMessage);
+  }
   const localMsg = sanitizePinoyDownloadMessage(
     db.settings.pinoy_download_message ?? DEFAULT_PINOY_DOWNLOAD_MESSAGE
   );
@@ -1174,6 +1197,7 @@ function touchAuthPresence(req: express.Request, userId: string): void {
     const ua = parseUserAgent(String(req.headers['user-agent'] ?? ''));
     touchActiveUserPresence({
       sessionId: `u_${userId}`,
+      userId,
       countryCode: geo.countryCode,
       countryName: geo.countryName,
       region: geo.region,
@@ -1473,8 +1497,8 @@ async function fetchUpstreamSlider(): Promise<{ items: Slide[]; live: boolean }>
           langue: slide.langue ?? null,
           qualite: slide.qualite ?? null,
           tmdbId: slide.tmdbId ?? null,
-          item_type: slide.item_type,
-          source: slide.item_type === 'film' ? 'films' : 'series',
+          item_type: t,
+          source: t === 'film' ? 'films' : 'series',
         });
         return slide;
       });
@@ -3045,7 +3069,7 @@ export async function createApiApp(): Promise<express.Express> {
         }>('home:base:v1');
         if (recheck) return recheck;
 
-        const [sliderRes, catRes, week] = await Promise.all([
+        const [sliderRes, catRes, week7] = await Promise.all([
           fetchUpstreamSlider(),
           fetchUpstreamCatalogue({
             q: '',
@@ -3059,13 +3083,77 @@ export async function createApiApp(): Promise<express.Express> {
           isSupabaseEnabled() ? sbGetRankings(null, 7) : Promise.resolve(computeLocalRankings(7)),
         ]);
 
+        const topWeek: RankingEntry[] = [];
+        const pickedWeekKeys = new Set<string>();
+        const pushWeekEntry = (entry: RankingEntry | null) => {
+          if (!entry || !entry.item?.id || topWeek.length >= 6) return;
+          const k = `${entry.item.item_type}:${entry.item.id}`;
+          if (pickedWeekKeys.has(k)) return;
+          pickedWeekKeys.add(k);
+          topWeek.push(entry);
+        };
+
+        for (const r of week7) {
+          pushWeekEntry(r);
+        }
+
+        if (topWeek.length < 6) {
+          const week30 = isSupabaseEnabled()
+            ? await sbGetRankings(null, 30)
+            : computeLocalRankings(30);
+          for (const r of week30) {
+            pushWeekEntry(r);
+            if (topWeek.length >= 6) break;
+          }
+        }
+
+        const catalogCandidates: Item[] = [...catRes.items, ...sliderRes.items, ...FALLBACK_ITEMS];
+        if (topWeek.length < 6) {
+          const pageViewsTop = getTopContentStats(7, 15);
+          for (const stat of pageViewsTop) {
+            if (stat.itemType === 'pinoy') continue;
+            const indexed = getIndexedCatalogEntry(stat.itemType, stat.itemId);
+            const matched = indexed
+              ? {
+                  id: indexed.id,
+                  titre: indexed.titre,
+                  poster: indexed.poster,
+                  qualite: indexed.qualite,
+                  langue: indexed.langue,
+                  item_type: indexed.item_type,
+                  saison: null,
+                  genre: indexed.genre,
+                  annee: indexed.annee,
+                  tmdbId: indexed.tmdbId,
+                }
+              : catalogCandidates.find(
+                  (c) => c.id === stat.itemId && c.item_type === stat.itemType
+                ) ?? null;
+            if (matched) {
+              pushWeekEntry({
+                item: matched,
+                viewers: stat.viewers,
+                plays: stat.views,
+              });
+            }
+            if (topWeek.length >= 6) break;
+          }
+        }
+
+        if (topWeek.length < 6) {
+          for (const candidate of catalogCandidates) {
+            pushWeekEntry({ item: candidate, viewers: 0, plays: 0 });
+            if (topWeek.length >= 6) break;
+          }
+        }
+
         const basePayload = {
           upstreamStatus: (sliderRes.live || catRes.upstreamStatus === 'live' ? 'live' : 'fallback') as
             | 'live'
             | 'fallback',
           slider: sliderRes.items,
           latest: catRes.items.slice(0, 12),
-          week,
+          week: topWeek.slice(0, 6),
         };
         return setCached('home:base:v1', basePayload, 30_000, 180_000);
       });
@@ -3087,7 +3175,7 @@ export async function createApiApp(): Promise<express.Express> {
       continueWatching = (db.watchProgress[auth.user.id] ?? [])
         .slice()
         .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-        .slice(0, 5);
+        .slice(0, 6);
 
       let sourceItems: Item[] = [];
       let seenKeys = new Set<string>();
@@ -3116,6 +3204,9 @@ export async function createApiApp(): Promise<express.Express> {
 
       const relatedLists = await Promise.all(
         sourceItems.map(async (src) => {
+          if (src.item_type !== 'film' && src.item_type !== 'serie' && src.item_type !== 'anime') {
+            return [];
+          }
           const d = await fetchUpstreamDetail(src.item_type, src.id);
           return d.related;
         })
@@ -3242,6 +3333,10 @@ export async function createApiApp(): Promise<express.Express> {
   });
 
   app.get('/api/pinoy/facets', async (_req, res) => {
+    if (!isPinoyModuleActive()) {
+      res.status(404).json({ error: 'Module Pinoy désactivé ou supprimé.' });
+      return;
+    }
     const apiUrl = await getPinoyApiUrl();
     const facets = await fetchPinoyFacets(apiUrl);
     res.setHeader('Cache-Control', 'public, max-age=180, s-maxage=600, stale-while-revalidate=1800');
@@ -3249,6 +3344,10 @@ export async function createApiApp(): Promise<express.Express> {
   });
 
   app.get('/api/pinoy/list', async (req, res) => {
+    if (!isPinoyModuleActive()) {
+      res.status(404).json({ error: 'Module Pinoy désactivé ou supprimé.' });
+      return;
+    }
     const [apiUrl, mediaBaseUrl] = await Promise.all([getPinoyApiUrl(), getPinoyMediaBaseUrl()]);
     const rawSort = String(req.query.sort ?? 'recent').trim();
     const sort: PinoyListFilters['sort'] = ['recent', 'oldest', 'az', 'za', 'note'].includes(
@@ -3275,6 +3374,10 @@ export async function createApiApp(): Promise<express.Express> {
   });
 
   app.get('/api/pinoy/detail/:slug', async (req, res) => {
+    if (!isPinoyModuleActive()) {
+      res.status(404).json({ error: 'Module Pinoy désactivé ou supprimé.' });
+      return;
+    }
     const slug = String(req.params.slug ?? '').trim().slice(0, 200);
     if (!slug || !/^[a-zA-Z0-9._-]+$/.test(slug)) {
       res.status(400).json({ error: 'Identifiant de film Pinoy invalide.' });
@@ -3293,8 +3396,10 @@ export async function createApiApp(): Promise<express.Express> {
       return;
     }
 
+    const pinoyMod = getCustomModule('pinoy');
+    const useProxy = pinoyMod?.player.useSameOriginProxy !== false;
     const effectiveEmbed = detail.players.embed.map((src, index) => {
-      if (index === 0 && src.provider === 'Lecteur Pinoy' && detail.film) {
+      if (index === 0 && useProxy && src.provider === 'Lecteur Pinoy' && detail.film) {
         return {
           ...src,
           url: `/api/public/watch/pinoy/${detail.film.id}/${encodeURIComponent(detail.film.slug)}`,
@@ -3303,7 +3408,8 @@ export async function createApiApp(): Promise<express.Express> {
       return src;
     });
 
-    const canDownload = Boolean(auth && (auth.user.role === 'admin' || auth.user.isPro));
+    const proOnly = pinoyMod ? pinoyMod.player.downloadProOnly : true;
+    const canDownload = !proOnly || Boolean(auth && (auth.user.role === 'admin' || auth.user.isPro));
     const hasDownloads = detail.players.download.length > 0;
     const responsePayload: PinoyDetailResponse = canDownload
       ? {
@@ -3626,7 +3732,7 @@ export async function createApiApp(): Promise<express.Express> {
         if (db.watchEvents.length > 500) db.watchEvents = db.watchEvents.slice(0, 500);
       }
 
-      // Watch history tracking — keep only the 5 most recent watched titles
+      // Watch history tracking — keep the 6 most recent watched titles
       const list = db.watchProgress[auth.user.id] ?? [];
       const epCode = `S${season}E${episode}`;
       const idx = list.findIndex(
@@ -3656,7 +3762,7 @@ export async function createApiApp(): Promise<express.Express> {
         };
       }
       list.unshift(entry);
-      db.watchProgress[auth.user.id] = list.slice(0, 5);
+      db.watchProgress[auth.user.id] = list.slice(0, 6);
       saveDb(db);
 
       res.cookie('streamwall_watch', auth.token, getSessionCookieOptions(req, {
@@ -3731,6 +3837,10 @@ export async function createApiApp(): Promise<express.Express> {
   });
 
   app.get(['/api/public/watch/pinoy/:id', '/api/public/watch/pinoy/:id/:slug'], async (req, res) => {
+    if (!isPinoyModuleActive()) {
+      res.status(404).send('Lecteur Pinoy désactivé ou supprimé');
+      return;
+    }
     const rawId = String(req.params.id ?? '').trim();
     if (!/^\d{1,12}$/.test(rawId)) {
       res.status(400).send('Identifiant Pinoy invalide');
@@ -3976,7 +4086,7 @@ export async function createApiApp(): Promise<express.Express> {
     const progress = (db.watchProgress[auth.user.id] ?? [])
       .slice()
       .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-      .slice(0, 5);
+      .slice(0, 6);
 
     const mapFriendRequests = (userId: string) => {
       const { incoming, outgoing } = listUserFriendRequests(userId);
@@ -4011,13 +4121,13 @@ export async function createApiApp(): Promise<express.Express> {
         friends: enrichedFriends,
         ...mapFriendRequests(auth.user.id),
         progress,
-        history: dedupTop5History(sbData.history),
+        history: dedupTop6History(sbData.history),
       });
       return;
     }
 
     const favorites = db.favorites[auth.user.id] ?? [];
-    const history = dedupTop5History(db.watchEvents.filter((w) => w.userId === auth.user.id));
+    const history = dedupTop6History(db.watchEvents.filter((w) => w.userId === auth.user.id));
 
     const friendLinks = db.friendships.filter((f) => f.userId === auth.user.id);
     const friends = friendLinks
@@ -4056,7 +4166,12 @@ export async function createApiApp(): Promise<express.Express> {
       return;
     }
     const item = req.body?.item as Item | undefined;
-    if (!item || !item.id) {
+    if (
+      !item ||
+      !item.id ||
+      !item.titre ||
+      !/^(film|serie|anime|pinoy|custom:[a-z0-9-]+)$/.test(String(item.item_type || ''))
+    ) {
       res.status(400).json({ error: 'Titre invalide' });
       return;
     }
@@ -5220,6 +5335,9 @@ export async function createApiApp(): Promise<express.Express> {
     const auth = await requireAdmin(req, res);
     if (!auth) return;
 
+    const onlineUsersMap = getOnlineMemberPresence();
+    const activeStats = getActivePresenceStats();
+
     if (isSupabaseEnabled() && auth.sbClient) {
       try {
         const sbOverview = await sbGetAdminOverview(auth.sbClient);
@@ -5234,8 +5352,13 @@ export async function createApiApp(): Promise<express.Express> {
           registerUserDirectoryEntry(u.id, u.email, u.username);
           const subscription = getUserSubscription(u.id);
           const ban = getUserBanInfo(u.id);
+          const liveInfo = onlineUsersMap.get(u.id);
+          const online = !ban && (Boolean(liveInfo) || Boolean(u.online));
           return {
             ...u,
+            online,
+            lastSeen: liveInfo?.lastSeen ?? u.lastSeen,
+            currentPage: liveInfo?.currentPage ?? u.currentPage,
             avatar: resolveUserAvatar(u.id, u.avatar),
             isPro: subscription.tier === 'pro',
             subscription,
@@ -5271,7 +5394,7 @@ export async function createApiApp(): Promise<express.Express> {
           };
         });
 
-        res.json({ ...sbOverview, users: enrichedUsers, recentComments });
+        res.json({ ...sbOverview, users: enrichedUsers, recentComments, activeStats });
         return;
       } catch (err) {
         res.status(500).json({ error: err instanceof Error ? err.message : 'Erreur Supabase' });
@@ -5284,6 +5407,8 @@ export async function createApiApp(): Promise<express.Express> {
       const plays = db.watchEvents.filter((w) => w.userId === u.id).length;
       const subscription = getUserSubscription(u.id);
       const ban = getUserBanInfo(u.id);
+      const liveInfo = onlineUsersMap.get(u.id);
+      const online = !ban && Boolean(liveInfo);
       return {
         id: u.id,
         email: u.email,
@@ -5293,10 +5418,10 @@ export async function createApiApp(): Promise<express.Express> {
         isPro: subscription.tier === 'pro',
         subscription,
         createdAt: u.createdAt,
-        lastSeen: null,
-        online: false,
+        lastSeen: liveInfo?.lastSeen ?? null,
+        online,
         currentItem: null,
-        currentPage: null,
+        currentPage: liveInfo?.currentPage ?? null,
         plays,
         banned: Boolean(ban),
         bannedAt: ban?.bannedAt ?? null,
@@ -5318,6 +5443,7 @@ export async function createApiApp(): Promise<express.Express> {
       top7: computeLocalRankings(7),
       top30: computeLocalRankings(30),
       recentComments,
+      activeStats,
       source: 'local',
       warning: null,
     });
@@ -5614,6 +5740,14 @@ export async function createApiApp(): Promise<express.Express> {
       res.status(400).json({ error: outcome.error });
       return;
     }
+    if (outcome.module.slug === 'pinoy') {
+      db.settings.pinoy_api_url = outcome.module.endpoints.apiUrl;
+      db.settings.pinoy_media_base_url = outcome.module.endpoints.mediaBaseUrl;
+      db.settings.pinoy_player_template = outcome.module.player.playerUrlTemplate;
+      db.settings.pinoy_download_message = outcome.module.player.downloadRestrictionMessage;
+      saveDb(db);
+      clearPinoyCache();
+    }
     clearCustomApiCache(outcome.module.slug);
     res.json({ module: outcome.module, navigation: getSiteNavigation() });
   });
@@ -5632,6 +5766,14 @@ export async function createApiApp(): Promise<express.Express> {
       res.status(400).json({ error: outcome.error });
       return;
     }
+    if (outcome.module.slug === 'pinoy') {
+      db.settings.pinoy_api_url = outcome.module.endpoints.apiUrl;
+      db.settings.pinoy_media_base_url = outcome.module.endpoints.mediaBaseUrl;
+      db.settings.pinoy_player_template = outcome.module.player.playerUrlTemplate;
+      db.settings.pinoy_download_message = outcome.module.player.downloadRestrictionMessage;
+      saveDb(db);
+      clearPinoyCache();
+    }
     clearCustomApiCache(outcome.module.slug);
     res.json({ module: outcome.module, navigation: getSiteNavigation() });
   });
@@ -5639,10 +5781,14 @@ export async function createApiApp(): Promise<express.Express> {
   app.delete('/api/admin/custom-modules/:slug', async (req, res) => {
     const auth = await requireAdmin(req, res);
     if (!auth) return;
-    const ok = deleteCustomModule(String(req.params.slug ?? ''));
+    const rawSlug = String(req.params.slug ?? '');
+    const ok = deleteCustomModule(rawSlug);
     if (!ok) {
       res.status(404).json({ error: 'Module introuvable.' });
       return;
+    }
+    if (rawSlug.trim().toLowerCase() === 'pinoy' || rawSlug.trim() === 'mod_pinoy_builtin') {
+      clearPinoyCache();
     }
     clearCustomApiCache();
     res.json({ ok: true, navigation: getSiteNavigation() });
@@ -5986,6 +6132,12 @@ export async function createApiApp(): Promise<express.Express> {
       heading: typeof req.body?.heading === 'string' ? req.body.heading : undefined,
       body: typeof req.body?.body === 'string' ? req.body.body : undefined,
       ctaLabel: typeof req.body?.ctaLabel === 'string' ? req.body.ctaLabel : undefined,
+      bgColor: typeof req.body?.bgColor === 'string' ? req.body.bgColor : undefined,
+      cardBgColor: typeof req.body?.cardBgColor === 'string' ? req.body.cardBgColor : undefined,
+      textColor: typeof req.body?.textColor === 'string' ? req.body.textColor : undefined,
+      accentColor: typeof req.body?.accentColor === 'string' ? req.body.accentColor : undefined,
+      useCustomHtml: typeof req.body?.useCustomHtml === 'boolean' ? req.body.useCustomHtml : undefined,
+      customHtml: typeof req.body?.customHtml === 'string' ? req.body.customHtml : undefined,
       enabled: typeof req.body?.enabled === 'boolean' ? req.body.enabled : undefined,
     });
     if (!updated) {
@@ -6188,6 +6340,12 @@ export async function createApiApp(): Promise<express.Express> {
     db.settings.pinoy_player_template = playerValidation.template;
     db.settings.pinoy_download_message = nextDownloadMessage;
     saveDb(db);
+    syncPinoyModuleFromSettings({
+      apiUrl: apiValidation.url,
+      mediaBaseUrl: mediaValidation.url,
+      playerUrlTemplate: playerValidation.template,
+      downloadRestrictionMessage: nextDownloadMessage,
+    });
     invalidateSbSettingsCache();
     clearPinoyCache();
     res.json({

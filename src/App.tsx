@@ -19,6 +19,7 @@ import { CataloguePage } from './pages/CataloguePage';
 import { DetailPage } from './pages/DetailPage';
 import { SuggestionPage } from './pages/SuggestionPage';
 import { RequestsPage } from './pages/RequestsPage';
+import { CommunityPage } from './pages/CommunityPage';
 import { FavoritesPage } from './pages/FavoritesPage';
 import { ProfilePage } from './pages/ProfilePage';
 import { AdminPage } from './pages/AdminPage';
@@ -86,6 +87,7 @@ const FALLBACK_FOOTER_LINKS: MenuLinkConfig[] = [
   { id: 'f_cat', label: 'Catalogue', path: '/catalogue', icon: 'layout-grid', exact: false, enabled: true, desktop: true, mobile: true, footer: true, order: 30, authRule: 'all' },
   { id: 'f_pinoy', label: 'Pinoy', path: '/pinoy', icon: 'film', exact: false, enabled: true, desktop: true, mobile: true, footer: true, order: 40, authRule: 'all' },
   { id: 'f_sug', label: 'Suggestion', path: '/suggestion', icon: 'sparkles', exact: false, enabled: true, desktop: true, mobile: true, footer: true, order: 50, authRule: 'all' },
+  { id: 'f_com', label: 'Communauté', path: '/communaute', icon: 'message-square', exact: false, enabled: true, desktop: false, mobile: true, footer: true, order: 55, authRule: 'all' },
   { id: 'f_req', label: 'Demandes', path: '/demandes', icon: 'message-square', exact: false, enabled: true, desktop: false, mobile: false, footer: true, order: 60, authRule: 'all' },
   { id: 'f_pro', label: 'Devenir Pro', path: '/abonnement', icon: 'crown', exact: false, enabled: true, desktop: true, mobile: false, footer: true, order: 70, authRule: 'pro_offers' },
   { id: 'f_priv', label: 'Confidentialité', path: '/confidentialite', icon: 'lock', exact: false, enabled: true, desktop: false, mobile: false, footer: true, order: 80, authRule: 'all' },
@@ -136,6 +138,7 @@ function AppShell() {
           <Route path="/c/:slug" element={<CustomCataloguePage />} />
           <Route path="/c/:slug/:itemKey" element={<CustomDetailPage />} />
           <Route path="/suggestion" element={<SuggestionPage />} />
+          <Route path="/communaute" element={<CommunityPage />} />
           <Route path="/demandes" element={<RequestsPage />} />
           <Route path="/abonnement" element={<PricingPage />} />
           <Route path="/confidentialite" element={<PrivacyPage />} />

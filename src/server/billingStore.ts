@@ -8,6 +8,7 @@ import {
   type AdminPaymentSecretsStatus,
   type BillingConfig,
   type BillingCycle,
+  type ContentItemType,
   type ItemType,
   type PaymentOrder,
   type PlanTier,
@@ -917,7 +918,7 @@ export function updateBillingConfig(patch: Partial<BillingConfig>): BillingConfi
 
 export function resolvePlanTemplateForUser(
   userId: string | null,
-  itemType: ItemType,
+  itemType: ContentItemType,
   fallbackTemplates: PlayerTemplates
 ): { template: string; plan: SubscriptionPlan } {
   if (!userId) {

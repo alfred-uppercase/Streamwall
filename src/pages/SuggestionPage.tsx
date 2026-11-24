@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Play, Shuffle } from 'lucide-react';
-import { TYPE_LABELS } from '../shared/types';
+import { getContentDetailPath, getContentTypeLabel } from '../shared/types';
 import { api } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
 import { PosterCard, PosterSkeletonGrid } from '../components/PosterCard';
@@ -116,7 +116,7 @@ export function SuggestionPage() {
           )}
           <div className="min-w-0 flex-1 space-y-2.5">
             <p className="text-xs font-medium text-primary tabular-nums">
-              Tirage coup de cœur · {TYPE_LABELS[spotlight.item_type]}
+              Tirage coup de cœur · {getContentTypeLabel(spotlight.item_type)}
               {spotlight.annee ? ` · ${spotlight.annee}` : ''}
               {spotlight.qualite ? ` · ${spotlight.qualite}` : ''}
               {spotlight.langue ? ` · ${spotlight.langue}` : ''}
@@ -129,7 +129,7 @@ export function SuggestionPage() {
             )}
             <div className="pt-2">
               <Link
-                to={`/${spotlight.item_type}/${spotlight.id}`}
+                to={getContentDetailPath(spotlight.item_type, spotlight.id)}
                 className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 whitespace-nowrap shrink-0"
               >
                 <Play className="size-4 fill-current" />

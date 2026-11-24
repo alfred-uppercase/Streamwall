@@ -2,15 +2,29 @@ import React, { memo, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { Film, Play, RotateCcw, Search, Settings, Star } from 'lucide-react';
-import type { PinoyFilm, PinoyListFilters } from '../shared/types';
+import type { Item, PinoyFilm, PinoyListFilters } from '../shared/types';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
-import { PosterSkeletonGrid } from '../components/PosterCard';
+import { FavoriteButton, PosterSkeletonGrid } from '../components/PosterCard';
 
 function sanitizePosterUrl(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const trimmed = raw.trim();
   return /^https?:\/\//i.test(trimmed) ? trimmed : null;
+}
+
+function pinoyToFavoriteItem(film: PinoyFilm): Item {
+  return {
+    id: film.slug || String(film.id),
+    titre: film.titre,
+    poster: sanitizePosterUrl(film.poster),
+    qualite: film.note !== null ? `★ ${film.note.toFixed(1)}` : null,
+    langue: film.pays || null,
+    item_type: 'pinoy',
+    saison: null,
+    genre: film.genres[0] ?? null,
+    annee: film.annee,
+  };
 }
 
 const PinoyCard = memo(function PinoyCard({ film }: { film: PinoyFilm }) {
@@ -77,6 +91,10 @@ const PinoyCard = memo(function PinoyCard({ film }: { film: PinoyFilm }) {
           {metaParts.length > 0 && <span className="truncate">{metaParts.join(' · ')}</span>}
         </p>
       </Link>
+
+      <div className="absolute right-1.5 top-1.5 sm:right-2 sm:top-2 z-10">
+        <FavoriteButton item={pinoyToFavoriteItem(film)} compact />
+      </div>
     </div>
   );
 });
@@ -129,6 +147,7 @@ export function PinoyCataloguePage() {
     queryKey: ['pinoy-facets'],
     queryFn: () => api.pinoyFacets(),
     staleTime: 300_000,
+    retry: false,
   });
 
   const listQuery = useQuery({
@@ -136,6 +155,7 @@ export function PinoyCataloguePage() {
     queryFn: () => api.pinoyList(filters),
     placeholderData: keepPreviousData,
     staleTime: 60_000,
+    retry: false,
   });
 
   const years = useMemo(() => {
@@ -311,13 +331,22 @@ export function PinoyCataloguePage() {
           )}
         </div>
       ) : listQuery.isError ? (
-        <div className="rounded-xl border border-border bg-card p-12 text-center">
+        <div className="rounded-xl border border-border bg-card p-12 text-center space-y-3">
           <p className="text-base font-medium text-foreground">
-            Le catalogue Pinoy est momentanément indisponible.
+            Le catalogue Pinoy est désactivé ou momentanément indisponible.
           </p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Vérifiez l’accès à votre API Pinoy ou réessayez dans quelques instants.
+            Vérifiez la configuration dans l’administration ou réessayez dans quelques instants.
           </p>
+          {isAdmin && (
+            <Link
+              to="/admin?tab=modules"
+              className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground"
+            >
+              <Settings className="size-3.5" />
+              <span>Gérer APIs & Lecteurs</span>
+            </Link>
+          )}
         </div>
       ) : items.length > 0 ? (
         <div

@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Film, Heart, Play, Tv } from 'lucide-react';
 import { toast } from 'sonner';
-import { TYPE_LABELS } from '../shared/types';
+import { getContentDetailPath, getContentTypeLabel } from '../shared/types';
 import type { Item } from '../shared/types';
 import { api, useAuth, useFavoritesSet, type MemberPayload } from '../lib/client';
 
@@ -113,13 +113,18 @@ export const PosterCard = memo(
     }, [item.poster]);
 
     const metaParts = [
-      TYPE_LABELS[item.item_type] ?? item.item_type,
+      getContentTypeLabel(item.item_type),
       item.annee ? String(item.annee) : null,
       item.qualite || null,
       item.langue || null,
     ].filter(Boolean);
 
     const showImg = Boolean(item.poster && !imgFailed);
+    const detailPath = getContentDetailPath(item.item_type, item.id);
+    const isFilmLike =
+      item.item_type === 'film' ||
+      item.item_type === 'pinoy' ||
+      item.item_type.startsWith('custom:');
 
     return (
       <div className="group relative flex flex-col">
@@ -130,7 +135,7 @@ export const PosterCard = memo(
           </p>
         )}
         <Link
-          to={`/${item.item_type}/${item.id}`}
+          to={detailPath}
           className="block focus-visible:outline-2 focus-visible:outline-ring rounded-lg"
         >
           <div className="relative aspect-[2/3] w-full overflow-hidden rounded-lg border border-border bg-card transition-colors duration-200 group-hover:border-primary/80">
@@ -146,7 +151,7 @@ export const PosterCard = memo(
               />
             ) : (
               <div className="flex h-full w-full flex-col items-center justify-center gap-2 sm:gap-3 bg-gradient-to-b from-card to-background p-2.5 sm:p-4 text-center">
-                {item.item_type === 'film' ? (
+                {isFilmLike ? (
                   <Film className="size-6 sm:size-8 text-primary/70" />
                 ) : (
                   <Tv className="size-6 sm:size-8 text-primary/70" />

@@ -315,7 +315,10 @@ const dirtyDays = new Set<string>();
 const dirtySessions = new Map<string, AnalyticsSessionRecord>();
 const recentSessionsMap = new Map<string, AnalyticsSessionRecord>();
 const knownVisitorsCache = new Map<string, string>();
-const realtimeVisitorsMap = new Map<string, RealtimeVisitor & { lastSeenMs: number }>();
+const realtimeVisitorsMap = new Map<
+  string,
+  RealtimeVisitor & { lastSeenMs: number; userId?: string | null }
+>();
 
 let flushTimer: NodeJS.Timeout | null = null;
 let shutdownHooksInstalled = false;
@@ -789,6 +792,7 @@ function pruneRealtimeVisitors(nowMs: number): void {
 
 export function touchActiveUserPresence(params: {
   sessionId: string;
+  userId?: string | null;
   countryCode?: string;
   countryName?: string;
   region?: string;
@@ -801,8 +805,17 @@ export function touchActiveUserPresence(params: {
 }): void {
   const nowMs = Date.now();
   const prev = realtimeVisitorsMap.get(params.sessionId);
+  const inferredUserId =
+    params.userId !== undefined
+      ? params.userId
+      : params.sessionId.startsWith('u_')
+        ? params.sessionId.slice(2)
+        : params.sessionId.startsWith('user:')
+          ? params.sessionId.slice(5)
+          : prev?.userId ?? null;
   realtimeVisitorsMap.set(params.sessionId, {
     sessionId: params.sessionId,
+    userId: inferredUserId,
     countryCode: params.countryCode ?? prev?.countryCode ?? 'MG',
     countryName: params.countryName ?? prev?.countryName ?? 'Madagascar',
     region: params.region ?? prev?.region ?? 'Analamanga',
@@ -818,6 +831,103 @@ export function touchActiveUserPresence(params: {
   if (realtimeVisitorsMap.size > 500) {
     pruneRealtimeVisitors(nowMs);
   }
+}
+
+export function getOnlineMemberPresence(): Map<
+  string,
+  { lastSeen: string; currentPage: string | null }
+> {
+  const nowMs = Date.now();
+  pruneRealtimeVisitors(nowMs);
+  const map = new Map<string, { lastSeen: string; currentPage: string | null }>();
+  for (const v of realtimeVisitorsMap.values()) {
+    if (!v.userId) continue;
+    const existing = map.get(v.userId);
+    if (!existing || v.lastActivityAt > existing.lastSeen) {
+      map.set(v.userId, {
+        lastSeen: v.lastActivityAt,
+        currentPage: v.currentPath || null,
+      });
+    }
+  }
+  return map;
+}
+
+export function getActivePresenceStats(): { activeMembers: number; activeGuests: number } {
+  const nowMs = Date.now();
+  pruneRealtimeVisitors(nowMs);
+  const memberIds = new Set<string>();
+  const guestSessions = new Set<string>();
+  for (const v of realtimeVisitorsMap.values()) {
+    if (v.userId) {
+      memberIds.add(v.userId);
+    } else {
+      guestSessions.add(v.sessionId);
+    }
+  }
+  return {
+    activeMembers: memberIds.size,
+    activeGuests: guestSessions.size,
+  };
+}
+
+export function getTopContentStats(
+  days = 7,
+  limit = 12
+): Array<{
+  itemType: 'film' | 'serie' | 'anime' | 'pinoy';
+  itemId: string;
+  title: string;
+  views: number;
+  viewers: number;
+}> {
+  const now = new Date();
+  const todayUtcMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const startDate = utcDayKey(todayUtcMs - Math.max(0, days - 1) * 86_400_000);
+  const endDate = utcDayKey(todayUtcMs);
+  const buckets = loadBucketsInRange(startDate, endDate);
+  const agg = new Map<
+    string,
+    {
+      itemType: 'film' | 'serie' | 'anime' | 'pinoy';
+      itemId: string;
+      title: string;
+      views: number;
+      visitors: Set<string>;
+    }
+  >();
+
+  for (const b of buckets) {
+    for (const [pPath, p] of Object.entries(b.pages)) {
+      const m = pPath.match(/^\/(film|serie|anime|pinoy)\/([^/?#]+)$/);
+      if (!m) continue;
+      const itemType = m[1] as 'film' | 'serie' | 'anime' | 'pinoy';
+      const itemId = decodeURIComponent(m[2]);
+      const key = `${itemType}:${itemId}`;
+      const entry = agg.get(key) ?? {
+        itemType,
+        itemId,
+        title: p.title || pPath,
+        views: 0,
+        visitors: new Set<string>(),
+      };
+      entry.views += p.views;
+      if (p.title && p.title !== pPath) entry.title = p.title;
+      for (const v of p.visitors) entry.visitors.add(v);
+      agg.set(key, entry);
+    }
+  }
+
+  return [...agg.values()]
+    .sort((a, b) => b.visitors.size - a.visitors.size || b.views - a.views)
+    .slice(0, limit)
+    .map((r) => ({
+      itemType: r.itemType,
+      itemId: r.itemId,
+      title: r.title,
+      views: r.views,
+      viewers: r.visitors.size,
+    }));
 }
 
 export function recordAnalyticsCollect(params: {
@@ -1094,7 +1204,7 @@ export function computeRealtimeAnalytics(): RealtimePayload {
   const visitors = [...realtimeVisitorsMap.values()]
     .sort((a, b) => b.lastSeenMs - a.lastSeenMs)
     .slice(0, 50)
-    .map(({ lastSeenMs: _ignored, ...rest }) => rest);
+    .map(({ lastSeenMs: _ignored, userId: _userIdIgnored, ...rest }) => rest);
 
   return {
     activeCount: realtimeVisitorsMap.size,

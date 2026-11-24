@@ -647,7 +647,22 @@ export const api = {
     apiRequest<{ templates: EmailTemplateConfig[] }>('/api/admin/mail/templates'),
   adminSaveEmailTemplate: (
     key: EmailTemplateKey,
-    patch: Partial<Pick<EmailTemplateConfig, 'subject' | 'heading' | 'body' | 'ctaLabel' | 'enabled'>>
+    patch: Partial<
+      Pick<
+        EmailTemplateConfig,
+        | 'subject'
+        | 'heading'
+        | 'body'
+        | 'ctaLabel'
+        | 'bgColor'
+        | 'cardBgColor'
+        | 'textColor'
+        | 'accentColor'
+        | 'useCustomHtml'
+        | 'customHtml'
+        | 'enabled'
+      >
+    >
   ) =>
     apiRequest<{ template: EmailTemplateConfig }>(
       `/api/admin/mail/templates/${encodeURIComponent(key)}`,

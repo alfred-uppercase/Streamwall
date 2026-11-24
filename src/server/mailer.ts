@@ -118,6 +118,57 @@ export const EMAIL_TEMPLATE_KEYS: EmailTemplateKey[] = [
   'password_reset',
 ];
 
+const DEFAULT_EMAIL_COLORS = {
+  bgColor: '#0f121a',
+  cardBgColor: '#171c28',
+  textColor: '#d1d5db',
+  accentColor: '#e6a82e',
+};
+
+export function sanitizeHexColor(raw: unknown, fallback: string): string {
+  if (typeof raw !== 'string') return fallback;
+  const trimmed = raw.trim();
+  return /^#[0-9a-fA-F]{6}$/.test(trimmed) ? trimmed.toLowerCase() : fallback;
+}
+
+export function sanitizeEmailHtml(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  let out = raw.slice(0, 16_000);
+  // Strip active/dangerous tags completely including their body
+  const blockTags = [
+    'script',
+    'iframe',
+    'object',
+    'embed',
+    'applet',
+    'form',
+    'input',
+    'textarea',
+    'select',
+    'button',
+    'svg',
+    'math',
+    'style',
+    'link',
+    'meta',
+    'base',
+    'noscript',
+    'template',
+  ];
+  for (const tag of blockTags) {
+    out = out.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi'), '');
+    out = out.replace(new RegExp(`<${tag}\\b[^>]*\\/?>`, 'gi'), '');
+    out = out.replace(new RegExp(`<\\/${tag}>`, 'gi'), '');
+  }
+  // Strip inline event handlers (onclick=, onload=, onerror=, etc.) and srcdoc / formaction
+  out = out.replace(/\s+(on[a-z0-9_-]+|srcdoc|formaction)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  // Strip javascript:, vbscript:, data: URIs inside attributes or css values
+  out = out.replace(/(javascript|vbscript)\s*:/gi, 'blocked:');
+  out = out.replace(/data\s*:\s*(?:text\/html|image\/svg\+xml)/gi, 'blocked:');
+  out = out.replace(/expression\s*\(/gi, 'blocked(');
+  return out.trim();
+}
+
 function buildDefaultTemplates(): Record<EmailTemplateKey, EmailTemplateConfig> {
   const now = new Date().toISOString();
   return {
@@ -132,6 +183,9 @@ function buildDefaultTemplates(): Record<EmailTemplateKey, EmailTemplateConfig> 
 Votre compte membre ({{email}}) est maintenant actif sur {{site_name}}.
 Vous pouvez dès maintenant enregistrer vos favoris, reprendre vos lectures et participer aux commentaires.`,
       ctaLabel: 'Accéder à {{site_name}}',
+      ...DEFAULT_EMAIL_COLORS,
+      useCustomHtml: false,
+      customHtml: '',
       enabled: true,
       variables: ['username', 'email', 'site_name', 'app_url'],
       updatedAt: now,
@@ -147,6 +201,9 @@ Vous pouvez dès maintenant enregistrer vos favoris, reprendre vos lectures et p
 Merci pour votre inscription sur {{site_name}} avec l’adresse {{email}}.
 Saisissez ce code de vérification à 6 chiffres (valable 15 minutes) pour activer votre compte :`,
       ctaLabel: '',
+      ...DEFAULT_EMAIL_COLORS,
+      useCustomHtml: false,
+      customHtml: '',
       enabled: true,
       variables: ['code', 'username', 'email', 'site_name'],
       updatedAt: now,
@@ -162,6 +219,9 @@ Saisissez ce code de vérification à 6 chiffres (valable 15 minutes) pour activ
 Vous avez demandé à remplacer votre adresse email ({{old_email}}) par {{email}} sur {{site_name}}.
 Saisissez ce code de vérification à 6 chiffres (valable 15 minutes) pour confirmer la modification :`,
       ctaLabel: '',
+      ...DEFAULT_EMAIL_COLORS,
+      useCustomHtml: false,
+      customHtml: '',
       enabled: true,
       variables: ['code', 'username', 'email', 'old_email', 'site_name'],
       updatedAt: now,
@@ -177,6 +237,9 @@ Saisissez ce code de vérification à 6 chiffres (valable 15 minutes) pour confi
 Vous avez demandé à modifier le mot de passe de votre compte {{site_name}} ({{email}}).
 Saisissez ce code de vérification à 6 chiffres (valable 15 minutes) pour valider votre nouveau mot de passe :`,
       ctaLabel: '',
+      ...DEFAULT_EMAIL_COLORS,
+      useCustomHtml: false,
+      customHtml: '',
       enabled: true,
       variables: ['code', 'username', 'email', 'site_name'],
       updatedAt: now,
@@ -194,6 +257,9 @@ Validité : {{expires_at}}.
 
 Profitez dès maintenant du lecteur Pro, de votre couronne dorée et de tous les avantages de votre offre.`,
       ctaLabel: 'Profiter de mon accès Pro',
+      ...DEFAULT_EMAIL_COLORS,
+      useCustomHtml: false,
+      customHtml: '',
       enabled: true,
       variables: ['username', 'email', 'plan_name', 'expires_at', 'site_name', 'app_url'],
       updatedAt: now,
@@ -209,6 +275,9 @@ Profitez dès maintenant du lecteur Pro, de votre couronne dorée et de tous les
 Votre abonnement {{plan_name}} a expiré le {{expired_at}}. Votre compte est repassé automatiquement sur l’offre Basic (Gratuit).
 Vous pouvez renouveler votre accès Pro à tout moment en un clic.`,
       ctaLabel: 'Renouveler mon offre Pro',
+      ...DEFAULT_EMAIL_COLORS,
+      useCustomHtml: false,
+      customHtml: '',
       enabled: true,
       variables: ['username', 'email', 'plan_name', 'expired_at', 'renew_url', 'site_name'],
       updatedAt: now,
@@ -224,6 +293,9 @@ Vous pouvez renouveler votre accès Pro à tout moment en un clic.`,
 Vous avez demandé à réinitialiser le mot de passe de votre compte {{site_name}} ({{email}}).
 Saisissez ce code de vérification à 6 chiffres (valable 15 minutes) pour choisir un nouveau mot de passe :`,
       ctaLabel: '',
+      ...DEFAULT_EMAIL_COLORS,
+      useCustomHtml: false,
+      customHtml: '',
       enabled: true,
       variables: ['code', 'username', 'email', 'site_name'],
       updatedAt: now,
@@ -257,6 +329,12 @@ function loadTemplates(): Record<EmailTemplateKey, EmailTemplateConfig> {
         heading: typeof custom.heading === 'string' && custom.heading.trim() ? custom.heading : defaults[key].heading,
         body: typeof custom.body === 'string' && custom.body.trim() ? custom.body : defaults[key].body,
         ctaLabel: typeof custom.ctaLabel === 'string' ? custom.ctaLabel : defaults[key].ctaLabel,
+        bgColor: sanitizeHexColor(custom.bgColor, defaults[key].bgColor),
+        cardBgColor: sanitizeHexColor(custom.cardBgColor, defaults[key].cardBgColor),
+        textColor: sanitizeHexColor(custom.textColor, defaults[key].textColor),
+        accentColor: sanitizeHexColor(custom.accentColor, defaults[key].accentColor),
+        useCustomHtml: typeof custom.useCustomHtml === 'boolean' ? custom.useCustomHtml : false,
+        customHtml: typeof custom.customHtml === 'string' ? sanitizeEmailHtml(custom.customHtml) : '',
         enabled: typeof custom.enabled === 'boolean' ? custom.enabled : defaults[key].enabled,
         updatedAt: typeof custom.updatedAt === 'string' ? custom.updatedAt : defaults[key].updatedAt,
       };
@@ -282,7 +360,22 @@ export function getEmailTemplate(key: EmailTemplateKey): EmailTemplateConfig {
 
 export function updateEmailTemplate(
   key: EmailTemplateKey,
-  patch: Partial<Pick<EmailTemplateConfig, 'subject' | 'heading' | 'body' | 'ctaLabel' | 'enabled'>>
+  patch: Partial<
+    Pick<
+      EmailTemplateConfig,
+      | 'subject'
+      | 'heading'
+      | 'body'
+      | 'ctaLabel'
+      | 'bgColor'
+      | 'cardBgColor'
+      | 'textColor'
+      | 'accentColor'
+      | 'useCustomHtml'
+      | 'customHtml'
+      | 'enabled'
+    >
+  >
 ): EmailTemplateConfig | null {
   const current = emailTemplates[key];
   if (!current) return null;
@@ -304,6 +397,17 @@ export function updateEmailTemplate(
       typeof patch.ctaLabel === 'string'
         ? patch.ctaLabel.trim().slice(0, 80)
         : current.ctaLabel,
+    bgColor: patch.bgColor !== undefined ? sanitizeHexColor(patch.bgColor, current.bgColor) : current.bgColor,
+    cardBgColor:
+      patch.cardBgColor !== undefined ? sanitizeHexColor(patch.cardBgColor, current.cardBgColor) : current.cardBgColor,
+    textColor:
+      patch.textColor !== undefined ? sanitizeHexColor(patch.textColor, current.textColor) : current.textColor,
+    accentColor:
+      patch.accentColor !== undefined ? sanitizeHexColor(patch.accentColor, current.accentColor) : current.accentColor,
+    useCustomHtml:
+      typeof patch.useCustomHtml === 'boolean' ? patch.useCustomHtml : current.useCustomHtml,
+    customHtml:
+      typeof patch.customHtml === 'string' ? sanitizeEmailHtml(patch.customHtml) : current.customHtml,
     enabled: typeof patch.enabled === 'boolean' ? patch.enabled : current.enabled,
     updatedAt: new Date().toISOString(),
   };
@@ -720,7 +824,8 @@ function interpolateTemplate(
   });
 }
 
-function formatBodyParagraphs(interpolatedText: string): string {
+function formatBodyParagraphs(interpolatedText: string, textColor = DEFAULT_EMAIL_COLORS.textColor): string {
+  const safeTextColor = sanitizeHexColor(textColor, DEFAULT_EMAIL_COLORS.textColor);
   const blocks = interpolatedText
     .split(/\n{2,}/)
     .map((b) => b.trim())
@@ -728,23 +833,38 @@ function formatBodyParagraphs(interpolatedText: string): string {
   return blocks
     .map(
       (b) =>
-        `<p style="margin:0 0 14px;font-size:14px;line-height:1.65;color:#d1d5db;">${escapeHtml(b).replace(/\n/g, '<br/>')}</p>`
+        `<p style="margin:0 0 14px;font-size:14px;line-height:1.65;color:${safeTextColor};">${escapeHtml(b).replace(/\n/g, '<br/>')}</p>`
     )
     .join('');
 }
 
-function wrapEmailHtml(siteName: string, title: string, bodyHtml: string): string {
+interface EmailThemeColors {
+  bgColor?: string;
+  cardBgColor?: string;
+  textColor?: string;
+  accentColor?: string;
+}
+
+function wrapEmailHtml(
+  siteName: string,
+  title: string,
+  bodyHtml: string,
+  colors?: EmailThemeColors
+): string {
   const safeSite = escapeHtml(siteName || 'StreamWall');
+  const bgColor = sanitizeHexColor(colors?.bgColor, DEFAULT_EMAIL_COLORS.bgColor);
+  const cardBgColor = sanitizeHexColor(colors?.cardBgColor, DEFAULT_EMAIL_COLORS.cardBgColor);
+  const textColor = sanitizeHexColor(colors?.textColor, DEFAULT_EMAIL_COLORS.textColor);
   return `<!doctype html>
 <html lang="fr">
 <head><meta charset="utf-8" /></head>
-<body style="margin:0;padding:24px;background:#0f121a;color:#f3f4f6;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;">
-  <div style="max-width:540px;margin:0 auto;background:#171c28;border:1px solid #283044;border-radius:12px;padding:28px;">
-    <p style="margin:0 0 18px;font-size:20px;font-weight:700;color:#ffffff;">${safeSite}</p>
-    <h1 style="margin:0 0 14px;font-size:18px;color:#ffffff;">${escapeHtml(title)}</h1>
+<body style="margin:0;padding:24px;background:${bgColor};color:${textColor};font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;">
+  <div style="max-width:540px;margin:0 auto;background:${cardBgColor};border:1px solid #283044;border-radius:12px;padding:28px;color:${textColor};">
+    <p style="margin:0 0 18px;font-size:20px;font-weight:700;color:${textColor};">${safeSite}</p>
+    <h1 style="margin:0 0 14px;font-size:18px;color:${textColor};">${escapeHtml(title)}</h1>
     ${bodyHtml}
     <hr style="border:none;border-top:1px solid #283044;margin:24px 0 16px;" />
-    <p style="margin:0;font-size:12px;color:#9ca3af;">Cet email a été envoyé automatiquement par ${safeSite}.</p>
+    <p style="margin:0;font-size:12px;opacity:0.75;color:${textColor};">Cet email a été envoyé automatiquement par ${safeSite}.</p>
   </div>
 </body>
 </html>`;
@@ -768,15 +888,48 @@ async function renderTemplateContent(
   const bodyPlain = interpolateTemplate(tpl.body, allVars);
   const ctaLabel = interpolateTemplate(tpl.ctaLabel, allVars);
 
-  let bodyHtml = formatBodyParagraphs(bodyPlain);
+  const bgColor = sanitizeHexColor(tpl.bgColor, DEFAULT_EMAIL_COLORS.bgColor);
+  const cardBgColor = sanitizeHexColor(tpl.cardBgColor, DEFAULT_EMAIL_COLORS.cardBgColor);
+  const textColor = sanitizeHexColor(tpl.textColor, DEFAULT_EMAIL_COLORS.textColor);
+  const accentColor = sanitizeHexColor(tpl.accentColor, DEFAULT_EMAIL_COLORS.accentColor);
+
   let text = `${heading}\n\n${bodyPlain}`;
+  if (ctaUrl && ctaLabel) {
+    text += `\n\n${ctaLabel} : ${ctaUrl}`;
+  }
+
+  if (tpl.useCustomHtml && tpl.customHtml.trim()) {
+    const customVars: Record<string, string> = {
+      ...allVars,
+      heading,
+      cta_label: ctaLabel,
+      cta_url: ctaUrl || allVars.app_url || allVars.renew_url || '',
+    };
+    const cleanedSource = sanitizeEmailHtml(tpl.customHtml);
+    let customRendered = sanitizeEmailHtml(
+      interpolateTemplate(cleanedSource, customVars, { htmlEscapeValues: true })
+    );
+    if (extraFooterHtml && !tpl.customHtml.includes('{{code}}')) {
+      customRendered += extraFooterHtml;
+    }
+    const html = /<html[\s>]/i.test(customRendered)
+      ? customRendered
+      : `<!doctype html><html lang="fr"><head><meta charset="utf-8" /></head><body style="margin:0;padding:24px;background:${bgColor};color:${textColor};font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;"><div style="max-width:560px;margin:0 auto;background:${cardBgColor};border:1px solid #283044;border-radius:12px;padding:28px;color:${textColor};">${customRendered}</div></body></html>`;
+    return {
+      enabled: tpl.enabled,
+      subject,
+      html,
+      text,
+    };
+  }
+
+  let bodyHtml = formatBodyParagraphs(bodyPlain, textColor);
 
   if (ctaUrl && ctaLabel) {
     const safeUrl = escapeHtml(ctaUrl);
     bodyHtml += `<p style="margin:22px 0;">
-      <a href="${safeUrl}" style="display:inline-block;background:#e6a82e;color:#0f172a;text-decoration:none;font-weight:700;font-size:14px;padding:12px 22px;border-radius:8px;">${escapeHtml(ctaLabel)}</a>
+      <a href="${safeUrl}" style="display:inline-block;background:${accentColor};color:#0f172a;text-decoration:none;font-weight:700;font-size:14px;padding:12px 22px;border-radius:8px;">${escapeHtml(ctaLabel)}</a>
     </p>`;
-    text += `\n\n${ctaLabel} : ${ctaUrl}`;
   }
 
   if (extraFooterHtml) {
@@ -786,15 +939,21 @@ async function renderTemplateContent(
   return {
     enabled: tpl.enabled,
     subject,
-    html: wrapEmailHtml(siteName, heading, bodyHtml),
+    html: wrapEmailHtml(siteName, heading, bodyHtml, {
+      bgColor,
+      cardBgColor,
+      textColor,
+      accentColor,
+    }),
     text,
   };
 }
 
-function buildCodeBoxHtml(code: string): string {
+function buildCodeBoxHtml(code: string, accentColor = DEFAULT_EMAIL_COLORS.accentColor): string {
+  const safeAccent = sanitizeHexColor(accentColor, DEFAULT_EMAIL_COLORS.accentColor);
   return `<div style="margin:20px 0;padding:18px;border-radius:10px;background:#090b10;border:1px solid #374151;text-align:center;">
         <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:#9ca3af;margin-bottom:8px;">Code de vérification</div>
-        <div style="font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;font-size:32px;font-weight:700;letter-spacing:10px;color:#e6a82e;">${escapeHtml(code)}</div>
+        <div style="font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;font-size:32px;font-weight:700;letter-spacing:10px;color:${safeAccent};">${escapeHtml(code)}</div>
         <div style="font-size:11px;color:#9ca3af;margin-top:8px;">Valable pendant 15 minutes</div>
       </div>`;
 }
@@ -807,7 +966,10 @@ async function sendCodeVerificationEmail(params: {
 }): Promise<{ ok: boolean; error?: string }> {
   const code = String(params.code).trim();
   const tpl = getEmailTemplate(params.templateKey);
-  const extraHtml = !tpl.body.includes('{{code}}') ? buildCodeBoxHtml(code) : undefined;
+  const extraHtml =
+    !tpl.body.includes('{{code}}') && !(tpl.useCustomHtml && tpl.customHtml.includes('{{code}}'))
+      ? buildCodeBoxHtml(code, tpl.accentColor)
+      : undefined;
   const rendered = await renderTemplateContent(
     params.templateKey,
     {
@@ -1006,7 +1168,10 @@ export async function sendTemplateTestEmail(params: {
   };
   const isCodeTpl = codeTemplates.includes(params.templateKey);
   const tpl = getEmailTemplate(params.templateKey);
-  const extraHtml = isCodeTpl && !tpl.body.includes('{{code}}') ? buildCodeBoxHtml(sampleCode) : undefined;
+  const extraHtml =
+    isCodeTpl && !tpl.body.includes('{{code}}') && !(tpl.useCustomHtml && tpl.customHtml.includes('{{code}}'))
+      ? buildCodeBoxHtml(sampleCode, tpl.accentColor)
+      : undefined;
   const rendered = await renderTemplateContent(
     params.templateKey,
     sampleVars,

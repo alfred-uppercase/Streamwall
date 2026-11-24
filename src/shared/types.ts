@@ -6,7 +6,7 @@ export interface Item {
   poster: string | null;
   qualite: string | null;
   langue: string | null;
-  item_type: ItemType;
+  item_type: ContentItemType;
   saison: string | number | null;
   genre?: string | null;
   annee?: number | null;
@@ -230,6 +230,12 @@ export interface EmailTemplateConfig {
   heading: string;
   body: string;
   ctaLabel: string;
+  bgColor: string;
+  cardBgColor: string;
+  textColor: string;
+  accentColor: string;
+  useCustomHtml: boolean;
+  customHtml: string;
   enabled: boolean;
   variables: string[];
   updatedAt: string;
@@ -508,6 +514,10 @@ export interface AdminOverview {
   top7: RankingEntry[];
   top30: RankingEntry[];
   recentComments: CommentRecord[];
+  activeStats?: {
+    activeMembers: number;
+    activeGuests: number;
+  };
   source?: 'supabase_auth' | 'supabase_rpc' | 'supabase_profiles' | 'local';
   warning?: string | null;
 }
@@ -873,6 +883,7 @@ export interface MenuLinkConfig {
 export interface SiteNavigationConfig {
   items: MenuLinkConfig[];
   updatedAt: string;
+  communityNavSeeded?: boolean;
 }
 
 export interface CustomApiSortOption {
