@@ -292,6 +292,16 @@ export function isUserBanned(userId: string): boolean {
   return Boolean(billingDb.bannedUsers?.[userId]);
 }
 
+export function countActiveDirectoryUsers(): number {
+  const dir = billingDb.userDirectory ?? {};
+  const bans = billingDb.bannedUsers ?? {};
+  let count = 0;
+  for (const uid of Object.keys(dir)) {
+    if (!bans[uid]) count += 1;
+  }
+  return count;
+}
+
 export function pruneUserDirectory(validUserIds: Set<string>): void {
   const dir = billingDb.userDirectory;
   if (!dir) return;

@@ -419,9 +419,11 @@ export interface UserProfile {
   nextEmailChangeAt?: string | null;
 }
 
+export type ContentItemType = ItemType | 'pinoy' | `custom:${string}`;
+
 export interface CommentRecord {
   id: string;
-  itemType: ItemType | 'pinoy';
+  itemType: ContentItemType;
   itemId: string;
   itemTitle?: string;
   userId: string;
@@ -602,7 +604,7 @@ export type BrokenReportStatus = 'pending' | 'resolved' | 'rejected';
 
 export interface BrokenReportRecord {
   id: string;
-  itemType: ItemType | 'pinoy';
+  itemType: ContentItemType;
   itemId: string;
   itemTitle: string;
   season: number | null;
@@ -806,3 +808,266 @@ export interface PinoyDetailResponse {
   similar: PinoyFilm[];
   error?: string;
 }
+
+export function getContentDetailPath(itemType: string, itemId: string): string {
+  const safeId = encodeURIComponent(itemId);
+  if (itemType.startsWith('custom:')) {
+    const slug = itemType.slice('custom:'.length);
+    return `/c/${encodeURIComponent(slug)}/${safeId}`;
+  }
+  return `/${encodeURIComponent(itemType)}/${safeId}`;
+}
+
+export function getContentTypeLabel(itemType: string): string {
+  if (itemType === 'pinoy') return 'Pinoy';
+  if (itemType.startsWith('custom:')) {
+    return itemType.slice('custom:'.length).toUpperCase();
+  }
+  if (itemType in TYPE_LABELS) return TYPE_LABELS[itemType as ItemType];
+  return itemType;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NAVIGATION CMS (Desktop, Mobile Dock, Footer) & DYNAMIC CUSTOM API MODULES
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type MenuIconKey =
+  | 'home'
+  | 'layout-grid'
+  | 'film'
+  | 'tv'
+  | 'clapperboard'
+  | 'sparkles'
+  | 'heart'
+  | 'crown'
+  | 'shield'
+  | 'user'
+  | 'globe'
+  | 'compass'
+  | 'flame'
+  | 'play'
+  | 'folder'
+  | 'star'
+  | 'message-square'
+  | 'lock';
+
+export type MenuAuthRule = 'all' | 'member' | 'guest' | 'pro' | 'admin' | 'pro_offers';
+
+export interface MenuLinkConfig {
+  id: string;
+  label: string;
+  path: string;
+  icon: MenuIconKey;
+  exact: boolean;
+  enabled: boolean;
+  desktop: boolean;
+  mobile: boolean;
+  footer: boolean;
+  order: number;
+  authRule: MenuAuthRule;
+  isAccount?: boolean;
+  systemKey?: string;
+  customModuleSlug?: string;
+}
+
+export interface SiteNavigationConfig {
+  items: MenuLinkConfig[];
+  updatedAt: string;
+}
+
+export interface CustomApiSortOption {
+  value: string;
+  label: string;
+}
+
+export interface CustomApiEndpointsConfig {
+  apiUrl: string;
+  mediaBaseUrl: string;
+  actionParam: string;
+  facetsAction: string;
+  listAction: string;
+  detailAction: string;
+  detailKeyParam: string;
+  queryParam: string;
+  genreParam: string;
+  countryParam: string;
+  yearParam: string;
+  sortParam: string;
+  pageParam: string;
+  perPageParam: string;
+  perPage: number;
+  similarLimitParam: string;
+  similarLimit: number;
+}
+
+export interface CustomApiFieldMapping {
+  listItemsPath: string;
+  listPagePath: string;
+  listTotalPath: string;
+  listTotalPagesPath: string;
+  facetsGenresPath: string;
+  facetsCountriesPath: string;
+  facetsYearMinPath: string;
+  facetsYearMaxPath: string;
+  detailItemPath: string;
+  detailEmbedsPath: string;
+  detailDownloadsPath: string;
+  detailSimilarPath: string;
+  itemIdField: string;
+  itemSlugField: string;
+  itemTitleField: string;
+  itemOriginalTitleField: string;
+  itemYearField: string;
+  itemReleaseDateField: string;
+  itemCountryField: string;
+  itemDurationField: string;
+  itemRatingField: string;
+  itemGenresField: string;
+  itemSynopsisField: string;
+  itemPosterField: string;
+  itemGalleryField: string;
+  playerUrlField: string;
+  playerProviderField: string;
+  playerQualityField: string;
+  playerLanguageField: string;
+}
+
+export interface CustomApiFiltersConfig {
+  showSearch: boolean;
+  searchPlaceholder: string;
+  showGenreFilter: boolean;
+  showCountryFilter: boolean;
+  showYearFilter: boolean;
+  showSortFilter: boolean;
+  defaultSort: string;
+  sortOptions: CustomApiSortOption[];
+}
+
+export interface CustomApiSectionsConfig {
+  catalogueTitle: string;
+  catalogueSubtitle: string;
+  mobileGridCols: 2 | 3;
+  desktopGridCols: 4 | 5 | 6;
+  showRating: boolean;
+  showYear: boolean;
+  showDuration: boolean;
+  showCountry: boolean;
+  detailShowHeroGallery: boolean;
+  detailShowSynopsis: boolean;
+  detailShowAvailablePlayersList: boolean;
+  detailShowDownloads: boolean;
+  detailShowGallerySection: boolean;
+  detailShowSimilar: boolean;
+  detailShowComments: boolean;
+  detailShowReportButton: boolean;
+}
+
+export interface CustomApiPlayerConfig {
+  playerUrlTemplate: string;
+  primaryPlayerLabel: string;
+  useSameOriginProxy: boolean;
+  showServerSwitcherInModal: boolean;
+  includeUpstreamEmbeds: boolean;
+  downloadProOnly: boolean;
+  downloadRestrictionMessage: string;
+  onlyDirectDownloads: boolean;
+}
+
+export interface CustomApiModuleConfig {
+  id: string;
+  slug: string;
+  name: string;
+  enabled: boolean;
+  badgeText: string;
+  icon: MenuIconKey;
+  endpoints: CustomApiEndpointsConfig;
+  fields: CustomApiFieldMapping;
+  filters: CustomApiFiltersConfig;
+  sections: CustomApiSectionsConfig;
+  player: CustomApiPlayerConfig;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CustomApiPublicModule {
+  id: string;
+  slug: string;
+  name: string;
+  enabled: boolean;
+  badgeText: string;
+  icon: MenuIconKey;
+  filters: CustomApiFiltersConfig;
+  sections: CustomApiSectionsConfig;
+  player: Pick<
+    CustomApiPlayerConfig,
+    | 'primaryPlayerLabel'
+    | 'showServerSwitcherInModal'
+    | 'downloadProOnly'
+    | 'downloadRestrictionMessage'
+  >;
+}
+
+export interface CustomApiItem {
+  id: string;
+  slug: string;
+  routeKey: string;
+  titre: string;
+  titre_original: string | null;
+  annee: number | null;
+  date_sortie: string | null;
+  pays: string | null;
+  duree: string | null;
+  note: number | null;
+  genres: string[];
+  synopsis: string | null;
+  poster: string | null;
+  galerie: string[];
+}
+
+export interface CustomApiFacetsResponse {
+  status: 'live' | 'unconfigured' | 'fallback';
+  genres: { nom: string; total: number }[];
+  pays: { code: string; total: number }[];
+  annees: { min: number | null; max: number | null };
+}
+
+export interface CustomApiListResponse {
+  status: 'live' | 'unconfigured' | 'fallback';
+  module: CustomApiPublicModule | null;
+  page: number;
+  per_page: number;
+  total: number;
+  total_pages: number;
+  items: CustomApiItem[];
+  error?: string;
+}
+
+export interface CustomApiDetailResponse {
+  status: 'live' | 'unconfigured' | 'fallback';
+  module: CustomApiPublicModule | null;
+  item: CustomApiItem | null;
+  players: {
+    embed: PinoyPlayerSource[];
+    download: PinoyPlayerSource[];
+  };
+  downloadLocked?: boolean;
+  downloadMessage?: string;
+  similar: CustomApiItem[];
+  error?: string;
+}
+
+export interface CustomApiTestReport {
+  ok: boolean;
+  facetsOk: boolean;
+  listOk: boolean;
+  detailOk: boolean;
+  facetsCount: { genres: number; countries: number };
+  listCount: number;
+  totalItems: number;
+  sampleItem: CustomApiItem | null;
+  sampleEmbedCount: number;
+  sampleDownloadCount: number;
+  latencyMs: number;
+  message: string;
+}
+

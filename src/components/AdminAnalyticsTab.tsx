@@ -114,7 +114,7 @@ export function AdminAnalyticsTab() {
             </h2>
             <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">
               {data
-                ? `Période analysée : du ${new Date(data.period.startDate).toLocaleDateString('fr-FR')} au ${new Date(data.period.endDate).toLocaleDateString('fr-FR')} · Suivi sans IP complète ni PII`
+                ? `Période analysée : du ${new Date(data.period.startDate).toLocaleDateString('fr-FR')} au ${new Date(data.period.endDate).toLocaleDateString('fr-FR')} · Compteurs journaliers persistants (SQLite WAL, sans saturation Supabase)`
                 : 'Chargement des indicateurs…'}
             </p>
           </div>
@@ -178,8 +178,36 @@ export function AdminAnalyticsTab() {
         </div>
       ) : (
         <>
-          {/* 8 Core KPI Cards */}
+          {/* Core KPI Cards */}
           <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-xl border border-primary/30 bg-card p-5">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-medium text-muted-foreground">Utilisateurs actifs</p>
+                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 tabular-nums">
+                  {formatNumber(data.summary.activeUsersToday ?? 0)} auj.
+                </span>
+              </div>
+              <p className="mt-2 font-display text-3xl font-bold text-foreground tabular-nums">
+                {formatNumber(data.summary.totalActiveUsers ?? 0)}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground tabular-nums">
+                {formatNumber(data.summary.activeSessionsCount ?? 0)} session(s) active(s) (35j)
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-emerald-500/30 bg-card p-5">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-medium text-muted-foreground">En ligne maintenant</p>
+                <span className="size-2 rounded-full bg-emerald-400 animate-pulse" />
+              </div>
+              <p className="mt-2 font-display text-3xl font-bold text-emerald-400 tabular-nums">
+                {formatNumber(data.summary.activeNow ?? 0)}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Actifs sur les 5 dernières minutes
+              </p>
+            </div>
+
             <div className="rounded-xl border border-border bg-card p-5">
               <p className="text-xs font-medium text-muted-foreground">Nombre total de visiteurs</p>
               <p className="mt-2 font-display text-3xl font-bold text-foreground tabular-nums">
@@ -217,19 +245,13 @@ export function AdminAnalyticsTab() {
             </div>
 
             <div className="rounded-xl border border-border bg-card p-5">
-              <p className="text-xs font-medium text-muted-foreground">Durée moyenne des sessions</p>
+              <p className="text-xs font-medium text-muted-foreground">Durée moyenne & Rebond</p>
               <p className="mt-2 font-display text-3xl font-bold text-foreground tabular-nums">
                 {formatDuration(data.summary.avgSessionDurationSec)}
               </p>
-              <p className="mt-1 text-xs text-muted-foreground">Temps d’engagement actif</p>
-            </div>
-
-            <div className="rounded-xl border border-border bg-card p-5">
-              <p className="text-xs font-medium text-muted-foreground">Taux de rebond</p>
-              <p className="mt-2 font-display text-3xl font-bold text-foreground tabular-nums">
-                {data.summary.bounceRate}%
+              <p className="mt-1 text-xs text-muted-foreground tabular-nums">
+                Taux de rebond : {data.summary.bounceRate}%
               </p>
-              <p className="mt-1 text-xs text-muted-foreground">Sessions à 1 page (&lt; 15s)</p>
             </div>
 
             <div className="rounded-xl border border-border bg-card p-5">

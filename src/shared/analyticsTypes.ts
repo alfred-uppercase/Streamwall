@@ -15,6 +15,9 @@ export interface AnalyticsSummary {
   sessions: number;
   pageViews: number;
   activeNow: number;
+  activeUsersToday: number;
+  totalActiveUsers: number;
+  activeSessionsCount: number;
   avgSessionDurationSec: number;
   bounceRate: number;
   newVisitors: number;

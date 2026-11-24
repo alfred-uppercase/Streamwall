@@ -103,6 +103,50 @@ sqlite.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_error_logs_level_source
     ON error_logs (level, source, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS user_sessions (
+    token TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'local',
+    sb_access_token TEXT,
+    sb_refresh_token TEXT,
+    sb_expires_at INTEGER,
+    user_json TEXT,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id
+    ON user_sessions (user_id);
+
+  CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at
+    ON user_sessions (expires_at);
+
+  CREATE TABLE IF NOT EXISTS analytics_daily (
+    day TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS analytics_visitors (
+    visitor_key TEXT PRIMARY KEY,
+    first_day TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS analytics_recent_sessions (
+    session_id TEXT PRIMARY KEY,
+    visitor_key TEXT NOT NULL,
+    day TEXT NOT NULL,
+    started_ms INTEGER NOT NULL,
+    last_activity_ms INTEGER NOT NULL,
+    page_views INTEGER NOT NULL,
+    duration_sec INTEGER NOT NULL,
+    payload TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_analytics_recent_last_activity
+    ON analytics_recent_sessions (last_activity_ms DESC);
 `);
 
 const selectModuleStmt = sqlite.prepare(
@@ -124,7 +168,13 @@ const pendingSupabaseSync = new Map<string, NodeJS.Timeout>();
 // Only tiny, rarely-edited admin configuration modules should ever touch Supabase `app_settings`.
 // High-churn or multi-MB modules (`analytics`, `store`, `mail_logs`, `notifications`, etc.)
 // remain strictly in local SQLite WAL so concurrent visitors never lock or timeout `app_settings`.
-const REMOTE_MIRROR_ALLOWLIST = new Set(['billing', 'popups', 'privacy']);
+const REMOTE_MIRROR_ALLOWLIST = new Set([
+  'billing',
+  'popups',
+  'privacy',
+  'navigation',
+  'custom_modules',
+]);
 const MAX_REMOTE_MIRROR_BYTES = 100 * 1024;
 
 export function isRemoteMirrorAllowed(moduleKey: string): boolean {

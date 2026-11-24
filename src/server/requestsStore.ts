@@ -25,9 +25,12 @@ function sanitizeItemType(raw: unknown): ItemType {
   return 'film';
 }
 
-function sanitizeReportItemType(raw: unknown): ItemType | 'pinoy' {
+function sanitizeReportItemType(raw: unknown): BrokenReportRecord['itemType'] {
   const val = String(raw ?? '').trim().toLowerCase();
   if (val === 'pinoy') return 'pinoy';
+  if (/^custom:[a-z0-9][a-z0-9-]{1,40}$/.test(val)) {
+    return val as `custom:${string}`;
+  }
   return sanitizeItemType(val);
 }
 
@@ -43,8 +46,11 @@ function sanitizeTmdbPosterUrl(raw: unknown): string | null {
 function sanitizeCatalogLink(raw: unknown): string | null {
   const val = String(raw ?? '').trim();
   if (!val) return null;
-  if (/^\/(film|serie|anime)\/[A-Za-z0-9_-]+$/i.test(val)) {
+  if (/^\/(film|serie|anime|pinoy)\/[A-Za-z0-9._-]+$/i.test(val)) {
     return val.slice(0, 120);
+  }
+  if (/^\/c\/[a-z0-9-]+\/[A-Za-z0-9._-]+$/i.test(val)) {
+    return val.slice(0, 160);
   }
   if (/^https?:\/\/[^\s"'<>]+$/i.test(val)) {
     return val.slice(0, 300);

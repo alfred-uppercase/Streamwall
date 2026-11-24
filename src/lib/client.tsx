@@ -18,6 +18,11 @@ import type {
   CommentRecord,
   ContentRequestRecord,
   ContentRequestStatus,
+  CustomApiDetailResponse,
+  CustomApiFacetsResponse,
+  CustomApiListResponse,
+  CustomApiModuleConfig,
+  CustomApiTestReport,
   DetailResponse,
   EmailTemplateConfig,
   EmailTemplateKey,
@@ -40,6 +45,7 @@ import type {
   PushDispatchResult,
   PushStats,
   SiteConfig,
+  SiteNavigationConfig,
   SubscriptionPlan,
   TmdbSearchSuggestion,
   UserProfile,
@@ -231,6 +237,36 @@ export const api = {
   },
   pinoyDetail: (slug: string) =>
     apiRequest<PinoyDetailResponse>(`/api/pinoy/detail/${encodeURIComponent(slug)}`),
+  siteNavigation: () => apiRequest<SiteNavigationConfig>('/api/site/navigation'),
+  customFacets: (slug: string) =>
+    apiRequest<CustomApiFacetsResponse>(`/api/custom/${encodeURIComponent(slug)}/facets`),
+  customList: (
+    slug: string,
+    filters: {
+      q: string;
+      genre: string;
+      pays: string;
+      annee: string;
+      sort: string;
+      page: number;
+    }
+  ) => {
+    const p = new URLSearchParams({
+      q: filters.q,
+      genre: filters.genre,
+      pays: filters.pays,
+      annee: filters.annee,
+      sort: filters.sort,
+      page: String(filters.page),
+    });
+    return apiRequest<CustomApiListResponse>(
+      `/api/custom/${encodeURIComponent(slug)}/list?${p.toString()}`
+    );
+  },
+  customDetail: (slug: string, itemKey: string) =>
+    apiRequest<CustomApiDetailResponse>(
+      `/api/custom/${encodeURIComponent(slug)}/detail/${encodeURIComponent(itemKey)}`
+    ),
   suggestions: (type: string, genre: string) => {
     const p = new URLSearchParams({ type, genre });
     return apiRequest<{ upstreamStatus: 'live' | 'fallback'; spotlight: Item | null; items: Item[] }>(
@@ -554,6 +590,43 @@ export const api = {
       body: JSON.stringify(
         typeof payload === 'string' ? { pinoyApiUrl: payload } : payload
       ),
+    }),
+  adminNavigation: () => apiRequest<SiteNavigationConfig>('/api/admin/navigation'),
+  adminSaveNavigation: (payload: Pick<SiteNavigationConfig, 'items'>) =>
+    apiRequest<SiteNavigationConfig>('/api/admin/navigation', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  adminResetNavigation: () =>
+    apiRequest<SiteNavigationConfig>('/api/admin/navigation/reset', {
+      method: 'POST',
+    }),
+  adminCustomModules: () =>
+    apiRequest<{ modules: CustomApiModuleConfig[] }>('/api/admin/custom-modules'),
+  adminSaveCustomModule: (
+    payload: Partial<CustomApiModuleConfig> & {
+      syncMenu?: boolean;
+      showDesktop?: boolean;
+      showMobile?: boolean;
+      showFooter?: boolean;
+    }
+  ) =>
+    apiRequest<{ module: CustomApiModuleConfig; navigation: SiteNavigationConfig }>(
+      '/api/admin/custom-modules',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+  adminDeleteCustomModule: (slug: string) =>
+    apiRequest<{ ok: boolean; navigation: SiteNavigationConfig }>(
+      `/api/admin/custom-modules/${encodeURIComponent(slug)}`,
+      { method: 'DELETE' }
+    ),
+  adminTestCustomModule: (payload: Partial<CustomApiModuleConfig>) =>
+    apiRequest<CustomApiTestReport>('/api/admin/custom-modules/test', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     }),
   adminSaveEmbedProvider: (embedProvider: string) =>
     apiRequest<{ embedProvider: string }>('/api/admin/settings/embed-provider', {

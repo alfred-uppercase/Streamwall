@@ -20,7 +20,7 @@ import type {
   ContentRequestRecord,
   ContentRequestStatus,
 } from '../shared/types';
-import { TYPE_LABELS } from '../shared/types';
+import { getContentDetailPath, getContentTypeLabel, TYPE_LABELS } from '../shared/types';
 import { api } from '../lib/client';
 
 function ReportRow({
@@ -43,14 +43,14 @@ function ReportRow({
         <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
             <Link
-              to={`/${report.itemType}/${report.itemId}`}
+              to={getContentDetailPath(report.itemType, report.itemId)}
               className="inline-flex items-center gap-1.5 font-display text-base font-semibold text-foreground hover:text-primary"
             >
               <span>{report.itemTitle}</span>
               <ExternalLink className="size-3.5 text-primary" />
             </Link>
             <span className="text-xs font-medium text-primary">
-              {report.itemType === 'pinoy' ? 'Pinoy' : TYPE_LABELS[report.itemType]}
+              {getContentTypeLabel(report.itemType)}
               {report.season && report.episode
                 ? ` · S${report.season}·É${report.episode}`
                 : ''}

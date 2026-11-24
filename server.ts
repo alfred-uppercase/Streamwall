@@ -11,6 +11,7 @@ import {
   PLAYER_KEYS,
   TEMPLATE_RE,
   fillTemplate,
+  getContentDetailPath,
   isFullUrlTemplate,
   matchesTemplate,
   stripOriginFromTemplate,
@@ -21,6 +22,7 @@ import type {
   CataloguePage,
   CastMember,
   CommentRecord,
+  CustomApiDetailResponse,
   DetailItem,
   DetailResponse,
   EmailTemplateKey,
@@ -125,12 +127,17 @@ import type { AnalyticsPeriodKey } from './src/shared/analyticsTypes.ts';
 import {
   computeAnalyticsDashboard,
   computeRealtimeAnalytics,
+  parseUserAgent,
   recordAnalyticsCollect,
+  resolveGeoFromRequest,
+  setActiveMembersCountProvider,
+  touchActiveUserPresence,
 } from './src/server/analyticsStore.ts';
 import {
   assignUserPlan,
   banUser,
   cleanupUserBillingData,
+  countActiveDirectoryUsers,
   createCryptoGateOrder,
   createManualOrder,
   deletePlan,
@@ -233,6 +240,32 @@ import {
   listErrorLogs,
   recordErrorLog,
 } from './src/server/errorLogger.ts';
+import {
+  createPersistentSession,
+  decodeJwtExpiryMs,
+  deletePersistentSession,
+  getPersistentSession,
+  resolvePersistentSupabaseSession,
+  revokeAllSessionsForUser,
+} from './src/server/sessionStore.ts';
+import {
+  deleteCustomModule,
+  getCustomModule,
+  getSiteNavigation,
+  listCustomModules,
+  resetSiteNavigation,
+  updateSiteNavigation,
+  upsertCustomModule,
+  validateCustomModuleDraft,
+} from './src/server/customModulesStore.ts';
+import {
+  clearCustomApiCache,
+  fetchCustomDetail,
+  fetchCustomFacets,
+  fetchCustomList,
+  resolveCustomPlayerUrl,
+  testCustomModuleConfig,
+} from './src/server/customApiService.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3000;
@@ -1135,22 +1168,53 @@ function enrichUserProfile(user: UserProfile): UserProfile {
   };
 }
 
+function touchAuthPresence(req: express.Request, userId: string): void {
+  try {
+    const geo = resolveGeoFromRequest(req);
+    const ua = parseUserAgent(String(req.headers['user-agent'] ?? ''));
+    touchActiveUserPresence({
+      sessionId: `u_${userId}`,
+      countryCode: geo.countryCode,
+      countryName: geo.countryName,
+      region: geo.region,
+      city: geo.city,
+      deviceType: ua.deviceType,
+      os: ua.os,
+      browser: ua.browser,
+    });
+  } catch {
+    // Non-fatal
+  }
+}
+
 async function resolveAuth(req: express.Request): Promise<AuthResolution | null> {
   const token = extractToken(req);
   if (!token) return null;
 
   if (isSupabaseEnabled()) {
-    const resolved = await sbResolveUser(token);
+    const resolved = token.startsWith('sws_')
+      ? await resolvePersistentSupabaseSession(token)
+      : await sbResolveUser(token);
     if (!resolved) return null;
     if (isUserBanned(resolved.user.id)) return null;
+    touchAuthPresence(req, resolved.user.id);
     return { user: enrichUserProfile(resolved.user), token, sbClient: resolved.client };
   }
 
-  const session = db.sessions.find((s) => s.token === token);
-  if (!session) return null;
-  const user = db.users.find((u) => u.id === session.userId);
+  let userId: string | null = null;
+  const persistent = getPersistentSession(token);
+  if (persistent && persistent.provider === 'local') {
+    userId = persistent.userId;
+  } else {
+    const legacy = db.sessions.find((s) => s.token === token);
+    if (legacy) userId = legacy.userId;
+  }
+
+  if (!userId) return null;
+  const user = db.users.find((u) => u.id === userId);
   if (!user) return null;
   if (isUserBanned(user.id)) return null;
+  touchAuthPresence(req, user.id);
   return {
     token,
     sbClient: null,
@@ -1846,6 +1910,15 @@ function allowClientErrorReport(ip: string): boolean {
 }
 
 export async function createApiApp(): Promise<express.Express> {
+  setActiveMembersCountProvider(() => {
+    const dirCount = countActiveDirectoryUsers();
+    if (isSupabaseEnabled()) {
+      return dirCount;
+    }
+    const activeLocal = db.users.filter((u) => !isUserBanned(u.id)).length;
+    return Math.max(activeLocal, dirCount);
+  });
+
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
@@ -2041,8 +2114,8 @@ export async function createApiApp(): Promise<express.Express> {
         handleFailedCredentials(error?.message || 'Identifiants incorrects.');
         return;
       }
-      const token = data.session.access_token;
-      const resolved = await sbResolveUser(token);
+      const accessToken = data.session.access_token;
+      const resolved = await sbResolveUser(accessToken);
       if (!resolved) {
         res.status(401).json({ error: 'Impossible de charger votre profil Supabase.' });
         return;
@@ -2058,8 +2131,17 @@ export async function createApiApp(): Promise<express.Express> {
         return;
       }
       clearLoginFailures(email, clientIp);
-      res.cookie('tapenaka_session', token, getSessionCookieOptions(req));
-      res.json({ token, user: enrichUserProfile(resolved.user) });
+      const enriched = enrichUserProfile(resolved.user);
+      const persistent = createPersistentSession({
+        userId: resolved.user.id,
+        provider: 'supabase',
+        sbAccessToken: accessToken,
+        sbRefreshToken: data.session.refresh_token || null,
+        sbExpiresAtMs: decodeJwtExpiryMs(accessToken) ?? Date.now() + 3_600_000,
+        userSnapshot: enriched,
+      });
+      res.cookie('tapenaka_session', persistent.token, getSessionCookieOptions(req));
+      res.json({ token: persistent.token, user: enriched });
       return;
     }
 
@@ -2084,20 +2166,25 @@ export async function createApiApp(): Promise<express.Express> {
       return;
     }
     clearLoginFailures(email, clientIp);
-    const token = crypto.randomBytes(24).toString('hex');
-    db.sessions.push({ token, userId: user.id, createdAt: new Date().toISOString() });
+    const enriched = enrichUserProfile({
+      id: user.id,
+      email: user.email,
+      username: user.username,
+      avatar: user.avatar,
+      role: user.role,
+      createdAt: user.createdAt,
+    });
+    const persistent = createPersistentSession({
+      userId: user.id,
+      provider: 'local',
+      userSnapshot: enriched,
+    });
+    db.sessions.push({ token: persistent.token, userId: user.id, createdAt: persistent.createdAt });
     saveDb(db);
-    res.cookie('tapenaka_session', token, getSessionCookieOptions(req));
+    res.cookie('tapenaka_session', persistent.token, getSessionCookieOptions(req));
     res.json({
-      token,
-      user: enrichUserProfile({
-        id: user.id,
-        email: user.email,
-        username: user.username,
-        avatar: user.avatar,
-        role: user.role,
-        createdAt: user.createdAt,
-      }),
+      token: persistent.token,
+      user: enriched,
     });
   });
 
@@ -2117,20 +2204,25 @@ export async function createApiApp(): Promise<express.Express> {
       res.status(404).json({ error: 'Compte de démonstration introuvable.' });
       return;
     }
-    const token = crypto.randomBytes(24).toString('hex');
-    db.sessions.push({ token, userId: user.id, createdAt: new Date().toISOString() });
+    const enriched = enrichUserProfile({
+      id: user.id,
+      email: user.email,
+      username: user.username,
+      avatar: user.avatar,
+      role: user.role,
+      createdAt: user.createdAt,
+    });
+    const persistent = createPersistentSession({
+      userId: user.id,
+      provider: 'local',
+      userSnapshot: enriched,
+    });
+    db.sessions.push({ token: persistent.token, userId: user.id, createdAt: persistent.createdAt });
     saveDb(db);
-    res.cookie('tapenaka_session', token, getSessionCookieOptions(req));
+    res.cookie('tapenaka_session', persistent.token, getSessionCookieOptions(req));
     res.json({
-      token,
-      user: enrichUserProfile({
-        id: user.id,
-        email: user.email,
-        username: user.username,
-        avatar: user.avatar,
-        role: user.role,
-        createdAt: user.createdAt,
-      }),
+      token: persistent.token,
+      user: enriched,
     });
   });
 
@@ -2212,13 +2304,24 @@ export async function createApiApp(): Promise<express.Express> {
           void sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
         }
 
-        const token = signInData.session.access_token;
-        const resolved = await sbResolveUser(token);
-        res.cookie('tapenaka_session', token, getSessionCookieOptions(params.req));
-        res.json({
-          token,
-          user: resolved?.user ? enrichUserProfile(resolved.user) : null,
-        });
+        const accessToken = signInData.session.access_token;
+        const resolved = await sbResolveUser(accessToken);
+        const enriched = resolved?.user ? enrichUserProfile(resolved.user) : null;
+        if (resolved?.user) {
+          const persistent = createPersistentSession({
+            userId: resolved.user.id,
+            provider: 'supabase',
+            sbAccessToken: accessToken,
+            sbRefreshToken: signInData.session.refresh_token || null,
+            sbExpiresAtMs: decodeJwtExpiryMs(accessToken) ?? Date.now() + 3_600_000,
+            userSnapshot: enriched,
+          });
+          res.cookie('tapenaka_session', persistent.token, getSessionCookieOptions(params.req));
+          res.json({ token: persistent.token, user: enriched });
+          return true;
+        }
+        res.cookie('tapenaka_session', accessToken, getSessionCookieOptions(params.req));
+        res.json({ token: accessToken, user: null });
         return true;
       }
 
@@ -2267,10 +2370,24 @@ export async function createApiApp(): Promise<express.Express> {
       if (isSmtpReady()) {
         void sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
       }
-      const token = data.session.access_token;
-      const resolved = await sbResolveUser(token);
-      res.cookie('tapenaka_session', token, getSessionCookieOptions(params.req));
-      res.json({ token, user: resolved?.user ? enrichUserProfile(resolved.user) : null });
+      const accessToken = data.session.access_token;
+      const resolved = await sbResolveUser(accessToken);
+      const enriched = resolved?.user ? enrichUserProfile(resolved.user) : null;
+      if (resolved?.user) {
+        const persistent = createPersistentSession({
+          userId: resolved.user.id,
+          provider: 'supabase',
+          sbAccessToken: accessToken,
+          sbRefreshToken: data.session.refresh_token || null,
+          sbExpiresAtMs: decodeJwtExpiryMs(accessToken) ?? Date.now() + 3_600_000,
+          userSnapshot: enriched,
+        });
+        res.cookie('tapenaka_session', persistent.token, getSessionCookieOptions(params.req));
+        res.json({ token: persistent.token, user: enriched });
+        return true;
+      }
+      res.cookie('tapenaka_session', accessToken, getSessionCookieOptions(params.req));
+      res.json({ token: accessToken, user: null });
       return true;
     }
 
@@ -2290,23 +2407,28 @@ export async function createApiApp(): Promise<express.Express> {
     db.users.push(newUser);
     registerUserDirectoryEntry(newUserId, email, username);
 
-    const token = crypto.randomBytes(24).toString('hex');
-    db.sessions.push({ token, userId: newUser.id, createdAt: new Date().toISOString() });
+    const enriched = enrichUserProfile({
+      id: newUser.id,
+      email: newUser.email,
+      username: newUser.username,
+      avatar: newUser.avatar,
+      role: newUser.role,
+      createdAt: newUser.createdAt,
+    });
+    const persistent = createPersistentSession({
+      userId: newUser.id,
+      provider: 'local',
+      userSnapshot: enriched,
+    });
+    db.sessions.push({ token: persistent.token, userId: newUser.id, createdAt: persistent.createdAt });
     saveDb(db);
     if (isSmtpReady()) {
       void sendWelcomeEmail({ to: email, username, appUrl: appOrigin });
     }
-    res.cookie('tapenaka_session', token, getSessionCookieOptions(params.req));
+    res.cookie('tapenaka_session', persistent.token, getSessionCookieOptions(params.req));
     res.json({
-      token,
-      user: enrichUserProfile({
-        id: newUser.id,
-        email: newUser.email,
-        username: newUser.username,
-        avatar: newUser.avatar,
-        role: newUser.role,
-        createdAt: newUser.createdAt,
-      }),
+      token: persistent.token,
+      user: enriched,
     });
     return true;
   }
@@ -2572,8 +2694,20 @@ export async function createApiApp(): Promise<express.Express> {
     }
     user.emailVerified = true;
     db.verifyTokens = list.filter((t) => t.token !== token);
-    const sessionToken = crypto.randomBytes(24).toString('hex');
-    db.sessions.push({ token: sessionToken, userId: user.id, createdAt: new Date().toISOString() });
+    const enriched = enrichUserProfile({
+      id: user.id,
+      email: user.email,
+      username: user.username,
+      avatar: user.avatar,
+      role: user.role,
+      createdAt: user.createdAt,
+    });
+    const persistent = createPersistentSession({
+      userId: user.id,
+      provider: 'local',
+      userSnapshot: enriched,
+    });
+    db.sessions.push({ token: persistent.token, userId: user.id, createdAt: persistent.createdAt });
     saveDb(db);
     if (isSmtpReady()) {
       await sendWelcomeEmail({
@@ -2582,23 +2716,17 @@ export async function createApiApp(): Promise<express.Express> {
         appUrl: resolveAppOrigin(req),
       });
     }
-    res.cookie('tapenaka_session', sessionToken, getSessionCookieOptions(req));
+    res.cookie('tapenaka_session', persistent.token, getSessionCookieOptions(req));
     res.json({
-      token: sessionToken,
-      user: enrichUserProfile({
-        id: user.id,
-        email: user.email,
-        username: user.username,
-        avatar: user.avatar,
-        role: user.role,
-        createdAt: user.createdAt,
-      }),
+      token: persistent.token,
+      user: enriched,
     });
   });
 
   app.post('/api/auth/logout', (req, res) => {
     const token = extractToken(req);
     if (token) {
+      deletePersistentSession(token);
       invalidateSbUserCache({ token });
     }
     if (!isSupabaseEnabled() && token) {
@@ -3206,6 +3334,93 @@ export async function createApiApp(): Promise<express.Express> {
     res.json(responsePayload);
   });
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // DYNAMIC CUSTOM API MODULES (Public Facets, List, Detail & Same-Origin Player)
+  // ─────────────────────────────────────────────────────────────────────────
+  app.get('/api/custom/:slug/facets', async (req, res) => {
+    const mod = getCustomModule(String(req.params.slug ?? ''));
+    if (!mod || !mod.enabled) {
+      res.status(404).json({ error: 'Module catalogue introuvable ou désactivé.' });
+      return;
+    }
+    const facets = await fetchCustomFacets(mod);
+    res.setHeader('Cache-Control', 'public, max-age=180, s-maxage=600, stale-while-revalidate=1800');
+    res.json(facets);
+  });
+
+  app.get('/api/custom/:slug/list', async (req, res) => {
+    const mod = getCustomModule(String(req.params.slug ?? ''));
+    if (!mod || !mod.enabled) {
+      res.status(404).json({ error: 'Module catalogue introuvable ou désactivé.' });
+      return;
+    }
+    const allowedSorts = new Set(mod.filters.sortOptions.map((s) => s.value));
+    const rawSort = String(req.query.sort ?? mod.filters.defaultSort).trim();
+    const sort = allowedSorts.has(rawSort) ? rawSort : mod.filters.defaultSort;
+
+    const data = await fetchCustomList(mod, {
+      q: String(req.query.q ?? '').trim().slice(0, 120),
+      genre: String(req.query.genre ?? '').trim().slice(0, 80),
+      pays: /^[A-Za-z0-9._-]{1,16}$/.test(String(req.query.pays ?? '').trim())
+        ? String(req.query.pays).trim()
+        : '',
+      annee: /^\d{4}$/.test(String(req.query.annee ?? '').trim())
+        ? String(req.query.annee).trim()
+        : '',
+      sort,
+      page: Math.max(1, Math.min(500, Number(req.query.page) || 1)),
+    });
+    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
+    res.json(data);
+  });
+
+  app.get('/api/custom/:slug/detail/:itemKey', async (req, res) => {
+    const mod = getCustomModule(String(req.params.slug ?? ''));
+    if (!mod || !mod.enabled) {
+      res.status(404).json({ error: 'Module catalogue introuvable ou désactivé.' });
+      return;
+    }
+    const itemKey = String(req.params.itemKey ?? '').trim().slice(0, 200);
+    if (!itemKey || !/^[a-zA-Z0-9._-]+$/.test(itemKey)) {
+      res.status(400).json({ error: 'Identifiant de contenu invalide.' });
+      return;
+    }
+
+    const [auth, detail] = await Promise.all([
+      resolveAuth(req),
+      fetchCustomDetail(mod, itemKey),
+    ]);
+    if (detail.status === 'live' && !detail.item) {
+      res.status(404).json({ error: 'Contenu introuvable.' });
+      return;
+    }
+
+    const canDownload = !mod.player.downloadProOnly || Boolean(auth && (auth.user.role === 'admin' || auth.user.isPro));
+    const hasDownloads = detail.players.download.length > 0;
+    const responsePayload: CustomApiDetailResponse = canDownload
+      ? {
+          ...detail,
+          downloadLocked: false,
+        }
+      : {
+          ...detail,
+          players: {
+            ...detail.players,
+            download: [],
+          },
+          downloadLocked: hasDownloads,
+          ...(hasDownloads ? { downloadMessage: mod.player.downloadRestrictionMessage } : {}),
+        };
+
+    res.setHeader('Vary', 'Authorization, Cookie');
+    if (!auth && !extractToken(req)) {
+      res.setHeader('Cache-Control', 'public, max-age=120, s-maxage=600, stale-while-revalidate=1200');
+    } else {
+      res.setHeader('Cache-Control', 'private, no-store');
+    }
+    res.json(responsePayload);
+  });
+
   app.get('/api/suggestions', async (req, res) => {
     const type = ['all', 'film', 'serie', 'anime'].includes(String(req.query.type))
       ? String(req.query.type)
@@ -3446,7 +3661,7 @@ export async function createApiApp(): Promise<express.Express> {
 
       res.cookie('streamwall_watch', auth.token, getSessionCookieOptions(req, {
         path: '/api/public/watch',
-        maxAge: 3600 * 1000,
+        maxAge: 35 * 86_400_000,
       }));
     }
 
@@ -3475,6 +3690,22 @@ export async function createApiApp(): Promise<express.Express> {
           upstreamBase = new URL(pinoyTpl.replace(/\{id\}/gi, '1').replace(/\{slug\}/gi, 'film')).origin;
         } catch {
           upstreamBase = embedProvider;
+        }
+      }
+    } else {
+      const customMatch = refererHeader.match(/\/api\/public\/watch\/custom\/([a-z0-9-]+)\//i);
+      if (customMatch) {
+        const customMod = getCustomModule(customMatch[1]);
+        if (customMod?.player.playerUrlTemplate) {
+          try {
+            upstreamBase = new URL(
+              customMod.player.playerUrlTemplate
+                .replace(/\{id\}/gi, '1')
+                .replace(/\{slug\}/gi, 'item')
+            ).origin;
+          } catch {
+            upstreamBase = embedProvider;
+          }
         }
       }
     }
@@ -3566,6 +3797,76 @@ export async function createApiApp(): Promise<express.Express> {
 </html>`);
     }
   });
+
+  app.get(
+    ['/api/public/watch/custom/:slug/:id', '/api/public/watch/custom/:slug/:id/:itemKey'],
+    async (req, res) => {
+      const mod = getCustomModule(String(req.params.slug ?? ''));
+      if (!mod || !mod.enabled) {
+        res.status(404).send('Lecteur introuvable');
+        return;
+      }
+      const rawId = String(req.params.id ?? '').trim().slice(0, 120);
+      const rawItemKey = String(req.params.itemKey ?? rawId).trim().slice(0, 200);
+      if (!rawId || !/^[a-zA-Z0-9._-]+$/.test(rawId) || !/^[a-zA-Z0-9._-]+$/.test(rawItemKey)) {
+        res.status(400).send('Identifiant lecteur invalide');
+        return;
+      }
+      const targetUrl = resolveCustomPlayerUrl(mod.player.playerUrlTemplate, {
+        id: rawId,
+        slug: rawItemKey,
+        routeKey: rawItemKey,
+      });
+      if (!targetUrl) {
+        res.status(404).send('Modèle de lecteur non configuré');
+        return;
+      }
+      try {
+        const parsedTarget = new URL(targetUrl);
+        const upstreamOrigin = parsedTarget.origin;
+        const effectiveMediaOrigin = (mod.endpoints.mediaBaseUrl || upstreamOrigin).replace(/\/+$/, '');
+        const upstream = await fetch(targetUrl, {
+          headers: {
+            'user-agent': 'Mozilla/5.0 (Tapenaka StreamWall Proxy)',
+            referer: `${upstreamOrigin}/`,
+          },
+          signal: AbortSignal.timeout(12_000),
+        });
+        if (!upstream.ok) throw new Error(`HTTP ${upstream.status}`);
+        let html = await upstream.text();
+        html = html.replace(/(["'])\/assets\//g, '$1/api/embed-assets/');
+        html = html.replace(/url\(\s*\/assets\//gi, 'url(/api/embed-assets/');
+        html = html.replace(/(["'(])\/uploads\//g, `$1${effectiveMediaOrigin}/uploads/`);
+        res
+          .status(200)
+          .setHeader('content-type', 'text/html; charset=utf-8')
+          .setHeader('cache-control', 'private, no-store')
+          .send(html);
+      } catch {
+        res
+          .status(200)
+          .setHeader('content-type', 'text/html; charset=utf-8')
+          .send(`<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { margin: 0; height: 100vh; display: grid; place-items: center; background: #0b0e17; color: #f3f4f6; font-family: system-ui, sans-serif; text-align: center; padding: 24px; }
+    .box { max-width: 460px; border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; padding: 28px; background: #131826; }
+    h2 { margin: 0 0 10px; font-size: 18px; color: #f5b938; }
+    p { margin: 0; font-size: 14px; line-height: 1.6; color: #9ca3af; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>Lecteur temporairement indisponible</h2>
+    <p>Le serveur vidéo distant n’a pas répondu dans le délai imparti. Réessayez dans quelques instants.</p>
+  </div>
+</body>
+</html>`);
+      }
+    }
+  );
 
   app.get('/api/embed-assets/*', async (req, res) => {
     const assetPath = String((req.params as Record<string, string>)[0] ?? '').replace(/^\/+/, '');
@@ -4389,6 +4690,7 @@ export async function createApiApp(): Promise<express.Express> {
       saveDb(db);
     }
 
+    revokeAllSessionsForUser(targetId);
     if (deletedEmail && pendingSignups[deletedEmail]) {
       delete pendingSignups[deletedEmail];
       savePendingSignups();
@@ -4450,9 +4752,13 @@ export async function createApiApp(): Promise<express.Express> {
       res.status(401).json({ error: 'Connexion requise pour commenter' });
       return;
     }
-    const itemType = (['film', 'serie', 'anime', 'pinoy'].includes(req.body?.itemType)
-      ? req.body.itemType
-      : 'film') as CommentRecord['itemType'];
+    const rawItemType = String(req.body?.itemType ?? '').trim().toLowerCase();
+    const itemType = (
+      ['film', 'serie', 'anime', 'pinoy'].includes(rawItemType) ||
+      /^custom:[a-z0-9][a-z0-9-]{1,40}$/.test(rawItemType)
+        ? rawItemType
+        : 'film'
+    ) as CommentRecord['itemType'];
     const itemId = stripDangerousText(req.body?.itemId ?? '', 160);
     const itemTitle = stripDangerousText(req.body?.itemTitle ?? '', 120);
     const body = stripDangerousText(req.body?.body ?? '', 1000);
@@ -4467,7 +4773,7 @@ export async function createApiApp(): Promise<express.Express> {
       const notified = new Set<string>([auth.user.id]);
       const titleLabel = itemTitle || `${itemType} #${itemId}`;
       const excerpt = body.slice(0, 120);
-      const link = `/${itemType}/${itemId}`;
+      const link = getContentDetailPath(itemType, itemId);
 
       try {
         if (parentId) {
@@ -5144,6 +5450,7 @@ export async function createApiApp(): Promise<express.Express> {
     }
 
     if (shouldBan) {
+      revokeAllSessionsForUser(targetId);
       invalidateSbUserCache({ userId: targetId });
       invalidateSbAdminOverviewCache();
       const record = banUser(targetId, auth.user.id, reason);
@@ -5232,6 +5539,7 @@ export async function createApiApp(): Promise<express.Express> {
       saveDb(db);
     }
 
+    revokeAllSessionsForUser(targetId);
     if (deletedEmail && pendingSignups[deletedEmail]) {
       delete pendingSignups[deletedEmail];
       savePendingSignups();
@@ -5244,6 +5552,100 @@ export async function createApiApp(): Promise<express.Express> {
     cleanupUserEmailCooldown(targetId);
     invalidateSbAdminOverviewCache();
     res.json({ ok: true });
+  });
+
+  app.get('/api/site/navigation', (_req, res) => {
+    res.setHeader('Cache-Control', 'public, max-age=30, stale-while-revalidate=120');
+    res.json(getSiteNavigation());
+  });
+
+  app.get('/api/admin/navigation', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    res.json(getSiteNavigation());
+  });
+
+  app.put('/api/admin/navigation', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const outcome = updateSiteNavigation(req.body ?? {});
+    if (!outcome.ok) {
+      res.status(400).json({ error: outcome.error });
+      return;
+    }
+    res.json(outcome.navigation);
+  });
+
+  app.post('/api/admin/navigation/reset', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    res.json(resetSiteNavigation());
+  });
+
+  app.get('/api/admin/custom-modules', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    res.json({ modules: listCustomModules(true) });
+  });
+
+  app.post('/api/admin/custom-modules/test', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const validated = validateCustomModuleDraft(req.body ?? {});
+    if (!validated.ok) {
+      res.status(400).json({ error: validated.error });
+      return;
+    }
+    const report = await testCustomModuleConfig(validated.module);
+    res.json(report);
+  });
+
+  app.post('/api/admin/custom-modules', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const outcome = upsertCustomModule(body, {
+      syncMenu: body.syncMenu !== false,
+      showDesktop: body.showDesktop !== false,
+      showMobile: body.showMobile !== false,
+      showFooter: body.showFooter !== false,
+    });
+    if (!outcome.ok) {
+      res.status(400).json({ error: outcome.error });
+      return;
+    }
+    clearCustomApiCache(outcome.module.slug);
+    res.json({ module: outcome.module, navigation: getSiteNavigation() });
+  });
+
+  app.put('/api/admin/custom-modules/:slug', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const body = { ...(req.body ?? {}), slug: req.body?.slug ?? req.params.slug } as Record<string, unknown>;
+    const outcome = upsertCustomModule(body, {
+      syncMenu: body.syncMenu !== false,
+      showDesktop: body.showDesktop !== false,
+      showMobile: body.showMobile !== false,
+      showFooter: body.showFooter !== false,
+    });
+    if (!outcome.ok) {
+      res.status(400).json({ error: outcome.error });
+      return;
+    }
+    clearCustomApiCache(outcome.module.slug);
+    res.json({ module: outcome.module, navigation: getSiteNavigation() });
+  });
+
+  app.delete('/api/admin/custom-modules/:slug', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const ok = deleteCustomModule(String(req.params.slug ?? ''));
+    if (!ok) {
+      res.status(404).json({ error: 'Module introuvable.' });
+      return;
+    }
+    clearCustomApiCache();
+    res.json({ ok: true, navigation: getSiteNavigation() });
   });
 
   app.get('/api/site/config', async (_req, res) => {
@@ -6645,7 +7047,7 @@ export async function createApiApp(): Promise<express.Express> {
           updated.status === 'resolved'
             ? `Votre signalement pour « ${updated.itemTitle}${epText} » a été corrigé.${updated.adminNote ? ` Note : ${updated.adminNote}` : ''}`
             : `Votre signalement pour « ${updated.itemTitle}${epText} » a été fermé.${updated.adminNote ? ` Note : ${updated.adminNote}` : ''}`,
-        link: `/${updated.itemType}/${updated.itemId}`,
+        link: getContentDetailPath(updated.itemType, updated.itemId),
       });
     }
 

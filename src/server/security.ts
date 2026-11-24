@@ -570,7 +570,7 @@ export function getSessionCookieOptions(
     sameSite: 'lax',
     secure: isSecureRequest(req),
     path: '/',
-    maxAge: 30 * 86_400_000,
+    maxAge: 35 * 86_400_000,
     ...overrides,
   };
 }

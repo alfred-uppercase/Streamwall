@@ -13,6 +13,8 @@ import {
   Globe,
   Layers,
   Mail,
+  Menu,
+  Plug,
   RefreshCw,
   RotateCcw,
   ShieldCheck,
@@ -24,6 +26,7 @@ import {
 import { toast } from 'sonner';
 import {
   fillTemplate,
+  getContentDetailPath,
   isFullUrlTemplate,
   PLAYER_KEYS,
 } from '../shared/types';
@@ -43,6 +46,8 @@ import { AdminPopupsTab } from '../components/AdminPopupsTab';
 import { AdminRequestsTab } from '../components/AdminRequestsTab';
 import { AdminPrivacyTab } from '../components/AdminPrivacyTab';
 import { AdminErrorsTab } from '../components/AdminErrorsTab';
+import { AdminNavigationTab } from '../components/AdminNavigationTab';
+import { AdminCustomApisTab } from '../components/AdminCustomApisTab';
 import { ProCrownBadge } from '../components/UserAvatar';
 
 const PLAYER_FIELDS: { key: PlayerKey; label: string; hint: string }[] = [
@@ -62,6 +67,8 @@ type AdminTab =
   | 'analytics'
   | 'offers'
   | 'users'
+  | 'navigation'
+  | 'modules'
   | 'requests'
   | 'notifications'
   | 'popups'
@@ -76,6 +83,8 @@ const VALID_TABS: AdminTab[] = [
   'analytics',
   'offers',
   'users',
+  'navigation',
+  'modules',
   'requests',
   'notifications',
   'popups',
@@ -91,6 +100,8 @@ const TAB_TITLE_MAP: Record<AdminTab, string> = {
   analytics: 'Administration · Statistiques',
   offers: 'Administration · Offres & Paiements',
   users: 'Administration · Utilisateurs',
+  navigation: 'Administration · Menus (PC & Mobile)',
+  modules: 'Administration · APIs & Lecteurs',
   requests: 'Administration · Signalements & Demandes',
   notifications: 'Administration · Notifications',
   popups: 'Administration · Popups',
@@ -391,6 +402,8 @@ export function AdminPage() {
             ['analytics', 'Statistiques', BarChart3],
             ['offers', 'Offres & Paiements', CreditCard],
             ['users', 'Utilisateurs', Users],
+            ['navigation', 'Menus', Menu],
+            ['modules', 'APIs & Lecteurs', Plug],
             ['requests', 'Signalements & Demandes', Flag],
             ['notifications', 'Notifications', Bell],
             ['popups', 'Popups', Layers],
@@ -452,6 +465,12 @@ export function AdminPage() {
           }}
         />
       )}
+
+      {/* TAB: NAVIGATION CMS */}
+      {tab === 'navigation' && <AdminNavigationTab />}
+
+      {/* TAB: CUSTOM API MODULES */}
+      {tab === 'modules' && <AdminCustomApisTab />}
 
       {/* TAB: BROKEN REPORTS & MISSING TITLE REQUESTS */}
       {tab === 'requests' && <AdminRequestsTab />}
@@ -1021,7 +1040,7 @@ export function AdminPage() {
                       {c.isPro && <ProCrownBadge />}
                       <span>·</span>
                       <Link
-                        to={`/${c.itemType}/${c.itemId}`}
+                        to={getContentDetailPath(c.itemType, c.itemId)}
                         className="text-primary hover:underline"
                       >
                         {c.itemTitle || `${c.itemType} #${c.itemId}`}
