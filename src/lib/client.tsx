@@ -964,7 +964,7 @@ function FavoritesSetProvider({
     if (!isMember || !list || list.length === 0) {
       return EMPTY_FAVORITES_SET;
     }
-    const keys = list.map((f) => `${f.item_type}:${f.id}`);
+    const keys = list.map((f) => `${f.item_type}:${String(f.id)}`);
     const sig = keys.join('|');
     if (sig === prevRef.current.sig) {
       return prevRef.current.set;

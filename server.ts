@@ -30,6 +30,7 @@ import type {
   Episode,
   Item,
   ItemType,
+  LastSeriesItem,
   PinoyDetailResponse,
   PinoyListFilters,
   PlayerKey,
@@ -1509,6 +1510,134 @@ async function fetchUpstreamSlider(): Promise<{ items: Slide[]; live: boolean }>
       // Fallback
     }
     return getStaleCached<{ items: Slide[]; live: boolean }>(cacheKey) ?? { items: FALLBACK_SLIDER, live: false };
+  });
+}
+
+function sanitizeLastSeriesPoster(raw: unknown, origin: string): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        return parsed.toString();
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) return null;
+  const cleanRel = trimmed.replace(/^\/+/, '');
+  return cleanRel ? `${origin.replace(/\/+$/, '')}/${cleanRel}` : null;
+}
+
+async function fetchUpstreamLastSeries(): Promise<{ items: LastSeriesItem[]; live: boolean }> {
+  const origin = await getOrigin();
+  const cacheKey = `last_serie:asc:${origin}`;
+  const cached = getCached<{ items: LastSeriesItem[]; live: boolean }>(cacheKey);
+  if (cached) return cached;
+
+  return coalesceUpstream(cacheKey, async () => {
+    const recheck = getCached<{ items: LastSeriesItem[]; live: boolean }>(cacheKey);
+    if (recheck) return recheck;
+
+    try {
+      const res = await fetch(`${origin}/api/last_serie.php?short=asc`, {
+        signal: AbortSignal.timeout(9_000),
+        headers: { 'user-agent': 'Mozilla/5.0 (Tapenaka StreamWall)' },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = (await res.json()) as { items?: Array<Record<string, unknown>> };
+      const rawItems = Array.isArray(json.items) ? json.items : [];
+      const items: LastSeriesItem[] = [];
+
+      for (const r of rawItems) {
+        if (items.length >= 18) break;
+        if (!r || typeof r !== 'object') continue;
+        const idStr = String(r.id ?? r.serie_id ?? '').trim();
+        if (!idStr) continue;
+
+        const titreFull =
+          typeof r.titre_full === 'string' && r.titre_full.trim()
+            ? r.titre_full.trim()
+            : typeof r.titre === 'string'
+              ? r.titre.trim()
+              : '';
+        if (!titreFull) continue;
+
+        const baseTitre =
+          typeof r.titre === 'string' && r.titre.trim() ? r.titre.trim() : titreFull;
+        const poster = sanitizeLastSeriesPoster(r.poster, origin);
+        const backdrop = sanitizeLastSeriesPoster(r.backdrop, origin);
+        const genre = typeof r.genre === 'string' && r.genre.trim() ? r.genre.trim() : null;
+        const anneeNum = r.annee !== undefined && r.annee !== null ? Number(r.annee) : NaN;
+        const annee = Number.isFinite(anneeNum) && anneeNum > 1900 ? anneeNum : null;
+        const langue = typeof r.langue === 'string' && r.langue.trim() ? r.langue.trim() : null;
+        const qualite = typeof r.qualite === 'string' && r.qualite.trim() ? r.qualite.trim() : null;
+        const tmdbId =
+          r.tmdbId !== undefined && r.tmdbId !== null && String(r.tmdbId).trim()
+            ? String(r.tmdbId).trim()
+            : null;
+        const saisonNum = r.saison !== undefined && r.saison !== null ? Number(r.saison) : NaN;
+        const saison = Number.isFinite(saisonNum) ? saisonNum : null;
+        const dernierEpNum =
+          r.dernier_episode !== undefined && r.dernier_episode !== null
+            ? Number(r.dernier_episode)
+            : NaN;
+        const totalEpNum =
+          r.total_episodes !== undefined && r.total_episodes !== null
+            ? Number(r.total_episodes)
+            : NaN;
+        const descr =
+          typeof r.description === 'string' && r.description.trim()
+            ? r.description.trim()
+            : typeof r.descr === 'string' && r.descr.trim()
+              ? r.descr.trim()
+              : null;
+
+        indexCatalogEntry({
+          id: idStr,
+          titre: baseTitre,
+          poster,
+          backdrop,
+          descr,
+          trailer: typeof r.trailer === 'string' && r.trailer.trim() ? r.trailer.trim() : null,
+          genre,
+          annee,
+          langue,
+          qualite,
+          tmdbId,
+          item_type: 'serie',
+          source: 'series',
+        });
+
+        items.push({
+          id: idStr,
+          titre: titreFull,
+          poster,
+          qualite,
+          langue,
+          item_type: 'serie',
+          saison,
+          genre,
+          annee,
+          tmdbId,
+          dernier_episode: Number.isFinite(dernierEpNum) && dernierEpNum >= 0 ? dernierEpNum : null,
+          total_episodes: Number.isFinite(totalEpNum) && totalEpNum >= 0 ? totalEpNum : null,
+        });
+      }
+
+      if (items.length > 0) {
+        return setCached(cacheKey, { items, live: true }, 90_000, 450_000);
+      }
+    } catch {
+      // Fallback to stale cache when upstream is temporarily unreachable
+    }
+
+    const stale = getStaleCached<{ items: LastSeriesItem[]; live: boolean }>(cacheKey);
+    return stale ?? { items: [], live: false };
   });
 }
 
@@ -3052,24 +3181,28 @@ export async function createApiApp(): Promise<express.Express> {
     const auth = await resolveAuth(req);
 
     const getHomeBase = async () => {
+      const origin = await getOrigin();
+      const homeBaseKey = `home:base:v4:${origin}`;
       const cachedBase = getCached<{
         upstreamStatus: 'live' | 'fallback';
         slider: Slide[];
         latest: Item[];
+        lastSeries: LastSeriesItem[];
         week: RankingEntry[];
-      }>('home:base:v1');
+      }>(homeBaseKey);
       if (cachedBase) return cachedBase;
 
-      return coalesceUpstream('home:base:v1', async () => {
+      return coalesceUpstream(homeBaseKey, async () => {
         const recheck = getCached<{
           upstreamStatus: 'live' | 'fallback';
           slider: Slide[];
           latest: Item[];
+          lastSeries: LastSeriesItem[];
           week: RankingEntry[];
-        }>('home:base:v1');
+        }>(homeBaseKey);
         if (recheck) return recheck;
 
-        const [sliderRes, catRes, week7] = await Promise.all([
+        const [sliderRes, catRes, lastSeriesRes, week7] = await Promise.all([
           fetchUpstreamSlider(),
           fetchUpstreamCatalogue({
             q: '',
@@ -3080,6 +3213,7 @@ export async function createApiApp(): Promise<express.Express> {
             sort: 'recent',
             page: 1,
           }),
+          fetchUpstreamLastSeries(),
           isSupabaseEnabled() ? sbGetRankings(null, 7) : Promise.resolve(computeLocalRankings(7)),
         ]);
 
@@ -3148,14 +3282,17 @@ export async function createApiApp(): Promise<express.Express> {
         }
 
         const basePayload = {
-          upstreamStatus: (sliderRes.live || catRes.upstreamStatus === 'live' ? 'live' : 'fallback') as
-            | 'live'
-            | 'fallback',
+          upstreamStatus: (
+            sliderRes.live || catRes.upstreamStatus === 'live' || lastSeriesRes.live
+              ? 'live'
+              : 'fallback'
+          ) as 'live' | 'fallback',
           slider: sliderRes.items,
           latest: catRes.items.slice(0, 12),
+          lastSeries: lastSeriesRes.items.slice(0, 18),
           week: topWeek.slice(0, 6),
         };
-        return setCached('home:base:v1', basePayload, 30_000, 180_000);
+        return setCached(homeBaseKey, basePayload, 30_000, 180_000);
       });
     };
 
@@ -3265,6 +3402,7 @@ export async function createApiApp(): Promise<express.Express> {
       upstreamStatus: base.upstreamStatus,
       slider: base.slider,
       latest: base.latest,
+      lastSeries: base.lastSeries,
       forYou,
       continueWatching,
       friendsActivity,
@@ -4108,6 +4246,23 @@ export async function createApiApp(): Promise<express.Express> {
       };
     };
 
+    const mergeFavoriteItems = (primary: Item[], secondary: Item[]): Item[] => {
+      const seen = new Set<string>();
+      const out: Item[] = [];
+      for (const fav of [...primary, ...secondary]) {
+        if (!fav || fav.id === undefined || fav.id === null) continue;
+        const normId = String(fav.id).trim();
+        const normType = String(fav.item_type || '').trim();
+        if (!normId || !normType) continue;
+        const key = `${normType}:${normId}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          out.push({ ...fav, id: normId });
+        }
+      }
+      return out;
+    };
+
     if (isSupabaseEnabled() && auth.sbClient) {
       const sbData = await sbGetMemberData(auth.sbClient, auth.user);
       const enrichedFriends = sbData.friends.map((f) => ({
@@ -4115,8 +4270,10 @@ export async function createApiApp(): Promise<express.Express> {
         avatar: resolveUserAvatar(f.id, f.avatar),
         isPro: isUserPro(f.id),
       }));
+      const mergedFavorites = mergeFavoriteItems(sbData.favorites, db.favorites[auth.user.id] ?? []);
       res.json({
         ...sbData,
+        favorites: mergedFavorites,
         profile: auth.user,
         friends: enrichedFriends,
         ...mapFriendRequests(auth.user.id),
@@ -4126,7 +4283,7 @@ export async function createApiApp(): Promise<express.Express> {
       return;
     }
 
-    const favorites = db.favorites[auth.user.id] ?? [];
+    const favorites = mergeFavoriteItems(db.favorites[auth.user.id] ?? [], []);
     const history = dedupTop6History(db.watchEvents.filter((w) => w.userId === auth.user.id));
 
     const friendLinks = db.friendships.filter((f) => f.userId === auth.user.id);
@@ -4165,19 +4322,52 @@ export async function createApiApp(): Promise<express.Express> {
       res.status(401).json({ error: 'Connexion requise' });
       return;
     }
-    const item = req.body?.item as Item | undefined;
+    const rawItem = req.body?.item as Item | undefined;
+    const normalizedId =
+      rawItem?.id !== undefined && rawItem?.id !== null ? String(rawItem.id).trim() : '';
+    const normalizedTitle = typeof rawItem?.titre === 'string' ? rawItem.titre.trim() : '';
+    const normalizedType = String(rawItem?.item_type || '').trim();
     if (
-      !item ||
-      !item.id ||
-      !item.titre ||
-      !/^(film|serie|anime|pinoy|custom:[a-z0-9-]+)$/.test(String(item.item_type || ''))
+      !rawItem ||
+      !normalizedId ||
+      !normalizedTitle ||
+      !/^(film|serie|anime|pinoy|custom:[a-z0-9-]+)$/.test(normalizedType)
     ) {
       res.status(400).json({ error: 'Titre invalide' });
       return;
     }
 
+    const item: Item = {
+      ...rawItem,
+      id: normalizedId,
+      titre: normalizedTitle,
+      item_type: normalizedType as Item['item_type'],
+    };
+
+    const mergeFavoritesList = (primary: Item[], secondary: Item[]): Item[] => {
+      const seen = new Set<string>();
+      const out: Item[] = [];
+      for (const fav of [...primary, ...secondary]) {
+        if (!fav || fav.id === undefined || fav.id === null) continue;
+        const normId = String(fav.id).trim();
+        const normType = String(fav.item_type || '').trim();
+        if (!normId || !normType) continue;
+        const key = `${normType}:${normId}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          out.push({ ...fav, id: normId });
+        }
+      }
+      return out;
+    };
+
     if (isSupabaseEnabled() && auth.sbClient) {
-      const { data: existing } = await auth.sbClient
+      const localList = db.favorites[auth.user.id] ?? [];
+      const existsLocally = localList.some(
+        (f) => String(f.id).trim() === item.id && f.item_type === item.item_type
+      );
+
+      const { data: existing, error: selectErr } = await auth.sbClient
         .from('favorites')
         .select('item_id')
         .eq('user_id', auth.user.id)
@@ -4185,32 +4375,56 @@ export async function createApiApp(): Promise<express.Express> {
         .eq('item_id', item.id)
         .maybeSingle();
 
-      if (existing) {
-        await auth.sbClient
-          .from('favorites')
-          .delete()
-          .eq('user_id', auth.user.id)
-          .eq('item_type', item.item_type)
-          .eq('item_id', item.id);
+      if ((!selectErr && existing) || existsLocally) {
+        if (!selectErr && existing) {
+          await auth.sbClient
+            .from('favorites')
+            .delete()
+            .eq('user_id', auth.user.id)
+            .eq('item_type', item.item_type)
+            .eq('item_id', item.id);
+        }
+        if (existsLocally) {
+          db.favorites[auth.user.id] = localList.filter(
+            (f) => !(String(f.id).trim() === item.id && f.item_type === item.item_type)
+          );
+          saveDb(db);
+        }
         invalidateSbMemberCache(auth.user.id);
-        res.json({ saved: false, favorites: [] });
+        const sbData = await sbGetMemberData(auth.sbClient, auth.user);
+        const merged = mergeFavoritesList(sbData.favorites, db.favorites[auth.user.id] ?? []);
+        res.json({ saved: false, favorites: merged });
         return;
       }
-      await auth.sbClient.from('favorites').insert({
+
+      const { error: insertErr } = await auth.sbClient.from('favorites').insert({
         user_id: auth.user.id,
         item_type: item.item_type,
         item_id: item.id,
         item,
       });
+      if (insertErr) {
+        db.favorites[auth.user.id] = [
+          item,
+          ...localList.filter(
+            (f) => !(String(f.id).trim() === item.id && f.item_type === item.item_type)
+          ),
+        ];
+        saveDb(db);
+      }
       invalidateSbMemberCache(auth.user.id);
-      res.json({ saved: true, favorites: [] });
+      const sbData = await sbGetMemberData(auth.sbClient, auth.user);
+      const merged = mergeFavoritesList(sbData.favorites, db.favorites[auth.user.id] ?? []);
+      res.json({ saved: true, favorites: merged });
       return;
     }
 
     const current = db.favorites[auth.user.id] ?? [];
-    const exists = current.some((f) => f.id === item.id && f.item_type === item.item_type);
+    const exists = current.some(
+      (f) => String(f.id).trim() === item.id && f.item_type === item.item_type
+    );
     db.favorites[auth.user.id] = exists
-      ? current.filter((f) => !(f.id === item.id && f.item_type === item.item_type))
+      ? current.filter((f) => !(String(f.id).trim() === item.id && f.item_type === item.item_type))
       : [item, ...current];
     saveDb(db);
     res.json({ saved: !exists, favorites: db.favorites[auth.user.id] });

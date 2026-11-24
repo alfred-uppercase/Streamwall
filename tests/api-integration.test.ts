@@ -1110,29 +1110,65 @@ test('Top 6 week, 6 recent watches, Pinoy/custom favorites, Admin activeStats, E
   };
   assert.equal(authHomeJson.continueWatching.length, 6);
 
-  // 3. Favorites toggle supports pinoy & custom:<slug> and rejects invalid item_type
+  // 3. Favorites toggle supports pinoy (with string slug id & rating) & custom:<slug>, persists to /api/member, toggles off, and rejects invalid item_type
+  const pinoyFavPayload = {
+    id: 'laplap-2026',
+    titre: 'Laplap',
+    poster: 'https://streamwall.behoririka.mg/uploads/laplap.jpg',
+    qualite: '★ 9.0',
+    langue: 'PH',
+    item_type: 'pinoy',
+    saison: null,
+    genre: 'Drame',
+    annee: 2026,
+  };
   const favPinoyRes = await fetch(`${baseUrl}/api/favorites/toggle`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${memberAuth.token}`,
     },
-    body: JSON.stringify({
-      item: {
-        id: 15,
-        slug: 'milf-2026',
-        titre: 'Milf 2026',
-        item_type: 'pinoy',
-      },
-    }),
+    body: JSON.stringify({ item: pinoyFavPayload }),
   });
   assert.equal(favPinoyRes.status, 200);
   const favPinoyJson = (await favPinoyRes.json()) as {
     saved: boolean;
-    favorites: Array<{ item_type: string }>;
+    favorites: Array<{ id: string; item_type: string }>;
   };
   assert.equal(favPinoyJson.saved, true);
-  assert.ok(favPinoyJson.favorites.some((f) => f.item_type === 'pinoy'));
+  assert.ok(
+    favPinoyJson.favorites.some((f) => f.item_type === 'pinoy' && f.id === 'laplap-2026')
+  );
+
+  const memberAfterPinoyFav = await fetch(`${baseUrl}/api/member`, {
+    headers: { Authorization: `Bearer ${memberAuth.token}` },
+  });
+  assert.equal(memberAfterPinoyFav.status, 200);
+  const memberPinoyJson = (await memberAfterPinoyFav.json()) as {
+    favorites: Array<{ id: string; item_type: string }>;
+  };
+  assert.ok(
+    memberPinoyJson.favorites.some((f) => f.item_type === 'pinoy' && f.id === 'laplap-2026')
+  );
+
+  const unfavPinoyRes = await fetch(`${baseUrl}/api/favorites/toggle`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${memberAuth.token}`,
+    },
+    body: JSON.stringify({ item: pinoyFavPayload }),
+  });
+  assert.equal(unfavPinoyRes.status, 200);
+  const unfavPinoyJson = (await unfavPinoyRes.json()) as {
+    saved: boolean;
+    favorites: Array<{ id: string; item_type: string }>;
+  };
+  assert.equal(unfavPinoyJson.saved, false);
+  assert.equal(
+    unfavPinoyJson.favorites.some((f) => f.item_type === 'pinoy' && f.id === 'laplap-2026'),
+    false
+  );
 
   const favCustomRes = await fetch(`${baseUrl}/api/favorites/toggle`, {
     method: 'POST',
@@ -1300,6 +1336,98 @@ test('Top 6 week, 6 recent watches, Pinoy/custom favorites, Admin activeStats, E
   });
   assert.equal(restorePinoyRes.status, 200);
 });
+
+test('/api/home fetches /api/last_serie.php?short=asc, slices 36 items to 18, and maps titre_full, id, dernier_episode, total_episodes, langue', async () => {
+  const adminLogin = await fetch(`${baseUrl}/api/auth/demo-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: 'admin' }),
+  });
+  const adminAuth = (await adminLogin.json()) as { token: string };
+
+  const settingsRes = await fetch(`${baseUrl}/api/admin/settings`, {
+    headers: { Authorization: `Bearer ${adminAuth.token}` },
+  });
+  const settingsJson = (await settingsRes.json()) as { origin: string };
+  const originalOrigin = settingsJson.origin || 'https://streamwall.behoririka.mg';
+
+  const setOriginRes = await fetch(`${baseUrl}/api/admin/settings/origin`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({ origin: 'https://lastserie.example.com' }),
+  });
+  assert.equal(setOriginRes.status, 200);
+
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const target =
+      typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (target === 'https://lastserie.example.com/api/last_serie.php?short=asc') {
+      const mockItems = Array.from({ length: 36 }, (_, idx) => ({
+        id: idx === 0 ? 7499 : 8000 + idx,
+        titre: idx === 0 ? 'Sur le fil' : `Série Test ${idx + 1}`,
+        serie_id: idx === 0 ? 7499 : 8000 + idx,
+        titre_full: idx === 0 ? 'Sur le fil - Saison 1' : `Série Test ${idx + 1} - Saison 2`,
+        saison: idx === 0 ? 1 : 2,
+        dernier_episode: idx === 0 ? 12 : idx + 1,
+        total_episodes: idx === 0 ? 12 : 24,
+        poster: 'https://image.tmdb.org/t/p/w500/fFiDEccvC23OohMz84X11AeFRV8.jpg',
+        langue: idx % 2 === 0 ? 'VF' : 'VOSTFR',
+        qualite: 'HD',
+        genre: 'Drame',
+        annee: 2026,
+      }));
+      return new Response(
+        JSON.stringify({ status: 'success', page: 1, limit: 36, total: 36, count: 36, items: mockItems }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (target.startsWith('https://lastserie.example.com/api/')) {
+      return new Response(JSON.stringify({ items: [], data: [], pages: 1, total: 0 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return realFetch(input, init);
+  }) as typeof fetch;
+
+  try {
+    const homeRes = await realFetch(`${baseUrl}/api/home`);
+    assert.equal(homeRes.status, 200);
+    const homeJson = (await homeRes.json()) as {
+      lastSeries: Array<{
+        id: string;
+        titre: string;
+        item_type: string;
+        dernier_episode: number | null;
+        total_episodes: number | null;
+        langue: string | null;
+      }>;
+    };
+    assert.equal(homeJson.lastSeries.length, 18);
+    assert.equal(homeJson.lastSeries[0]?.id, '7499');
+    assert.equal(homeJson.lastSeries[0]?.titre, 'Sur le fil - Saison 1');
+    assert.equal(homeJson.lastSeries[0]?.item_type, 'serie');
+    assert.equal(homeJson.lastSeries[0]?.dernier_episode, 12);
+    assert.equal(homeJson.lastSeries[0]?.total_episodes, 12);
+    assert.equal(homeJson.lastSeries[0]?.langue, 'VF');
+    assert.equal(homeJson.lastSeries[1]?.langue, 'VOSTFR');
+  } finally {
+    globalThis.fetch = realFetch;
+    await realFetch(`${baseUrl}/api/admin/settings/origin`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminAuth.token}`,
+      },
+      body: JSON.stringify({ origin: originalOrigin }),
+    });
+  }
+});
+
 
 
 

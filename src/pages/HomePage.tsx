@@ -342,6 +342,52 @@ export function HomePage() {
 
         <CategoryStripSection />
 
+        {/* Dernières séries */}
+        {(homeQuery.isLoading || Boolean(data?.lastSeries?.length)) && (
+          <section className="mb-14">
+            <div className="mb-5 flex items-baseline justify-between gap-4">
+              <div>
+                <h2 className="font-display text-2xl font-bold text-foreground">
+                  Dernières séries
+                </h2>
+                <p className="mt-0.5 text-sm text-muted-foreground">
+                  Derniers épisodes
+                </p>
+              </div>
+              <Link
+                to="/catalogue?type=serie"
+                className="text-sm font-medium text-muted-foreground hover:text-primary whitespace-nowrap shrink-0"
+              >
+                Toutes les séries →
+              </Link>
+            </div>
+            {homeQuery.isLoading ? (
+              <PosterSkeletonGrid count={18} />
+            ) : (
+              <div className="grid grid-cols-3 gap-2.5 sm:gap-5 md:grid-cols-4 lg:grid-cols-6">
+                {data!.lastSeries.slice(0, 18).map((item) => {
+                  const epText =
+                    item.dernier_episode != null && item.total_episodes != null
+                      ? `Ép. ${item.dernier_episode}/${item.total_episodes}`
+                      : item.dernier_episode != null
+                        ? `Ép. ${item.dernier_episode}`
+                        : item.total_episodes != null
+                          ? `${item.total_episodes} ép.`
+                          : null;
+                  const metaText = [epText, item.langue].filter(Boolean).join(' · ');
+                  return (
+                    <PosterCard
+                      key={`ls-${item.id}-${item.saison ?? ''}-${item.dernier_episode ?? ''}`}
+                      item={item}
+                      subtitleOverride={metaText || undefined}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        )}
+
         {/* Uniquement pour toi */}
         {isMember && Boolean(data?.forYou.length) && (
           <section className="mb-14">

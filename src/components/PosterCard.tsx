@@ -19,7 +19,8 @@ export const FavoriteButton = memo(
     const favoritesSet = useFavoritesSet();
     const queryClient = useQueryClient();
 
-    const saved = favoritesSet.has(`${item.item_type}:${item.id}`);
+    const itemIdStr = String(item.id);
+    const saved = favoritesSet.has(`${item.item_type}:${itemIdStr}`);
 
     const mutation = useMutation({
       mutationFn: () => api.toggleFavorite(item),
@@ -28,13 +29,13 @@ export const FavoriteButton = memo(
         const previous = queryClient.getQueryData<MemberPayload>(['member']);
         if (previous) {
           const exists = previous.favorites.some(
-            (f) => f.id === item.id && f.item_type === item.item_type
+            (f) => String(f.id) === itemIdStr && f.item_type === item.item_type
           );
           queryClient.setQueryData<MemberPayload>(['member'], {
             ...previous,
             favorites: exists
               ? previous.favorites.filter(
-                  (f) => !(f.id === item.id && f.item_type === item.item_type)
+                  (f) => !(String(f.id) === itemIdStr && f.item_type === item.item_type)
                 )
               : [item, ...previous.favorites],
           });
@@ -42,6 +43,11 @@ export const FavoriteButton = memo(
         return { previous };
       },
       onSuccess: (res) => {
+        if (Array.isArray(res.favorites)) {
+          queryClient.setQueryData<MemberPayload>(['member'], (old) =>
+            old ? { ...old, favorites: res.favorites } : old
+          );
+        }
         toast.success(res.saved ? 'Ajouté à votre liste' : 'Retiré de votre liste');
       },
       onError: (_err, _vars, ctx) => {

@@ -468,6 +468,11 @@ export interface FriendRequestRecord {
   updatedAt: string;
 }
 
+export interface LastSeriesItem extends Item {
+  dernier_episode: number | null;
+  total_episodes: number | null;
+}
+
 export interface RankingEntry {
   item: Item;
   viewers: number;
@@ -478,6 +483,7 @@ export interface HomePayload {
   upstreamStatus: 'live' | 'fallback';
   slider: Slide[];
   latest: Item[];
+  lastSeries: LastSeriesItem[];
   forYou: Item[];
   continueWatching: WatchProgress[];
   friendsActivity: {
