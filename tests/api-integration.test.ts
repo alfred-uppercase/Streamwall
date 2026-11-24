@@ -830,6 +830,220 @@ test('Pinoy endpoints respond cleanly and admin Pinoy URL settings validate acce
   assert.equal(pinoyReportJson.report.itemType, 'pinoy');
 });
 
+test('Auth login issues >= 35-day persistent session cookie and Analytics tracks today + active users', async () => {
+  const loginRes = await fetch(`${baseUrl}/api/auth/demo-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: 'admin' }),
+  });
+  assert.equal(loginRes.status, 200);
+  const setCookie = loginRes.headers.get('set-cookie') || '';
+  assert.match(setCookie, /tapenaka_session=sws_/);
+  const maxAgeMatch = setCookie.match(/Max-Age=(\d+)/i);
+  assert.ok(maxAgeMatch && Number(maxAgeMatch[1]) >= 30 * 86_400);
+
+  const adminAuth = (await loginRes.json()) as { token: string };
+  assert.ok(adminAuth.token.startsWith('sws_'));
+
+  // Collect real browser analytics hit (avoid blocked test/bot User-Agent)
+  const browserUa =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+  const collectRes = await fetch(`${baseUrl}/api/analytics/collect`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': browserUa,
+    },
+    body: JSON.stringify({
+      visitorId: 'integ-vis-1',
+      sessionId: 'integ-sess-1',
+      path: '/catalogue',
+      title: 'Catalogue',
+      screenResolution: '1920×1080',
+    }),
+  });
+  assert.equal(collectRes.status, 200);
+
+  const analyticsRes = await fetch(`${baseUrl}/api/admin/analytics?period=today`, {
+    headers: { Authorization: `Bearer ${adminAuth.token}` },
+  });
+  assert.equal(analyticsRes.status, 200);
+  const analyticsJson = (await analyticsRes.json()) as {
+    summary: {
+      sessions: number;
+      totalActiveUsers: number;
+      activeSessionsCount: number;
+      activeUsersToday: number;
+      activeNow: number;
+    };
+  };
+  assert.ok(analyticsJson.summary.sessions >= 1);
+  assert.ok(analyticsJson.summary.totalActiveUsers >= 1);
+  assert.ok(analyticsJson.summary.activeSessionsCount >= 1);
+});
+
+test('Navigation CMS & Custom API Modules enforce admin auth, block SSRF, and serve dynamic module endpoints', async () => {
+  const adminLogin = await fetch(`${baseUrl}/api/auth/demo-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: 'admin' }),
+  });
+  const adminAuth = (await adminLogin.json()) as { token: string };
+
+  const memberLogin = await fetch(`${baseUrl}/api/auth/demo-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: 'member' }),
+  });
+  const memberAuth = (await memberLogin.json()) as { token: string };
+
+  // Public navigation endpoint returns seeded items
+  const publicNavRes = await fetch(`${baseUrl}/api/site/navigation`);
+  assert.equal(publicNavRes.status, 200);
+  const publicNav = (await publicNavRes.json()) as { items: Array<{ path: string }> };
+  assert.ok(publicNav.items.some((i) => i.path === '/pinoy'));
+
+  // Non-admin cannot modify navigation or custom modules
+  const memberNavPut = await fetch(`${baseUrl}/api/admin/navigation`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${memberAuth.token}`,
+    },
+    body: JSON.stringify({ items: [] }),
+  });
+  assert.equal(memberNavPut.status, 403);
+
+  // SSRF blocked on custom module creation
+  const ssrfModuleRes = await fetch(`${baseUrl}/api/admin/custom-modules`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({
+      slug: 'asian',
+      name: 'Asian Movies',
+      endpoints: { apiUrl: 'http://127.0.0.1/api.php' },
+    }),
+  });
+  assert.equal(ssrfModuleRes.status, 400);
+
+  // Create valid custom module with menu sync
+  const createModuleRes = await fetch(`${baseUrl}/api/admin/custom-modules`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({
+      slug: 'asian',
+      name: 'Asian Movies',
+      enabled: true,
+      endpoints: {
+        apiUrl: 'https://example.com/asian_api.php',
+        mediaBaseUrl: 'https://cdn.example.com/',
+      },
+      player: {
+        playerUrlTemplate: 'https://cdn.example.com/embed/{id}',
+        useSameOriginProxy: true,
+        downloadProOnly: true,
+        downloadRestrictionMessage: 'Pro requis pour télécharger.',
+      },
+      syncMenu: true,
+      showDesktop: true,
+      showMobile: true,
+      showFooter: true,
+    }),
+  });
+  assert.equal(createModuleRes.status, 200);
+  const createdJson = (await createModuleRes.json()) as {
+    module: { slug: string };
+    navigation: { items: Array<{ path: string }> };
+  };
+  assert.equal(createdJson.module.slug, 'asian');
+  assert.ok(createdJson.navigation.items.some((i) => i.path === '/c/asian'));
+
+  // Mock upstream JSON API to verify /api/custom/asian/list, detail, and Pro-gating
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const target =
+      typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (target.startsWith('https://example.com/asian_api.php')) {
+      return new Response(
+        JSON.stringify({
+          status: 'success',
+          page: 1,
+          total: 1,
+          total_pages: 1,
+          items: [
+            {
+              id: 77,
+              slug: 'tokyo-drift',
+              titre: 'Tokyo Drift Custom',
+              annee: 2025,
+              pays: 'JP',
+              poster: 'uploads/tokyo.jpg',
+              galerie: ['uploads/tokyo-banner.jpg'],
+            },
+          ],
+          film: {
+            id: 77,
+            slug: 'tokyo-drift',
+            titre: 'Tokyo Drift Custom',
+            annee: 2025,
+            pays: 'JP',
+            poster: 'uploads/tokyo.jpg',
+            galerie: ['uploads/tokyo-banner.jpg'],
+          },
+          players: {
+            embed: [{ provider: 'Voe', url: 'https://voe.sx/e/abc123' }],
+            download: [],
+          },
+          similar: [],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return realFetch(input, init);
+  }) as typeof fetch;
+
+  try {
+    const customListRes = await realFetch(`${baseUrl}/api/custom/asian/list`);
+    assert.equal(customListRes.status, 200);
+    const customList = (await customListRes.json()) as {
+      items: Array<{ routeKey: string; titre: string }>;
+    };
+    assert.equal(customList.items[0]?.titre, 'Tokyo Drift Custom');
+
+    const customDetailGuest = await realFetch(`${baseUrl}/api/custom/asian/detail/tokyo-drift`);
+    assert.equal(customDetailGuest.status, 200);
+    const guestJson = (await customDetailGuest.json()) as {
+      downloadLocked?: boolean;
+      downloadMessage?: string;
+      players: { embed: Array<{ url: string }>; download: unknown[] };
+    };
+    assert.equal(guestJson.downloadLocked, true);
+    assert.equal(guestJson.downloadMessage, 'Pro requis pour télécharger.');
+    assert.equal(guestJson.players.download.length, 0);
+    assert.equal(guestJson.players.embed[0]?.url, '/api/public/watch/custom/asian/77/tokyo-drift');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  // Delete custom module and verify navigation sync removes /c/asian
+  const delRes = await fetch(`${baseUrl}/api/admin/custom-modules/asian`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${adminAuth.token}` },
+  });
+  assert.equal(delRes.status, 200);
+  const navAfterDel = (await (await fetch(`${baseUrl}/api/site/navigation`)).json()) as {
+    items: Array<{ path: string }>;
+  };
+  assert.equal(navAfterDel.items.some((i) => i.path === '/c/asian'), false);
+});
+
+
 
 
 

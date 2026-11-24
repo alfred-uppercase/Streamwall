@@ -604,4 +604,195 @@ test('pinoyService validates URLs safely, sanitizes media/player URLs, and handl
   assert.equal(detail.film, null);
 });
 
+test('sessionStore persists 35-day sliding sessions, counts active users, and revokes on ban/logout', async () => {
+  const {
+    SESSION_TTL_MS,
+    countActivePersistentSessionUsers,
+    createPersistentSession,
+    deletePersistentSession,
+    getPersistentSession,
+    revokeAllSessionsForUser,
+  } = await import('../src/server/sessionStore.ts');
+
+  assert.ok(SESSION_TTL_MS >= 30 * 86_400_000);
+
+  const created = createPersistentSession({
+    userId: 'usr_long_1',
+    provider: 'local',
+    userSnapshot: {
+      id: 'usr_long_1',
+      email: 'long@example.com',
+      username: 'longuser',
+      avatar: null,
+      role: 'member',
+      createdAt: new Date().toISOString(),
+    },
+  });
+  assert.ok(created.token.startsWith('sws_'));
+  assert.ok(created.expiresAt - Date.now() > 34 * 86_400_000);
+
+  const fetched = getPersistentSession(created.token);
+  assert.ok(fetched);
+  assert.equal(fetched.userId, 'usr_long_1');
+  assert.ok(countActivePersistentSessionUsers() >= 1);
+
+  // Revoke all sessions for user
+  createPersistentSession({
+    userId: 'usr_long_1',
+    provider: 'local',
+  });
+  revokeAllSessionsForUser('usr_long_1');
+  assert.equal(getPersistentSession(created.token), null);
+
+  const temp = createPersistentSession({ userId: 'usr_long_2', provider: 'local' });
+  deletePersistentSession(temp.token);
+  assert.equal(getPersistentSession(temp.token), null);
+});
+
+test('analyticsStore keeps monotonic daily totals across many sessions, filters bots, and reports active users', async () => {
+  const {
+    computeAnalyticsDashboard,
+    flushAnalyticsNow,
+    recordAnalyticsCollect,
+    recordAnalyticsPing,
+    setActiveMembersCountProvider,
+    touchActiveUserPresence,
+  } = await import('../src/server/analyticsStore.ts');
+
+  setActiveMembersCountProvider(() => 18);
+
+  const browserReq = {
+    headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0 Safari/537.36' },
+    ip: '198.51.100.20',
+  } as unknown as import('express').Request;
+
+  const botReq = {
+    headers: { 'user-agent': 'python-requests/2.31.0' },
+    ip: '198.51.100.99',
+  } as unknown as import('express').Request;
+
+  // Bot requests must be ignored completely
+  recordAnalyticsCollect({
+    visitorId: 'bot-visitor',
+    sessionId: 'bot-sess',
+    path: '/',
+    title: 'Accueil',
+    req: botReq,
+  });
+
+  // Record 250 distinct sessions today and verify daily counter stays monotonic
+  for (let i = 0; i < 250; i++) {
+    recordAnalyticsCollect({
+      visitorId: `vis-${i}`,
+      sessionId: `sess-${i}`,
+      path: i % 2 === 0 ? '/' : '/catalogue',
+      title: i % 2 === 0 ? 'Accueil' : 'Catalogue',
+      timezone: 'Indian/Antananarivo',
+      req: browserReq,
+    });
+  }
+  recordAnalyticsPing({ sessionId: 'sess-0', path: '/', deltaSec: 25 });
+  touchActiveUserPresence({ sessionId: 'user:usr_active_1', path: '/catalogue' });
+  flushAnalyticsNow();
+
+  const today = computeAnalyticsDashboard('today');
+  assert.ok(today.summary.sessions >= 250);
+  assert.ok(today.summary.uniqueVisitors >= 250);
+  assert.ok(today.summary.totalActiveUsers >= 18);
+  assert.ok(today.summary.activeNow >= 1);
+  assert.equal(today.summary.activeUsersToday >= 250, true);
+});
+
+test('customModulesStore & customApiService safely navigate JSON paths, block SSRF/prototype keys, and manage menus', async () => {
+  const {
+    createDefaultNavigationConfig,
+    deleteCustomModule,
+    getSiteNavigation,
+    resetSiteNavigation,
+    updateSiteNavigation,
+    upsertCustomModule,
+    validateCustomModuleSlug,
+  } = await import('../src/server/customModulesStore.ts');
+  const { getByPath, normalizeCustomItem, resolveCustomPlayerUrl } = await import(
+    '../src/server/customApiService.ts'
+  );
+
+  // Reserved slugs rejected
+  assert.equal(validateCustomModuleSlug('pinoy').ok, false);
+  assert.equal(validateCustomModuleSlug('admin').ok, false);
+  assert.equal(validateCustomModuleSlug('kdrama').ok, true);
+
+  // Navigation defaults & CRUD
+  const defNav = createDefaultNavigationConfig();
+  assert.ok(defNav.items.some((i) => i.path === '/pinoy'));
+  const navUpdate = updateSiteNavigation({
+    items: [
+      ...defNav.items,
+      {
+        id: 'nav_custom_test',
+        label: 'Test Link',
+        path: '/catalogue',
+        icon: 'star',
+        exact: false,
+        enabled: true,
+        desktop: true,
+        mobile: true,
+        footer: false,
+        order: 95,
+        authRule: 'all',
+      },
+    ],
+  });
+  assert.equal(navUpdate.ok, true);
+  assert.ok(getSiteNavigation().items.some((i) => i.id === 'nav_custom_test'));
+  resetSiteNavigation();
+  assert.equal(getSiteNavigation().items.some((i) => i.id === 'nav_custom_test'), false);
+
+  // SSRF URL rejected in custom module endpoints
+  const ssrfAttempt = upsertCustomModule({
+    slug: 'kdrama',
+    name: 'K-Drama',
+    endpoints: { apiUrl: 'http://127.0.0.1/api.php' },
+  });
+  assert.equal(ssrfAttempt.ok, false);
+
+  // Valid module saved & synced to navigation
+  const created = upsertCustomModule(
+    {
+      slug: 'kdrama',
+      name: 'K-Drama',
+      endpoints: {
+        apiUrl: 'https://example.com/kdrama.php',
+        mediaBaseUrl: 'https://cdn.example.com/',
+      },
+      player: {
+        playerUrlTemplate: 'https://cdn.example.com/watch/{id}',
+      },
+    },
+    { syncMenu: true, showDesktop: true, showMobile: true, showFooter: true }
+  );
+  assert.equal(created.ok, true);
+  assert.ok(getSiteNavigation().items.some((i) => i.path === '/c/kdrama'));
+
+  // Prototype-pollution-safe getByPath & normalization
+  const sampleObj = { nested: { items: [{ id: 42, slug: 'love-song', titre: 'Love Song', poster: 'uploads/p.jpg' }] } };
+  assert.equal(getByPath(sampleObj, 'nested.items.0.titre'), 'Love Song');
+  assert.equal(getByPath(sampleObj, '__proto__.polluted'), undefined);
+  assert.equal(getByPath(sampleObj, 'constructor.name'), undefined);
+
+  if (created.ok) {
+    const item = normalizeCustomItem(sampleObj.nested.items[0], created.module);
+    assert.ok(item);
+    assert.equal(item.poster, 'https://cdn.example.com/uploads/p.jpg');
+    assert.equal(
+      resolveCustomPlayerUrl(created.module.player.playerUrlTemplate, item),
+      'https://cdn.example.com/watch/42'
+    );
+  }
+
+  assert.equal(deleteCustomModule('kdrama'), true);
+  assert.equal(getSiteNavigation().items.some((i) => i.path === '/c/kdrama'), false);
+});
+
+
 
