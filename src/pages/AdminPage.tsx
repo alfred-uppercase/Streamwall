@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   CreditCard,
   Database,
+  Download,
   Flag,
   Globe,
   Layers,
@@ -32,8 +33,10 @@ import {
 } from '../shared/types';
 import type {
   ApiHealthReport,
+  FilmDownloadItem,
   PlayerKey,
   PlayerTemplates,
+  SubscriptionPlan,
 } from '../shared/types';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle, useSiteConfig } from '../lib/siteConfig';
@@ -171,6 +174,20 @@ export function AdminPage() {
     'Le téléchargement direct est réservé aux membres Pro et aux administrateurs.'
   );
   const pinoyInitRef = useRef(false);
+  const [filmDlUrlInput, setFilmDlUrlInput] = useState('https://streamwall.behoririka.mg/api/api_f.php');
+  const [filmDlKeyInput, setFilmDlKeyInput] = useState('');
+  const [filmDlMessageInput, setFilmDlMessageInput] = useState(
+    'Le téléchargement direct est réservé aux membres Pro et aux administrateurs.'
+  );
+  const [filmDlTestIdInput, setFilmDlTestIdInput] = useState('24433');
+  const [filmDlTestReport, setFilmDlTestReport] = useState<{
+    ok: boolean;
+    statusCode: number;
+    count: number;
+    sample: FilmDownloadItem | null;
+    message: string;
+  } | null>(null);
+  const filmDlInitRef = useRef(false);
   const [healthReport, setHealthReport] = useState<ApiHealthReport | null>(null);
   const [playerEdits, setPlayerEdits] = useState<Partial<PlayerTemplates>>({});
 
@@ -214,6 +231,16 @@ export function AdminPage() {
         'Le téléchargement direct est réservé aux membres Pro et aux administrateurs.'
     );
   }, [settingsQuery.data]);
+
+  useEffect(() => {
+    if (!settingsQuery.data?.filmDownload || filmDlInitRef.current) return;
+    filmDlInitRef.current = true;
+    setFilmDlUrlInput(settingsQuery.data.filmDownload.apiUrl ?? '');
+    setFilmDlMessageInput(
+      settingsQuery.data.filmDownload.message ??
+        'Le téléchargement direct est réservé aux membres Pro et aux administrateurs.'
+    );
+  }, [settingsQuery.data?.filmDownload]);
 
   const saveSiteConfigMutation = useMutation({
     mutationFn: (payload: {
@@ -283,6 +310,64 @@ export function AdminPage() {
       toast.success('Configuration Pinoy enregistrée');
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : 'Configuration Pinoy invalide'),
+  });
+
+  const saveFilmDownloadMutation = useMutation({
+    mutationFn: (payload: {
+      apiUrl?: string;
+      apiKey?: string;
+      clearApiKey?: boolean;
+      message?: string;
+    }) => api.adminSaveFilmDownload(payload),
+    onSuccess: (res) => {
+      setFilmDlUrlInput(res.filmDownload.apiUrl);
+      setFilmDlMessageInput(res.filmDownload.message);
+      setFilmDlKeyInput('');
+      void queryClient.invalidateQueries({ queryKey: ['admin-settings'] });
+      void queryClient.invalidateQueries({ queryKey: ['details'] });
+      toast.success('Configuration téléchargement film enregistrée');
+    },
+    onError: (err) =>
+      toast.error(err instanceof Error ? err.message : 'Configuration téléchargement invalide'),
+  });
+
+  const testFilmDownloadMutation = useMutation({
+    mutationFn: (payload: { apiUrl?: string; apiKey?: string; filmId?: number }) =>
+      api.adminTestFilmDownload(payload),
+    onSuccess: (report) => setFilmDlTestReport(report),
+    onError: (err) =>
+      toast.error(err instanceof Error ? err.message : "Échec du test de l'API téléchargement"),
+  });
+
+  const togglePlanDownloadsMutation = useMutation({
+    mutationFn: ({ plan, enabled }: { plan: SubscriptionPlan; enabled: boolean }) =>
+      api.adminSavePlan({
+        id: plan.id,
+        tier: plan.tier,
+        name: plan.name,
+        description: plan.description,
+        price: plan.price,
+        currency: plan.currency,
+        billingCycle: plan.billingCycle,
+        durationDays: plan.durationDays,
+        autoRenew: plan.autoRenew,
+        active: plan.active,
+        features: plan.features,
+        players: plan.players,
+        filmDownloadsEnabled: enabled,
+      }),
+    onSuccess: (res) => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-billing'] });
+      void queryClient.invalidateQueries({ queryKey: ['billing-plans'] });
+      void queryClient.invalidateQueries({ queryKey: ['details'] });
+      toast.success(
+        `Téléchargement films ${
+          res.plan.filmDownloadsEnabled ? 'activé' : 'désactivé'
+        } pour « ${res.plan.name} ».`
+      );
+    },
+    onError: (err) =>
+      toast.error(err instanceof Error ? err.message : 'Mise à jour de l’offre impossible'),
   });
 
   const healthMutation = useMutation({
@@ -860,6 +945,223 @@ export function AdminPage() {
                   {savePinoyApiMutation.isPending ? 'Enregistrement…' : 'Enregistrer l’API Pinoy'}
                 </button>
               </div>
+            </form>
+          </section>
+
+          <section className="rounded-xl border border-border bg-card p-6">
+            <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="mb-1 flex items-center gap-2 font-display text-xl font-semibold text-foreground">
+                  <Download className="size-5 text-primary" />
+                  <span>Téléchargement Films (api_f.php)</span>
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  Affiche les liens de téléchargement direct sur la fiche détail des films selon les offres autorisées (Gratuit / Pro) et pour les administrateurs. La clé Bearer reste strictement côté serveur.
+                </p>
+              </div>
+              <span
+                className={`text-xs font-semibold ${
+                  settingsQuery.data?.filmDownload?.apiKeyConfigured
+                    ? 'text-emerald-500'
+                    : 'text-amber-500'
+                }`}
+              >
+                {settingsQuery.data?.filmDownload?.apiKeyConfigured
+                  ? `Clé configurée (${settingsQuery.data.filmDownload.apiKeyMask})`
+                  : 'Clé API manquante'}
+              </span>
+            </div>
+
+            {availablePlans.length > 0 && (
+              <div className="mb-5 rounded-lg border border-border bg-background/60 p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-foreground">
+                      Accès lié aux offres
+                    </h3>
+                    <p className="text-xs text-muted-foreground">
+                      Choisissez quelles offres peuvent voir et débloquer les téléchargements (les administrateurs y ont toujours accès).
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setTab('offers')}
+                    className="text-xs font-semibold text-primary hover:underline"
+                  >
+                    Configurer dans Offres & Paiements
+                  </button>
+                </div>
+                <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+                  {availablePlans.map((plan) => {
+                    const enabled =
+                      typeof plan.filmDownloadsEnabled === 'boolean'
+                        ? plan.filmDownloadsEnabled
+                        : plan.tier === 'pro';
+                    return (
+                      <label
+                        key={plan.id}
+                        className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-border bg-card px-3 py-2 text-xs transition-colors hover:bg-accent/50"
+                      >
+                        <div className="min-w-0">
+                          <span className="block truncate font-semibold text-foreground">
+                            {plan.name}
+                          </span>
+                          <span className="text-[11px] text-muted-foreground">
+                            {plan.tier === 'free' ? 'Simple utilisateur (Gratuit)' : 'Membre Pro'}
+                          </span>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={enabled}
+                          disabled={togglePlanDownloadsMutation.isPending}
+                          onChange={(e) =>
+                            togglePlanDownloadsMutation.mutate({
+                              plan,
+                              enabled: e.target.checked,
+                            })
+                          }
+                          className="size-4 shrink-0 accent-primary"
+                        />
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                saveFilmDownloadMutation.mutate({
+                  apiUrl: filmDlUrlInput.trim(),
+                  ...(filmDlKeyInput.trim() ? { apiKey: filmDlKeyInput.trim() } : {}),
+                  message: filmDlMessageInput.trim(),
+                });
+              }}
+              className="space-y-4"
+            >
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                  URL de l’API (POST JSON {'{ film_id }'})
+                </label>
+                <input
+                  type="url"
+                  value={filmDlUrlInput}
+                  onChange={(e) => setFilmDlUrlInput(e.target.value)}
+                  placeholder="https://streamwall.behoririka.mg/api/api_f.php"
+                  className="w-full rounded-lg border border-input bg-background px-3.5 py-2.5 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <label className="text-xs font-medium text-muted-foreground">
+                    Clé API Bearer (laisser vide pour conserver la clé enregistrée)
+                  </label>
+                  {settingsQuery.data?.filmDownload?.apiKeyConfigured && (
+                    <button
+                      type="button"
+                      disabled={saveFilmDownloadMutation.isPending}
+                      onClick={() =>
+                        saveFilmDownloadMutation.mutate({
+                          apiUrl: filmDlUrlInput.trim(),
+                          clearApiKey: true,
+                          message: filmDlMessageInput.trim(),
+                        })
+                      }
+                      className="text-xs font-medium text-destructive hover:underline disabled:opacity-50"
+                    >
+                      Supprimer la clé enregistrée
+                    </button>
+                  )}
+                </div>
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={filmDlKeyInput}
+                  onChange={(e) => setFilmDlKeyInput(e.target.value)}
+                  placeholder={
+                    settingsQuery.data?.filmDownload?.apiKeyConfigured
+                      ? `Clé active : ${settingsQuery.data.filmDownload.apiKeyMask}`
+                      : 'Saisir le token Bearer de token.php'
+                  }
+                  className="w-full rounded-lg border border-input bg-background px-3.5 py-2.5 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                  Message affiché aux invités & membres gratuits (section verrouillée Pro)
+                </label>
+                <textarea
+                  rows={2}
+                  maxLength={500}
+                  value={filmDlMessageInput}
+                  onChange={(e) => setFilmDlMessageInput(e.target.value)}
+                  placeholder="Le téléchargement direct est réservé aux membres Pro et aux administrateurs."
+                  className="w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background/60 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="text-xs font-medium text-muted-foreground">
+                    Tester avec film ID :
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={filmDlTestIdInput}
+                    onChange={(e) => setFilmDlTestIdInput(e.target.value)}
+                    className="w-28 rounded-lg border border-input bg-background px-2.5 py-1.5 font-mono text-xs text-foreground focus:border-primary focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    disabled={testFilmDownloadMutation.isPending}
+                    onClick={() => {
+                      const parsedId = Number(filmDlTestIdInput);
+                      testFilmDownloadMutation.mutate({
+                        apiUrl: filmDlUrlInput.trim(),
+                        ...(filmDlKeyInput.trim() ? { apiKey: filmDlKeyInput.trim() } : {}),
+                        filmId: Number.isInteger(parsedId) && parsedId >= 1 ? parsedId : 1,
+                      });
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-accent disabled:opacity-50"
+                  >
+                    <Activity className="size-3.5 text-primary" />
+                    <span>{testFilmDownloadMutation.isPending ? 'Test…' : 'Tester l’API'}</span>
+                  </button>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={saveFilmDownloadMutation.isPending}
+                  className="rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap shrink-0"
+                >
+                  {saveFilmDownloadMutation.isPending
+                    ? 'Enregistrement…'
+                    : 'Enregistrer téléchargement film'}
+                </button>
+              </div>
+
+              {filmDlTestReport && (
+                <div
+                  className={`rounded-lg border px-3.5 py-2.5 text-xs ${
+                    filmDlTestReport.ok
+                      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                      : 'border-destructive/40 bg-destructive/10 text-destructive'
+                  }`}
+                >
+                  <p className="font-semibold">{filmDlTestReport.message}</p>
+                  {filmDlTestReport.sample && (
+                    <p className="mt-1 truncate font-mono text-[11px] opacity-90">
+                      Exemple : {filmDlTestReport.sample.filename}
+                      {filmDlTestReport.sample.quality ? ` · ${filmDlTestReport.sample.quality}` : ''} —{' '}
+                      /linprotect/{filmDlTestReport.sample.protectToken.slice(0, 20)}…
+                    </p>
+                  )}
+                </div>
+              )}
             </form>
           </section>
 

@@ -336,6 +336,11 @@ export function PricingPage() {
                         <span className="font-medium text-foreground">
                           {isProPlan ? 'Lecteur Pro dédié' : 'Lecteur standard'}
                         </span>
+                        {(typeof plan.filmDownloadsEnabled === 'boolean'
+                          ? plan.filmDownloadsEnabled
+                          : isProPlan)
+                          ? ' · Téléchargement films inclus'
+                          : ''}
                         {plan.autoRenew && isProPlan ? ' · Renouvellement actif' : ''}
                       </p>
                     </div>

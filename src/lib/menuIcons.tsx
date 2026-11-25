@@ -3,6 +3,7 @@ import {
   Clapperboard,
   Compass,
   Crown,
+  ExternalLink,
   Film,
   Flame,
   Folder,
@@ -13,6 +14,7 @@ import {
   Lock,
   MessageSquare,
   Play,
+  Send,
   Shield,
   Sparkles,
   Star,
@@ -40,6 +42,8 @@ export const MENU_ICON_COMPONENTS: Record<MenuIconKey, LucideIcon> = {
   star: Star,
   'message-square': MessageSquare,
   lock: Lock,
+  send: Send,
+  'external-link': ExternalLink,
 };
 
 export const MENU_ICON_OPTIONS: { key: MenuIconKey; label: string }[] = [
@@ -53,7 +57,7 @@ export const MENU_ICON_OPTIONS: { key: MenuIconKey; label: string }[] = [
   { key: 'crown', label: 'Pro / Couronne' },
   { key: 'shield', label: 'Admin / Bouclier' },
   { key: 'user', label: 'Compte' },
-  { key: 'globe', label: 'Monde' },
+  { key: 'globe', label: 'Monde / Web' },
   { key: 'compass', label: 'Explorer' },
   { key: 'flame', label: 'Tendances' },
   { key: 'play', label: 'Lecture' },
@@ -61,6 +65,8 @@ export const MENU_ICON_OPTIONS: { key: MenuIconKey; label: string }[] = [
   { key: 'star', label: 'Favoris / Note' },
   { key: 'message-square', label: 'Demandes' },
   { key: 'lock', label: 'Confidentialité' },
+  { key: 'send', label: 'Telegram / Envoi' },
+  { key: 'external-link', label: 'Lien externe' },
 ];
 
 export const MENU_AUTH_RULE_LABELS: Record<MenuAuthRule, string> = {

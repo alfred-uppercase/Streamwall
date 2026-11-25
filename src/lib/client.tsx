@@ -27,6 +27,8 @@ import type {
   EmailTemplateConfig,
   EmailTemplateKey,
   ErrorLogListResponse,
+  FilmDownloadAdminConfig,
+  FilmDownloadItem,
   FriendRecord,
   FriendRequestRecord,
   HomePayload,
@@ -42,6 +44,9 @@ import type {
   PlayerTemplates,
   PopupConfig,
   PrivacyPageConfig,
+  ProtectedLinkChallenge,
+  ProtectedLinkInspectResponse,
+  ProtectedLinkUnlockResponse,
   PushDispatchResult,
   PushStats,
   SiteConfig,
@@ -275,6 +280,40 @@ export const api = {
   },
   details: (type: string, id: string) =>
     apiRequest<DetailResponse>(`/api/details/${encodeURIComponent(type)}/${encodeURIComponent(id)}`),
+  inspectProtectedLink: (token: string) =>
+    apiRequest<ProtectedLinkInspectResponse>(
+      `/api/linprotect/inspect?token=${encodeURIComponent(token)}`
+    ),
+  unlockProtectedLink: async (payload: {
+    token: string;
+    captchaToken: string;
+    captchaAnswer: string;
+    humanChecked: boolean;
+  }): Promise<ProtectedLinkUnlockResponse> => {
+    const authToken = getStoredToken();
+    const headers = new Headers({ 'Content-Type': 'application/json' });
+    if (authToken) headers.set('Authorization', `Bearer ${authToken}`);
+    const res = await fetch('/api/linprotect/unlock', {
+      method: 'POST',
+      headers,
+      credentials: 'include',
+      body: JSON.stringify(payload),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      challenge?: ProtectedLinkChallenge;
+    } & Partial<ProtectedLinkUnlockResponse>;
+    if (!res.ok) {
+      const err = new Error(data.error || `Erreur (${res.status})`) as Error & {
+        status?: number;
+        challenge?: ProtectedLinkChallenge;
+      };
+      err.status = res.status;
+      if (data.challenge) err.challenge = data.challenge;
+      throw err;
+    }
+    return data as ProtectedLinkUnlockResponse;
+  },
   openPlayer: (payload: { item: Item; tmdb: string | null; season: number; episode: number }) =>
     apiRequest<{ url: string; member: boolean; season: number; episode: number }>(
       '/api/player/open',
@@ -475,6 +514,7 @@ export const api = {
       pinoyMediaBaseUrl?: string;
       pinoyPlayerTemplate?: string;
       pinoyDownloadMessage?: string;
+      filmDownload?: FilmDownloadAdminConfig;
       smtp: AdminSmtpStatus;
       site: SiteConfig;
       supabaseServiceRoleConfigured?: boolean;
@@ -590,6 +630,27 @@ export const api = {
       body: JSON.stringify(
         typeof payload === 'string' ? { pinoyApiUrl: payload } : payload
       ),
+    }),
+  adminSaveFilmDownload: (payload: {
+    apiUrl?: string;
+    apiKey?: string;
+    clearApiKey?: boolean;
+    message?: string;
+  }) =>
+    apiRequest<{ filmDownload: FilmDownloadAdminConfig }>('/api/admin/settings/film-download', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  adminTestFilmDownload: (payload?: { apiUrl?: string; apiKey?: string; filmId?: number }) =>
+    apiRequest<{
+      ok: boolean;
+      statusCode: number;
+      count: number;
+      sample: FilmDownloadItem | null;
+      message: string;
+    }>('/api/admin/settings/film-download/test', {
+      method: 'POST',
+      body: JSON.stringify(payload ?? {}),
     }),
   adminNavigation: () => apiRequest<SiteNavigationConfig>('/api/admin/navigation'),
   adminSaveNavigation: (payload: Pick<SiteNavigationConfig, 'items'>) =>
@@ -768,6 +829,7 @@ export const api = {
     active: boolean;
     features: string[];
     players: { film: string; serie: string };
+    filmDownloadsEnabled?: boolean;
   }) =>
     apiRequest<{ plan: SubscriptionPlan }>('/api/admin/billing/plans', {
       method: 'POST',
@@ -951,7 +1013,7 @@ function FavoritesSetProvider({
     queryKey: ['member'],
     queryFn: () => api.member(),
     enabled: isMember,
-    staleTime: 60_000,
+    staleTime: 300_000,
   });
 
   const prevRef = useRef<{ sig: string; set: Set<string> }>({

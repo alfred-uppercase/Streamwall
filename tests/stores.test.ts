@@ -727,33 +727,56 @@ test('customModulesStore & customApiService safely navigate JSON paths, block SS
   assert.equal(validateCustomModuleSlug('pinoy').ok, true);
   assert.equal(validateCustomModuleSlug('kdrama').ok, true);
 
-  // Navigation defaults include both /pinoy and /communaute
+  // Navigation defaults omit /communaute, support external footer URLs (e.g. Telegram), and block unsafe protocols
   const defNav = createDefaultNavigationConfig();
   assert.ok(defNav.items.some((i) => i.path === '/pinoy'));
-  assert.ok(defNav.items.some((i) => i.id === 'nav_communaute' && i.path === '/communaute'));
+  assert.equal(defNav.items.some((i) => i.id === 'nav_communaute' || i.path === '/communaute'), false);
   const navUpdate = updateSiteNavigation({
     items: [
       ...defNav.items,
       {
-        id: 'nav_custom_test',
-        label: 'Test Link',
-        path: '/catalogue',
-        icon: 'star',
+        id: 'nav_telegram_footer',
+        label: 'Telegram',
+        path: 'https://t.me/streamwall_officiel',
+        icon: 'send',
         exact: false,
         enabled: true,
-        desktop: true,
-        mobile: true,
-        footer: false,
+        desktop: false,
+        mobile: false,
+        footer: true,
         order: 95,
         authRule: 'all',
       },
     ],
   });
   assert.equal(navUpdate.ok, true);
-  assert.ok(getSiteNavigation().items.some((i) => i.id === 'nav_custom_test'));
+  assert.ok(
+    getSiteNavigation().items.some(
+      (i) => i.id === 'nav_telegram_footer' && i.path === 'https://t.me/streamwall_officiel' && i.footer
+    )
+  );
+  const badProtoNav = updateSiteNavigation({
+    items: [
+      ...defNav.items,
+      {
+        id: 'nav_xss',
+        label: 'Bad',
+        path: 'javascript:alert(1)',
+        icon: 'globe',
+        exact: false,
+        enabled: true,
+        desktop: false,
+        mobile: false,
+        footer: true,
+        order: 99,
+        authRule: 'all',
+      },
+    ],
+  });
+  assert.equal(badProtoNav.ok, false);
   resetSiteNavigation();
-  assert.equal(getSiteNavigation().items.some((i) => i.id === 'nav_custom_test'), false);
-  assert.ok(getSiteNavigation().items.some((i) => i.path === '/communaute'));
+  assert.equal(getSiteNavigation().items.some((i) => i.id === 'nav_telegram_footer'), false);
+  assert.equal(getSiteNavigation().items.some((i) => i.path === '/communaute'), false);
 
   // Pinoy is pre-seeded inside Modules API and can be deleted & recreated
   const seededModules = listCustomModules(true);
@@ -894,6 +917,174 @@ test('mailer sanitizes colors and custom HTML templates against XSS', async () =
   assert.equal(reset.useCustomHtml, false);
 });
 
+test('filmDownloadsService & linkProtectService encrypt download URLs, omit raw URL/expiry, and verify tampering', async () => {
+  const {
+    clearFilmDownloadsCache,
+    DEFAULT_FILM_DOWNLOAD_MESSAGE,
+    fetchFilmDownloads,
+    maskFilmDownloadToken,
+    sanitizeFilmDownloadMessage,
+    validateFilmDownloadApiUrl,
+  } = await import('../src/server/filmDownloadsService.ts');
+  const { decryptProtectedLink, encryptProtectedLink } = await import(
+    '../src/server/linkProtectService.ts'
+  );
 
+  assert.equal(validateFilmDownloadApiUrl('').ok, true);
+  assert.equal(validateFilmDownloadApiUrl('https://streamwall.behoririka.mg/api/api_f.php').ok, true);
+  assert.equal(validateFilmDownloadApiUrl('http://127.0.0.1/api_f.php').ok, false);
+  assert.equal(validateFilmDownloadApiUrl('http://192.168.1.50/api_f.php').ok, false);
+  assert.equal(validateFilmDownloadApiUrl('ftp://example.com/api_f.php').ok, false);
+  assert.equal(validateFilmDownloadApiUrl('https://user:pass@example.com/api_f.php').ok, false);
 
+  assert.equal(maskFilmDownloadToken(''), '');
+  assert.equal(maskFilmDownloadToken('short'), '••••••••');
+  assert.equal(maskFilmDownloadToken('abcd12345678wxyz'), 'abcd••••wxyz');
 
+  assert.equal(sanitizeFilmDownloadMessage(''), DEFAULT_FILM_DOWNLOAD_MESSAGE);
+  assert.equal(
+    sanitizeFilmDownloadMessage('  Offre\x00 Pro requise  '),
+    'Offre Pro requise'
+  );
+
+  // linkProtectService encryption + tampering rejection + unsafe protocol rejection
+  assert.equal(
+    encryptProtectedLink({
+      url: 'javascript:alert(1)',
+      filename: 'Bad.exe',
+      quality: 'HD',
+      filmId: 1,
+    }),
+    null
+  );
+  const encSample = encryptProtectedLink({
+    url: 'https://cdn.example.com/secret-file.mp4',
+    filename: 'Secret.mp4',
+    quality: '1080p',
+    filmId: 99,
+  });
+  assert.ok(encSample);
+  assert.equal(encSample.includes('cdn.example.com'), false);
+  const decSample = decryptProtectedLink(encSample);
+  assert.equal(decSample.ok, true);
+  if (decSample.ok) {
+    assert.equal(decSample.data.url, 'https://cdn.example.com/secret-file.mp4');
+    assert.equal(decSample.data.filename, 'Secret.mp4');
+    assert.equal(decSample.data.quality, '1080p');
+  }
+  const tampered = `${encSample.slice(0, -4)}AAAA`;
+  assert.equal(decryptProtectedLink(tampered).ok, false);
+
+  clearFilmDownloadsCache();
+  const realFetch = globalThis.fetch;
+  let capturedAuth = '';
+  let capturedBody = '';
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const target =
+      typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (target === 'https://dl-unit.example.com/api/api_f.php') {
+      const headers = new Headers(init?.headers);
+      capturedAuth = headers.get('Authorization') ?? '';
+      capturedBody = String(init?.body ?? '');
+      return new Response(
+        JSON.stringify({
+          success: true,
+          film_id: 555,
+          count: 2,
+          downloads: [
+            {
+              id: 10,
+              url: 'https://cdn.example.com/movie-1080p.mkv',
+              filename: 'Movie.1080p.mkv',
+              quality: '1080p',
+              release_name: 'Movie.2026.FRENCH.1080p',
+              expires_at: 1893456000,
+            },
+            {
+              id: 11,
+              url: 'javascript:alert(1)',
+              filename: 'Bad.exe',
+              quality: 'HD',
+              release_name: null,
+              expires_at: null,
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return realFetch(input, init);
+  }) as typeof fetch;
+
+  try {
+    const items = await fetchFilmDownloads(555, {
+      apiUrl: 'https://dl-unit.example.com/api/api_f.php',
+      apiKey: 'unit-secret-token-1234',
+    });
+    assert.equal(capturedAuth, 'Bearer unit-secret-token-1234');
+    assert.equal(capturedBody, JSON.stringify({ film_id: 555 }));
+    assert.equal(items.length, 1);
+    assert.equal(items[0]?.id, 10);
+    assert.equal(items[0]?.filename, 'Movie.1080p.mkv');
+    assert.equal(items[0]?.quality, '1080p');
+    assert.ok(items[0]?.protectToken);
+    assert.equal('url' in (items[0] as unknown as Record<string, unknown>), false);
+    assert.equal('release_name' in (items[0] as unknown as Record<string, unknown>), false);
+    assert.equal('expires_at' in (items[0] as unknown as Record<string, unknown>), false);
+
+    const decrypted = decryptProtectedLink(items[0]!.protectToken);
+    assert.equal(decrypted.ok, true);
+    if (decrypted.ok) {
+      assert.equal(decrypted.data.url, 'https://cdn.example.com/movie-1080p.mkv');
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+    clearFilmDownloadsCache();
+  }
+});
+
+test('billingStore links film download access to SubscriptionPlan filmDownloadsEnabled setting', async () => {
+  const {
+    assignUserPlan,
+    canPlanAccessFilmDownloads,
+    listPlans,
+    upsertPlan,
+  } = await import('../src/server/billingStore.ts');
+
+  assert.equal(canPlanAccessFilmDownloads(null), false);
+
+  const plans = listPlans(true);
+  const freePlan = plans.find((p) => p.id === 'free' || p.tier === 'free');
+  const proPlan = plans.find((p) => p.tier === 'pro');
+  assert.ok(freePlan);
+  assert.ok(proPlan);
+  assert.equal(freePlan.filmDownloadsEnabled, false);
+  assert.equal(proPlan.filmDownloadsEnabled, true);
+
+  // Default free user cannot access downloads; Pro user can
+  assert.equal(canPlanAccessFilmDownloads('usr_dl_free_check'), false);
+  assignUserPlan({
+    userId: 'usr_dl_pro_check',
+    planId: proPlan.id,
+    durationDays: 30,
+    source: 'admin_manual',
+    replaceExisting: true,
+  });
+  assert.equal(canPlanAccessFilmDownloads('usr_dl_pro_check'), true);
+
+  // Admin enables filmDownloadsEnabled on free plan -> basic users unlock downloads
+  const enabledRes = upsertPlan({
+    ...freePlan,
+    filmDownloadsEnabled: true,
+  });
+  assert.ok(enabledRes.plan);
+  assert.equal(canPlanAccessFilmDownloads('usr_dl_free_check'), true);
+
+  // Restore default false on free plan -> basic users locked again
+  const disabledRes = upsertPlan({
+    ...freePlan,
+    filmDownloadsEnabled: false,
+  });
+  assert.ok(disabledRes.plan);
+  assert.equal(canPlanAccessFilmDownloads('usr_dl_free_check'), false);
+});

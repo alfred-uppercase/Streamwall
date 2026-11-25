@@ -63,6 +63,40 @@ export interface SeasonMeta {
   poster?: string | null;
 }
 
+export interface FilmDownloadItem {
+  id: number;
+  filename: string;
+  quality: string;
+  protectToken: string;
+}
+
+export interface ProtectedLinkChallenge {
+  captchaToken: string;
+  svgDataUri: string;
+  expiresInSeconds: number;
+}
+
+export interface ProtectedLinkInspectResponse {
+  ok: boolean;
+  filename: string;
+  quality: string;
+  challenge: ProtectedLinkChallenge;
+}
+
+export interface ProtectedLinkUnlockResponse {
+  ok: boolean;
+  url: string;
+  filename: string;
+  quality: string;
+}
+
+export interface FilmDownloadAdminConfig {
+  apiUrl: string;
+  apiKeyConfigured: boolean;
+  apiKeyMask: string;
+  message: string;
+}
+
 export interface DetailResponse {
   item: DetailItem | null;
   cast: CastMember[];
@@ -79,6 +113,10 @@ export interface DetailResponse {
     count: number;
     myScore: number | null;
   };
+  downloads?: FilmDownloadItem[];
+  downloadCount?: number;
+  downloadLocked?: boolean;
+  downloadMessage?: string;
 }
 
 export interface CatalogueFilters {
@@ -141,6 +179,7 @@ export interface SubscriptionPlan {
   active: boolean;
   features: string[];
   players: PlanPlayers;
+  filmDownloadsEnabled?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -865,7 +904,9 @@ export type MenuIconKey =
   | 'folder'
   | 'star'
   | 'message-square'
-  | 'lock';
+  | 'lock'
+  | 'send'
+  | 'external-link';
 
 export type MenuAuthRule = 'all' | 'member' | 'guest' | 'pro' | 'admin' | 'pro_offers';
 
@@ -889,7 +930,7 @@ export interface MenuLinkConfig {
 export interface SiteNavigationConfig {
   items: MenuLinkConfig[];
   updatedAt: string;
-  communityNavSeeded?: boolean;
+  communityNavRemoved?: boolean;
 }
 
 export interface CustomApiSortOption {

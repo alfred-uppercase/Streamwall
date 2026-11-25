@@ -41,6 +41,7 @@ interface PlanDraft {
   featuresText: string;
   filmPlayer: string;
   seriePlayer: string;
+  filmDownloadsEnabled: boolean;
 }
 
 function emptyDraft(): PlanDraft {
@@ -57,6 +58,7 @@ function emptyDraft(): PlanDraft {
     featuresText: 'Lecteur Pro sans publicité\nCouronne dorée Pro sur votre avatar',
     filmPlayer: '/film/{id}',
     seriePlayer: '/tvs/{id}/{s}/{e}',
+    filmDownloadsEnabled: true,
   };
 }
 
@@ -75,6 +77,10 @@ function planToDraft(plan: SubscriptionPlan): PlanDraft {
     featuresText: plan.features.join('\n'),
     filmPlayer: plan.players.film,
     seriePlayer: plan.players.serie,
+    filmDownloadsEnabled:
+      typeof plan.filmDownloadsEnabled === 'boolean'
+        ? plan.filmDownloadsEnabled
+        : plan.tier === 'pro',
   };
 }
 
@@ -131,11 +137,13 @@ export function AdminBillingTab() {
           film: d.filmPlayer.trim(),
           serie: d.seriePlayer.trim(),
         },
+        filmDownloadsEnabled: d.filmDownloadsEnabled,
       }),
     onSuccess: (res) => {
       setDraft(planToDraft(res.plan));
       void queryClient.invalidateQueries({ queryKey: ['admin-billing'] });
       void queryClient.invalidateQueries({ queryKey: ['billing-plans'] });
+      void queryClient.invalidateQueries({ queryKey: ['details'] });
       toast.success(`Offre « ${res.plan.name} » enregistrée.`);
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : 'Erreur d’enregistrement.'),
@@ -269,6 +277,24 @@ export function AdminBillingTab() {
                       </p>
                       <p className="mt-1 font-mono text-[11px] text-muted-foreground truncate">
                         Film : {plan.players.film} · Série : {plan.players.serie}
+                      </p>
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        Téléchargements films :{' '}
+                        <span
+                          className={
+                            (typeof plan.filmDownloadsEnabled === 'boolean'
+                              ? plan.filmDownloadsEnabled
+                              : plan.tier === 'pro')
+                              ? 'font-semibold text-emerald-500'
+                              : 'text-muted-foreground'
+                          }
+                        >
+                          {(typeof plan.filmDownloadsEnabled === 'boolean'
+                            ? plan.filmDownloadsEnabled
+                            : plan.tier === 'pro')
+                            ? 'Inclus'
+                            : 'Désactivé'}
+                        </span>
                       </p>
                     </button>
 
@@ -505,6 +531,20 @@ export function AdminBillingTab() {
                     </span>
                   </label>
                 </div>
+
+                <label className="inline-flex items-center gap-2 pt-1 text-xs font-medium text-foreground cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={draft.filmDownloadsEnabled}
+                    onChange={(e) =>
+                      setDraft({ ...draft, filmDownloadsEnabled: e.target.checked })
+                    }
+                    className="size-4 accent-primary"
+                  />
+                  <span>
+                    Autoriser le téléchargement direct des films pour cette offre (passerelle LinProtect)
+                  </span>
+                </label>
               </div>
 
               <label className="block text-sm">

@@ -89,6 +89,7 @@ function createSeedBillingDb(): BillingDatabase {
           film: DEFAULT_PLAYERS.player_guest_film,
           serie: DEFAULT_PLAYERS.player_guest_serie,
         },
+        filmDownloadsEnabled: false,
         createdAt: now,
         updatedAt: now,
       },
@@ -113,6 +114,7 @@ function createSeedBillingDb(): BillingDatabase {
           film: DEFAULT_PLAYERS.player_member_film,
           serie: DEFAULT_PLAYERS.player_member_serie,
         },
+        filmDownloadsEnabled: true,
         createdAt: now,
         updatedAt: now,
       },
@@ -136,6 +138,7 @@ function createSeedBillingDb(): BillingDatabase {
           film: DEFAULT_PLAYERS.player_member_film,
           serie: DEFAULT_PLAYERS.player_member_serie,
         },
+        filmDownloadsEnabled: true,
         createdAt: now,
         updatedAt: now,
       },
@@ -161,6 +164,8 @@ function loadBillingDb(): BillingDatabase {
   if (parsed && Array.isArray(parsed.plans) && parsed.config) {
     let migrated = false;
     const plans = parsed.plans.map((p) => {
+      const normalizedDownloads =
+        typeof p.filmDownloadsEnabled === 'boolean' ? p.filmDownloadsEnabled : p.tier === 'pro';
       if (
         p.id === 'free' &&
         p.players &&
@@ -169,6 +174,7 @@ function loadBillingDb(): BillingDatabase {
         migrated = true;
         return {
           ...p,
+          filmDownloadsEnabled: normalizedDownloads,
           players: {
             film: p.players.film === '/movie/{tmdb}' ? DEFAULT_PLAYERS.player_guest_film : p.players.film,
             serie:
@@ -177,6 +183,10 @@ function loadBillingDb(): BillingDatabase {
                 : p.players.serie,
           },
         };
+      }
+      if (typeof p.filmDownloadsEnabled !== 'boolean') {
+        migrated = true;
+        return { ...p, filmDownloadsEnabled: normalizedDownloads };
       }
       return p;
     });
@@ -756,6 +766,7 @@ export function upsertPlan(input: {
   active: boolean;
   features: string[];
   players: { film: string; serie: string };
+  filmDownloadsEnabled?: boolean;
 }): { plan?: SubscriptionPlan; error?: string } {
   const name = String(input.name || '').trim().slice(0, 60);
   if (!name) return { error: 'Le nom de l’offre est requis.' };
@@ -779,8 +790,15 @@ export function upsertPlan(input: {
 
   const existingIdx = cleanId ? billingDb.plans.findIndex((p) => p.id === cleanId) : -1;
   if (existingIdx >= 0) {
+    const existing = billingDb.plans[existingIdx];
+    const resolvedDownloads =
+      typeof input.filmDownloadsEnabled === 'boolean'
+        ? input.filmDownloadsEnabled
+        : typeof existing.filmDownloadsEnabled === 'boolean'
+          ? existing.filmDownloadsEnabled
+          : input.tier === 'pro';
     const updated: SubscriptionPlan = {
-      ...billingDb.plans[existingIdx],
+      ...existing,
       tier: input.tier === 'pro' ? 'pro' : 'free',
       name,
       description: String(input.description || '').trim().slice(0, 240),
@@ -792,6 +810,7 @@ export function upsertPlan(input: {
       active: Boolean(input.active),
       features: (input.features ?? []).map((f) => f.trim()).filter(Boolean).slice(0, 10),
       players: { film: filmTpl, serie: serieTpl },
+      filmDownloadsEnabled: resolvedDownloads,
       updatedAt: nowIso,
     };
     billingDb.plans[existingIdx] = updated;
@@ -815,6 +834,10 @@ export function upsertPlan(input: {
     active: Boolean(input.active),
     features: (input.features ?? []).map((f) => f.trim()).filter(Boolean).slice(0, 10),
     players: { film: filmTpl, serie: serieTpl },
+    filmDownloadsEnabled:
+      typeof input.filmDownloadsEnabled === 'boolean'
+        ? input.filmDownloadsEnabled
+        : input.tier === 'pro',
     createdAt: nowIso,
     updatedAt: nowIso,
   };
@@ -944,6 +967,16 @@ export function resolvePlanTemplateForUser(
           ? fallbackTemplates.player_member_serie
           : fallbackTemplates.player_guest_serie);
   return { template: tpl, plan };
+}
+
+export function canPlanAccessFilmDownloads(userId: string | null): boolean {
+  if (!userId) return false;
+  const sub = getUserSubscription(userId);
+  const plan = getPlanById(sub.planId) ?? getFreePlan();
+  if (typeof plan.filmDownloadsEnabled === 'boolean') {
+    return plan.filmDownloadsEnabled;
+  }
+  return plan.tier === 'pro';
 }
 
 export function syncFreePlanPlayers(players: { film: string; serie: string }): void {

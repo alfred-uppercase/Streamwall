@@ -61,6 +61,8 @@ import {
   sbGetApiOrigin,
   sbGetComments,
   sbGetEmbedProvider,
+  sbGetFilmDownloadApiUrl,
+  sbGetFilmDownloadMessage,
   sbGetMemberData,
   sbGetPinoyApiUrl,
   sbGetPinoyDownloadMessage,
@@ -140,6 +142,7 @@ import {
 import {
   assignUserPlan,
   banUser,
+  canPlanAccessFilmDownloads,
   cleanupUserBillingData,
   countActiveDirectoryUsers,
   createCryptoGateOrder,
@@ -273,6 +276,17 @@ import {
   resolveCustomPlayerUrl,
   testCustomModuleConfig,
 } from './src/server/customApiService.ts';
+import {
+  DEFAULT_FILM_DOWNLOAD_API_URL,
+  DEFAULT_FILM_DOWNLOAD_MESSAGE,
+  clearFilmDownloadsCache,
+  fetchFilmDownloads,
+  maskFilmDownloadToken,
+  sanitizeFilmDownloadMessage,
+  testFilmDownloadApi,
+  validateFilmDownloadApiUrl,
+} from './src/server/filmDownloadsService.ts';
+import { decryptProtectedLink } from './src/server/linkProtectService.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3000;
@@ -292,6 +306,13 @@ const DEFAULT_PINOY_PLAYER_TEMPLATE = (
 ).trim();
 const DEFAULT_PINOY_DOWNLOAD_MESSAGE = sanitizePinoyDownloadMessage(
   process.env.PINOY_DOWNLOAD_MESSAGE || PINOY_DOWNLOAD_MESSAGE_DEFAULT
+);
+const ENV_FILM_DOWNLOAD_API_URL = (
+  process.env.FILM_DOWNLOAD_API_URL || DEFAULT_FILM_DOWNLOAD_API_URL
+).trim();
+const ENV_FILM_DOWNLOAD_API_KEY = (process.env.FILM_DOWNLOAD_API_KEY || '').trim();
+const ENV_FILM_DOWNLOAD_MESSAGE = sanitizeFilmDownloadMessage(
+  process.env.FILM_DOWNLOAD_MESSAGE || DEFAULT_FILM_DOWNLOAD_MESSAGE
 );
 
 interface StoredUser {
@@ -346,6 +367,9 @@ interface DatabaseShape {
     pinoy_media_base_url?: string;
     pinoy_player_template?: string;
     pinoy_download_message?: string;
+    film_download_api_url?: string;
+    film_download_api_key?: string;
+    film_download_message?: string;
     site_name?: string;
     favicon_url?: string;
     players: PlayerTemplates;
@@ -749,6 +773,9 @@ function createSeedDb(): DatabaseShape {
       pinoy_media_base_url: DEFAULT_PINOY_MEDIA_BASE_URL,
       pinoy_player_template: DEFAULT_PINOY_PLAYER_TEMPLATE,
       pinoy_download_message: DEFAULT_PINOY_DOWNLOAD_MESSAGE,
+      film_download_api_url: ENV_FILM_DOWNLOAD_API_URL,
+      film_download_api_key: '',
+      film_download_message: ENV_FILM_DOWNLOAD_MESSAGE,
       site_name: 'StreamWall',
       favicon_url: '/favicon.ico',
       players: { ...DEFAULT_PLAYERS },
@@ -1088,6 +1115,32 @@ async function getPinoyDownloadMessage(): Promise<string> {
   );
   if (isSupabaseEnabled()) {
     return sanitizePinoyDownloadMessage(await sbGetPinoyDownloadMessage(localMsg));
+  }
+  return localMsg;
+}
+
+async function getFilmDownloadApiUrl(): Promise<string> {
+  const raw =
+    db.settings.film_download_api_url !== undefined
+      ? db.settings.film_download_api_url
+      : ENV_FILM_DOWNLOAD_API_URL;
+  const localUrl = String(raw || '').trim();
+  if (isSupabaseEnabled()) {
+    return sbGetFilmDownloadApiUrl(localUrl);
+  }
+  return localUrl;
+}
+
+function getFilmDownloadApiKey(): string {
+  return (db.settings.film_download_api_key || ENV_FILM_DOWNLOAD_API_KEY || '').trim();
+}
+
+async function getFilmDownloadMessage(): Promise<string> {
+  const localMsg = sanitizeFilmDownloadMessage(
+    db.settings.film_download_message ?? ENV_FILM_DOWNLOAD_MESSAGE
+  );
+  if (isSupabaseEnabled()) {
+    return sanitizeFilmDownloadMessage(await sbGetFilmDownloadMessage(localMsg));
   }
   return localMsg;
 }
@@ -3768,6 +3821,28 @@ export async function createApiApp(): Promise<express.Express> {
       ? (itemRatings.find((r) => r.userId === auth.user.id)?.score ?? null)
       : null;
 
+    const isFilmDetail = type === 'film' || baseDetail.item?.type === 'film';
+    const numericFilmId = isFilmDetail && /^\d+$/.test(id) ? Number(id) : 0;
+    const canDownload = Boolean(
+      auth && (auth.user.role === 'admin' || canPlanAccessFilmDownloads(auth.user.id))
+    );
+    let filmDownloads: Awaited<ReturnType<typeof fetchFilmDownloads>> = [];
+    if (numericFilmId > 0) {
+      const [dlUrl, dlKey] = await Promise.all([
+        getFilmDownloadApiUrl(),
+        Promise.resolve(getFilmDownloadApiKey()),
+      ]);
+      if (dlUrl && dlKey) {
+        filmDownloads = await fetchFilmDownloads(numericFilmId, {
+          apiUrl: dlUrl,
+          apiKey: dlKey,
+        });
+      }
+    }
+    const hasDownloads = filmDownloads.length > 0;
+    const downloadLocked = hasDownloads && !canDownload;
+    const downloadMessage = downloadLocked ? await getFilmDownloadMessage() : undefined;
+
     res.setHeader('Vary', 'Authorization, Cookie');
     if (!auth && !extractToken(req)) {
       res.setHeader('Cache-Control', 'public, max-age=120, s-maxage=600, stale-while-revalidate=1200');
@@ -3784,6 +3859,107 @@ export async function createApiApp(): Promise<express.Express> {
       seasonsMeta: baseDetail.seasonsMeta,
       tmdbRating: baseDetail.tmdbRating,
       rating: { average, count, myScore },
+      ...(hasDownloads
+        ? {
+            downloads: canDownload ? filmDownloads : [],
+            downloadCount: filmDownloads.length,
+            downloadLocked,
+            ...(downloadMessage ? { downloadMessage } : {}),
+          }
+        : {}),
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PROTECTED DOWNLOAD LINKS (/linprotect/:token -> CAPTCHA -> Redirect)
+  // ─────────────────────────────────────────────────────────────────────────
+  app.get('/api/linprotect/inspect', async (req, res) => {
+    const auth = await resolveAuth(req);
+    if (!auth) {
+      res.status(401).json({
+        error: 'Connexion requise pour accéder aux téléchargements.',
+        requiresAuth: true,
+        requiresPro: true,
+      });
+      return;
+    }
+    if (auth.user.role !== 'admin' && !canPlanAccessFilmDownloads(auth.user.id)) {
+      res.status(403).json({
+        error: await getFilmDownloadMessage(),
+        requiresPro: true,
+      });
+      return;
+    }
+
+    const token = String(req.query.token ?? '').trim();
+    const decrypted = decryptProtectedLink(token);
+    if (!decrypted.ok) {
+      res.status(decrypted.expired ? 410 : 400).json({ error: decrypted.error });
+      return;
+    }
+
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({
+      ok: true,
+      filename: decrypted.data.filename,
+      quality: decrypted.data.quality,
+      challenge: createCaptchaChallenge(getClientIp(req)),
+    });
+  });
+
+  app.post('/api/linprotect/unlock', async (req, res) => {
+    const auth = await resolveAuth(req);
+    if (!auth) {
+      res.status(401).json({
+        error: 'Connexion requise pour déverrouiller ce lien.',
+        requiresAuth: true,
+        requiresPro: true,
+      });
+      return;
+    }
+    if (auth.user.role !== 'admin' && !canPlanAccessFilmDownloads(auth.user.id)) {
+      res.status(403).json({
+        error: await getFilmDownloadMessage(),
+        requiresPro: true,
+      });
+      return;
+    }
+
+    const token = String(req.body?.token ?? '').trim();
+    const decrypted = decryptProtectedLink(token);
+    if (!decrypted.ok) {
+      res.status(decrypted.expired ? 410 : 400).json({ error: decrypted.error });
+      return;
+    }
+
+    const ip = getClientIp(req);
+    if (req.body?.humanChecked !== true) {
+      res.status(400).json({
+        error: 'Veuillez confirmer la vérification humaine avant de continuer.',
+        challenge: createCaptchaChallenge(ip),
+      });
+      return;
+    }
+
+    const captchaCheck = verifyCaptchaChallenge({
+      captchaToken: req.body?.captchaToken,
+      captchaAnswer: req.body?.captchaAnswer,
+      ip,
+    });
+    if (!captchaCheck.ok) {
+      res.status(400).json({
+        error: captchaCheck.error || 'Code de sécurité incorrect.',
+        challenge: createCaptchaChallenge(ip),
+      });
+      return;
+    }
+
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({
+      ok: true,
+      url: decrypted.data.url,
+      filename: decrypted.data.filename,
+      quality: decrypted.data.quality,
     });
   });
 
@@ -6043,6 +6219,12 @@ export async function createApiApp(): Promise<express.Express> {
       pinoyMediaBaseUrl: await getPinoyMediaBaseUrl(),
       pinoyPlayerTemplate: await getPinoyPlayerTemplate(),
       pinoyDownloadMessage: await getPinoyDownloadMessage(),
+      filmDownload: {
+        apiUrl: await getFilmDownloadApiUrl(),
+        apiKeyConfigured: Boolean(getFilmDownloadApiKey()),
+        apiKeyMask: maskFilmDownloadToken(getFilmDownloadApiKey()),
+        message: await getFilmDownloadMessage(),
+      },
       smtp: getAdminSmtpStatus(),
       site: await getSiteConfig(),
       supabaseServiceRoleConfigured: Boolean(createAdminClient()),
@@ -6570,6 +6752,97 @@ export async function createApiApp(): Promise<express.Express> {
     });
   });
 
+  app.put('/api/admin/settings/film-download', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+
+    const currentUrl = await getFilmDownloadApiUrl();
+    const currentMessage = await getFilmDownloadMessage();
+
+    const nextRawUrl =
+      req.body?.apiUrl !== undefined ? String(req.body.apiUrl).trim() : currentUrl;
+    const urlValidation = validateFilmDownloadApiUrl(nextRawUrl);
+    if (!urlValidation.ok) {
+      res.status(400).json({ error: urlValidation.error });
+      return;
+    }
+
+    const nextMessage =
+      req.body?.message !== undefined
+        ? sanitizeFilmDownloadMessage(req.body.message)
+        : currentMessage;
+
+    const clearApiKey = Boolean(req.body?.clearApiKey);
+    const rawNewKey =
+      typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+    if (rawNewKey && (rawNewKey.length < 6 || rawNewKey.length > 512 || /[\r\n\0]/.test(rawNewKey))) {
+      res.status(400).json({ error: 'Clé API invalide (6 à 512 caractères sans retour à la ligne).' });
+      return;
+    }
+
+    if (isSupabaseEnabled() && auth.sbClient) {
+      const writer = createAdminClient() ?? auth.sbClient;
+      const now = new Date().toISOString();
+      const { error } = await writer.from('app_settings').upsert([
+        { key: 'film_download_api_url', value: urlValidation.url, updated_at: now },
+        { key: 'film_download_message', value: nextMessage, updated_at: now },
+      ]);
+      if (error) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+    }
+
+    db.settings.film_download_api_url = urlValidation.url;
+    db.settings.film_download_message = nextMessage;
+    if (clearApiKey) {
+      db.settings.film_download_api_key = '';
+    } else if (rawNewKey) {
+      db.settings.film_download_api_key = rawNewKey;
+    }
+    saveDb(db);
+    invalidateSbSettingsCache();
+    clearFilmDownloadsCache();
+
+    const effectiveKey = getFilmDownloadApiKey();
+    res.json({
+      filmDownload: {
+        apiUrl: urlValidation.url,
+        apiKeyConfigured: Boolean(effectiveKey),
+        apiKeyMask: maskFilmDownloadToken(effectiveKey),
+        message: nextMessage,
+      },
+    });
+  });
+
+  app.post('/api/admin/settings/film-download/test', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+
+    const rawUrl =
+      req.body?.apiUrl !== undefined
+        ? String(req.body.apiUrl).trim()
+        : await getFilmDownloadApiUrl();
+    const urlValidation = validateFilmDownloadApiUrl(rawUrl);
+    if (!urlValidation.ok) {
+      res.status(400).json({ error: urlValidation.error });
+      return;
+    }
+
+    const rawKey =
+      typeof req.body?.apiKey === 'string' && req.body.apiKey.trim()
+        ? req.body.apiKey.trim()
+        : getFilmDownloadApiKey();
+    const filmIdNum = Number(req.body?.filmId);
+    const safeFilmId = Number.isInteger(filmIdNum) && filmIdNum >= 1 ? filmIdNum : 1;
+
+    const report = await testFilmDownloadApi(safeFilmId, {
+      apiUrl: urlValidation.url,
+      apiKey: rawKey,
+    });
+    res.json(report);
+  });
+
   app.put('/api/admin/settings/players', async (req, res) => {
     const auth = await requireAdmin(req, res);
     if (!auth) return;
@@ -7008,6 +7281,8 @@ export async function createApiApp(): Promise<express.Express> {
         film: String((body.players as Record<string, unknown> | undefined)?.film ?? ''),
         serie: String((body.players as Record<string, unknown> | undefined)?.serie ?? ''),
       },
+      filmDownloadsEnabled:
+        typeof body.filmDownloadsEnabled === 'boolean' ? body.filmDownloadsEnabled : undefined,
     });
     if (result.error || !result.plan) {
       res.status(400).json({ error: result.error || 'Offre invalide.' });

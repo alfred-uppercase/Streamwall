@@ -32,7 +32,6 @@ const FALLBACK_NAV_ITEMS: MenuLinkConfig[] = [
   { id: 'nav_catalogue', label: 'Catalogue', path: '/catalogue', icon: 'layout-grid', exact: false, enabled: true, desktop: true, mobile: true, footer: true, order: 30, authRule: 'all' },
   { id: 'nav_pinoy', label: 'Pinoy', path: '/pinoy', icon: 'film', exact: false, enabled: true, desktop: true, mobile: true, footer: true, order: 40, authRule: 'all' },
   { id: 'nav_suggestion', label: 'Suggestion', path: '/suggestion', icon: 'sparkles', exact: false, enabled: true, desktop: true, mobile: true, footer: true, order: 50, authRule: 'all' },
-  { id: 'nav_communaute', label: 'Communauté', path: '/communaute', icon: 'message-square', exact: false, enabled: true, desktop: false, mobile: true, footer: true, order: 55, authRule: 'all' },
   { id: 'nav_abonnement', label: 'Devenir Pro', path: '/abonnement', icon: 'crown', exact: false, enabled: true, desktop: true, mobile: false, footer: true, order: 70, authRule: 'pro_offers' },
   { id: 'nav_admin', label: 'Admin', path: '/admin', icon: 'shield', exact: false, enabled: true, desktop: true, mobile: false, footer: false, order: 90, authRule: 'admin' },
   { id: 'nav_compte', label: 'Mon compte', path: '/profil', icon: 'user', exact: false, enabled: true, desktop: false, mobile: true, footer: true, order: 100, authRule: 'all', isAccount: true },
@@ -308,6 +307,24 @@ export function Navbar() {
             className="hidden md:flex items-center gap-7 text-sm font-medium"
           >
             {desktopNavItems.map((item) => {
+              const isExternal = /^https?:\/\//i.test(item.to);
+              if (isExternal) {
+                return (
+                  <a
+                    key={item.id}
+                    href={item.to}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={`whitespace-nowrap shrink-0 py-1 transition-colors border-b-2 border-transparent ${
+                      isTransparent
+                        ? 'text-white/85 hover:text-white hover:border-white/40'
+                        : 'text-muted-foreground hover:text-foreground hover:border-border'
+                    }`}
+                  >
+                    {item.label}
+                  </a>
+                );
+              }
               const isItemActive = item.exact
                 ? location.pathname === item.to
                 : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`);
@@ -570,38 +587,55 @@ export function Navbar() {
           <ul className={`grid ${mobileGridClass} items-center gap-0.5`}>
             {mobileDockItems.map((item) => {
               const Icon = item.icon;
-              const isActive = item.isAccount
-                ? location.pathname === '/profil' || location.pathname === '/auth'
-                : item.exact
-                  ? location.pathname === item.to
-                  : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`);
+              const isExternal = /^https?:\/\//i.test(item.to);
+              const isActive =
+                !isExternal &&
+                (item.isAccount
+                  ? location.pathname === '/profil' || location.pathname === '/auth'
+                  : item.exact
+                    ? location.pathname === item.to
+                    : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`));
+
+              const itemClassName = `flex min-h-[44px] flex-col items-center justify-center gap-1 rounded-xl py-1 font-medium tracking-tight transition-colors ${
+                mobileDockItems.length >= 7 ? 'px-0.5 text-[9.5px]' : 'px-1 text-[10px]'
+              } ${
+                isActive
+                  ? 'bg-primary/12 text-primary font-semibold'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`;
 
               return (
                 <li key={item.id}>
-                  <Link
-                    to={item.to}
-                    aria-current={isActive ? 'page' : undefined}
-                    className={`flex min-h-[44px] flex-col items-center justify-center gap-1 rounded-xl py-1 font-medium tracking-tight transition-colors ${
-                      mobileDockItems.length >= 7 ? 'px-0.5 text-[9.5px]' : 'px-1 text-[10px]'
-                    } ${
-                      isActive
-                        ? 'bg-primary/12 text-primary font-semibold'
-                        : 'text-muted-foreground hover:text-foreground'
-                    }`}
-                  >
-                    {item.isAccount && isMember ? (
-                      <UserAvatar
-                        avatar={user?.avatar}
-                        seed={user?.id}
-                        username={user?.username}
-                        isPro={isPro}
-                        size="xs"
-                      />
-                    ) : (
+                  {isExternal ? (
+                    <a
+                      href={item.to}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className={itemClassName}
+                    >
                       <Icon className="size-5 shrink-0" />
-                    )}
-                    <span className="truncate max-w-full leading-none">{item.label}</span>
-                  </Link>
+                      <span className="truncate max-w-full leading-none">{item.label}</span>
+                    </a>
+                  ) : (
+                    <Link
+                      to={item.to}
+                      aria-current={isActive ? 'page' : undefined}
+                      className={itemClassName}
+                    >
+                      {item.isAccount && isMember ? (
+                        <UserAvatar
+                          avatar={user?.avatar}
+                          seed={user?.id}
+                          username={user?.username}
+                          isPro={isPro}
+                          size="xs"
+                        />
+                      ) : (
+                        <Icon className="size-5 shrink-0" />
+                      )}
+                      <span className="truncate max-w-full leading-none">{item.label}</span>
+                    </Link>
+                  )}
                 </li>
               );
             })}

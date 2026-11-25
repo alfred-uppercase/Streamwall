@@ -468,6 +468,52 @@ export async function sbGetPinoyDownloadMessage(fallbackMessage: string): Promis
   });
 }
 
+export async function sbGetFilmDownloadApiUrl(fallbackUrl: string): Promise<string> {
+  const cached = getSbCached<string>('film_download_api_url');
+  if (cached !== null) return cached;
+  return sbCoalescer.run('setting:film_download_api_url', async () => {
+    const recheck = getSbCached<string>('film_download_api_url');
+    if (recheck !== null) return recheck;
+    try {
+      const sb = createAnonClient();
+      const { data } = await sb
+        .from('app_settings')
+        .select('value')
+        .eq('key', 'film_download_api_url')
+        .maybeSingle();
+      if (typeof data?.value === 'string') {
+        return setSbCached('film_download_api_url', data.value.trim());
+      }
+    } catch {
+      // Fall back gracefully
+    }
+    return setSbCached('film_download_api_url', fallbackUrl);
+  });
+}
+
+export async function sbGetFilmDownloadMessage(fallbackMessage: string): Promise<string> {
+  const cached = getSbCached<string>('film_download_message');
+  if (cached !== null) return cached;
+  return sbCoalescer.run('setting:film_download_message', async () => {
+    const recheck = getSbCached<string>('film_download_message');
+    if (recheck !== null) return recheck;
+    try {
+      const sb = createAnonClient();
+      const { data } = await sb
+        .from('app_settings')
+        .select('value')
+        .eq('key', 'film_download_message')
+        .maybeSingle();
+      if (typeof data?.value === 'string' && data.value.trim()) {
+        return setSbCached('film_download_message', data.value.trim());
+      }
+    } catch {
+      // Fall back gracefully
+    }
+    return setSbCached('film_download_message', fallbackMessage);
+  });
+}
+
 export async function sbGetSiteConfig(fallback: SiteConfig): Promise<SiteConfig> {
   const cached = getSbCached<SiteConfig>('site_config');
   if (cached) return cached;
@@ -610,7 +656,7 @@ export async function sbGetMemberData(
     );
 
     const payload = { profile, favorites, history, friends };
-    return sbMemberCache.set(profile.id, payload, 15_000, 60_000);
+    return sbMemberCache.set(profile.id, payload, 120_000, 300_000);
   });
 }
 

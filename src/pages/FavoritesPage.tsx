@@ -17,6 +17,7 @@ export function FavoritesPage() {
   const memberQuery = useQuery({
     queryKey: ['member'],
     queryFn: () => api.member(),
+    staleTime: 300_000,
   });
 
   const clearHistoryMutation = useMutation({

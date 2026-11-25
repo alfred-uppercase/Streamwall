@@ -12,6 +12,7 @@ process.env.TAPENAKA_SILENT_LOGS = '1';
 
 const { createApiApp } = await import('../server.ts');
 const { listErrorLogs } = await import('../src/server/errorLogger.ts');
+const { peekCaptchaAnswerForTest } = await import('../src/server/security.ts');
 
 let server: http.Server;
 let baseUrl = '';
@@ -1059,7 +1060,7 @@ test('Top 6 week, 6 recent watches, Pinoy/custom favorites, Admin activeStats, E
   const adminAuth = (await adminLogin.json()) as { token: string; user: { id: string } };
   const memberAuth = (await memberLogin.json()) as { token: string; user: { id: string } };
 
-  // 1. /api/home guarantees top 6 week items + /api/site/navigation includes /communaute
+  // 1. /api/home guarantees top 6 week items + /api/site/navigation removes /communaute & allows custom external footer links (e.g. Telegram)
   const [homeRes, navRes] = await Promise.all([
     fetch(`${baseUrl}/api/home`),
     fetch(`${baseUrl}/api/site/navigation`),
@@ -1069,7 +1070,78 @@ test('Top 6 week, 6 recent watches, Pinoy/custom favorites, Admin activeStats, E
   assert.equal(homeJson.week.length, 6);
 
   const navJson = (await navRes.json()) as { items: Array<{ path: string; id: string }> };
-  assert.ok(navJson.items.some((i) => i.id === 'nav_communaute' && i.path === '/communaute'));
+  assert.equal(
+    navJson.items.some((i) => i.id === 'nav_communaute' || i.path === '/communaute'),
+    false
+  );
+
+  // Admin can add a custom Telegram footer link and unsafe javascript: links are rejected
+  const badNavRes = await fetch(`${baseUrl}/api/admin/navigation`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({
+      items: [
+        ...navJson.items,
+        {
+          id: 'nav_bad_js',
+          label: 'Bad',
+          path: 'javascript:alert(1)',
+          icon: 'globe',
+          exact: false,
+          enabled: true,
+          desktop: false,
+          mobile: false,
+          footer: true,
+          order: 99,
+          authRule: 'all',
+        },
+      ],
+    }),
+  });
+  assert.equal(badNavRes.status, 400);
+
+  const tgNavRes = await fetch(`${baseUrl}/api/admin/navigation`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({
+      items: [
+        ...navJson.items,
+        {
+          id: 'nav_telegram_test',
+          label: 'Telegram',
+          path: 'https://t.me/streamwall_test',
+          icon: 'send',
+          exact: false,
+          enabled: true,
+          desktop: false,
+          mobile: false,
+          footer: true,
+          order: 95,
+          authRule: 'all',
+        },
+      ],
+    }),
+  });
+  assert.equal(tgNavRes.status, 200);
+  const updatedNavCheck = await fetch(`${baseUrl}/api/site/navigation`);
+  const updatedNavJson = (await updatedNavCheck.json()) as {
+    items: Array<{ id: string; path: string; footer: boolean }>;
+  };
+  assert.ok(
+    updatedNavJson.items.some(
+      (i) => i.id === 'nav_telegram_test' && i.path === 'https://t.me/streamwall_test' && i.footer
+    )
+  );
+  await fetch(`${baseUrl}/api/admin/navigation/reset`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${adminAuth.token}` },
+  });
 
   // 2. Member opens 7 distinct items -> /api/member & /api/home retain top 6 recent watches
   for (let i = 1; i <= 7; i++) {
@@ -1427,6 +1499,479 @@ test('/api/home fetches /api/last_serie.php?short=asc, slices 36 items to 18, an
     });
   }
 });
+
+test('film download links require Pro/Admin, mask Bearer key in admin settings, validate URLs, and test endpoint works', async () => {
+  const [adminLogin, memberLogin] = await Promise.all([
+    fetch(`${baseUrl}/api/auth/demo-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'admin' }),
+    }),
+    fetch(`${baseUrl}/api/auth/demo-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'member' }),
+    }),
+  ]);
+  const adminAuth = (await adminLogin.json()) as { token: string };
+  const memberAuth = (await memberLogin.json()) as { token: string };
+
+  const settingsRes = await fetch(`${baseUrl}/api/admin/settings`, {
+    headers: { Authorization: `Bearer ${adminAuth.token}` },
+  });
+  const settingsJson = (await settingsRes.json()) as {
+    origin: string;
+    filmDownload?: { apiUrl: string; message: string };
+  };
+  const originalOrigin = settingsJson.origin || 'https://streamwall.behoririka.mg';
+  const originalDlUrl =
+    settingsJson.filmDownload?.apiUrl ?? 'https://streamwall.behoririka.mg/api/api_f.php';
+  const originalDlMsg =
+    settingsJson.filmDownload?.message ??
+    'Le téléchargement direct est réservé aux membres Pro et aux administrateurs.';
+
+  // Non-admin blocked from updating or testing film download settings
+  const memberPutRes = await fetch(`${baseUrl}/api/admin/settings/film-download`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${memberAuth.token}`,
+    },
+    body: JSON.stringify({ apiUrl: 'https://downloads.example.com/api_f.php' }),
+  });
+  assert.equal(memberPutRes.status, 403);
+
+  const memberTestRes = await fetch(`${baseUrl}/api/admin/settings/film-download/test`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${memberAuth.token}`,
+    },
+    body: JSON.stringify({ filmId: 12345 }),
+  });
+  assert.equal(memberTestRes.status, 403);
+
+  // SSRF URL rejected
+  const ssrfRes = await fetch(`${baseUrl}/api/admin/settings/film-download`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({ apiUrl: 'http://127.0.0.1/api_f.php' }),
+  });
+  assert.equal(ssrfRes.status, 400);
+
+  // Set isolated origin + download settings with secret token
+  await fetch(`${baseUrl}/api/admin/settings/origin`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({ origin: 'https://dlfilm.example.com' }),
+  });
+
+  const testSecret = 'superSecretDownloadToken9876';
+  const saveDlRes = await fetch(`${baseUrl}/api/admin/settings/film-download`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({
+      apiUrl: 'https://downloads.example.com/api_f.php',
+      apiKey: testSecret,
+      message: 'Passez en Pro pour débloquer les téléchargements directs.',
+    }),
+  });
+  assert.equal(saveDlRes.status, 200);
+  const saveDlJson = (await saveDlRes.json()) as {
+    filmDownload: { apiUrl: string; apiKeyConfigured: boolean; apiKeyMask: string; message: string };
+  };
+  assert.equal(saveDlJson.filmDownload.apiUrl, 'https://downloads.example.com/api_f.php');
+  assert.equal(saveDlJson.filmDownload.apiKeyConfigured, true);
+  assert.equal(saveDlJson.filmDownload.apiKeyMask, 'supe••••9876');
+  assert.equal(JSON.stringify(saveDlJson).includes(testSecret), false);
+
+  // Admin settings GET also never leaks the raw secret
+  const adminGetRes = await fetch(`${baseUrl}/api/admin/settings`, {
+    headers: { Authorization: `Bearer ${adminAuth.token}` },
+  });
+  const adminGetJson = (await adminGetRes.json()) as {
+    filmDownload?: { apiKeyConfigured: boolean; apiKeyMask: string };
+  };
+  assert.equal(adminGetJson.filmDownload?.apiKeyConfigured, true);
+  assert.equal(adminGetJson.filmDownload?.apiKeyMask, 'supe••••9876');
+  assert.equal(JSON.stringify(adminGetJson).includes(testSecret), false);
+
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const target =
+      typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+    if (target === 'https://downloads.example.com/api_f.php') {
+      const headers = new Headers(init?.headers);
+      if (headers.get('Authorization') !== `Bearer ${testSecret}`) {
+        return new Response(JSON.stringify({ success: false, error: 'Invalid token' }), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const parsedBody = JSON.parse(String(init?.body ?? '{}')) as { film_id?: number };
+      return new Response(
+        JSON.stringify({
+          success: true,
+          film_id: parsedBody.film_id,
+          count: 2,
+          downloads: [
+            {
+              id: 77,
+              url: 'https://cdn.example.com/film-12345-1080p.mp4',
+              filename: 'Film.Test.1080p.mp4',
+              quality: '1080p',
+              release_name: 'Film.Test.2026.FRENCH.1080p',
+              expires_at: 1893456000,
+            },
+            {
+              id: 78,
+              url: 'javascript:alert(99)',
+              filename: 'Malicious',
+              quality: 'HD',
+              release_name: null,
+              expires_at: null,
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    if (target.startsWith('https://dlfilm.example.com/api/')) {
+      return new Response(
+        JSON.stringify({
+          item: {
+            id: 12345,
+            titre: 'Film Test DL',
+            type: 'film',
+            poster: 'https://image.tmdb.org/t/p/w500/test.jpg',
+            genre: 'Action',
+            annee: 2026,
+            qualite: 'HD',
+            langue: 'VF',
+            players: [],
+          },
+          items: [],
+          related: [],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    return realFetch(input, init);
+  }) as typeof fetch;
+
+  try {
+    // 1. Admin test endpoint returns protected sample without leaking raw url
+    const testRes = await realFetch(`${baseUrl}/api/admin/settings/film-download/test`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminAuth.token}`,
+      },
+      body: JSON.stringify({ filmId: 12345 }),
+    });
+    assert.equal(testRes.status, 200);
+    const testJson = (await testRes.json()) as {
+      ok: boolean;
+      count: number;
+      sample: { filename: string; quality: string; protectToken: string } | null;
+    };
+    assert.equal(testJson.ok, true);
+    assert.equal(testJson.count, 1);
+    assert.equal(testJson.sample?.filename, 'Film.Test.1080p.mp4');
+    assert.equal(testJson.sample?.quality, '1080p');
+    assert.ok(testJson.sample?.protectToken);
+    assert.equal(JSON.stringify(testJson).includes('https://cdn.example.com/film-12345-1080p.mp4'), false);
+
+    // 2. Guest hitting /api/details/film/12345 gets downloadLocked=true and empty downloads
+    const guestDetailRes = await realFetch(`${baseUrl}/api/details/film/12345`);
+    assert.equal(guestDetailRes.status, 200);
+    const guestDetail = (await guestDetailRes.json()) as {
+      downloads?: unknown[];
+      downloadCount?: number;
+      downloadLocked?: boolean;
+      downloadMessage?: string;
+    };
+    assert.equal(guestDetail.downloadLocked, true);
+    assert.equal(guestDetail.downloadCount, 1);
+    assert.equal(guestDetail.downloads?.length, 0);
+    assert.equal(
+      guestDetail.downloadMessage,
+      'Passez en Pro pour débloquer les téléchargements directs.'
+    );
+
+    // 3. Free member also gets downloadLocked=true and no leaked URLs
+    const memberDetailRes = await realFetch(`${baseUrl}/api/details/film/12345`, {
+      headers: { Authorization: `Bearer ${memberAuth.token}` },
+    });
+    assert.equal(memberDetailRes.status, 200);
+    const memberDetail = (await memberDetailRes.json()) as {
+      downloads?: unknown[];
+      downloadLocked?: boolean;
+    };
+    assert.equal(memberDetail.downloadLocked, true);
+    assert.equal(memberDetail.downloads?.length, 0);
+
+    // 4. Admin gets unlocked list containing ONLY id, filename, quality, protectToken (no raw url/release_name/expires_at)
+    const adminDetailRes = await realFetch(`${baseUrl}/api/details/film/12345`, {
+      headers: { Authorization: `Bearer ${adminAuth.token}` },
+    });
+    assert.equal(adminDetailRes.status, 200);
+    const adminDetailText = await adminDetailRes.text();
+    assert.equal(adminDetailText.includes('https://cdn.example.com/film-12345-1080p.mp4'), false);
+    assert.equal(adminDetailText.includes('Film.Test.2026.FRENCH.1080p'), false);
+    const adminDetail = JSON.parse(adminDetailText) as {
+      downloads?: Array<{ id: number; filename: string; quality: string; protectToken: string }>;
+      downloadCount?: number;
+      downloadLocked?: boolean;
+    };
+    assert.equal(adminDetail.downloadLocked, false);
+    assert.equal(adminDetail.downloadCount, 1);
+    assert.equal(adminDetail.downloads?.length, 1);
+    assert.equal(adminDetail.downloads?.[0]?.filename, 'Film.Test.1080p.mp4');
+    assert.equal(adminDetail.downloads?.[0]?.quality, '1080p');
+    const protectToken = adminDetail.downloads?.[0]?.protectToken ?? '';
+    assert.ok(protectToken.length > 20);
+
+    // 5. /api/linprotect/inspect blocks guests (401) & free members (403)
+    const guestInspect = await realFetch(
+      `${baseUrl}/api/linprotect/inspect?token=${encodeURIComponent(protectToken)}`
+    );
+    assert.equal(guestInspect.status, 401);
+    const memberInspect = await realFetch(
+      `${baseUrl}/api/linprotect/inspect?token=${encodeURIComponent(protectToken)}`,
+      { headers: { Authorization: `Bearer ${memberAuth.token}` } }
+    );
+    assert.equal(memberInspect.status, 403);
+
+    // 6. Admin inspects encrypted link -> gets filename, quality & CAPTCHA challenge (still no url!)
+    const adminInspect = await realFetch(
+      `${baseUrl}/api/linprotect/inspect?token=${encodeURIComponent(protectToken)}`,
+      { headers: { Authorization: `Bearer ${adminAuth.token}` } }
+    );
+    assert.equal(adminInspect.status, 200);
+    const inspectText = await adminInspect.text();
+    assert.equal(inspectText.includes('https://cdn.example.com/film-12345-1080p.mp4'), false);
+    const inspectJson = JSON.parse(inspectText) as {
+      ok: boolean;
+      filename: string;
+      quality: string;
+      challenge: { captchaToken: string; svgDataUri: string };
+    };
+    assert.equal(inspectJson.ok, true);
+    assert.equal(inspectJson.filename, 'Film.Test.1080p.mp4');
+    assert.equal(inspectJson.quality, '1080p');
+    assert.ok(inspectJson.challenge.captchaToken);
+
+    // 7. Unlock rejects unchecked humanChecked & wrong CAPTCHA, returning fresh challenge; succeeds on valid answer
+    const noCheckRes = await realFetch(`${baseUrl}/api/linprotect/unlock`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminAuth.token}`,
+      },
+      body: JSON.stringify({
+        token: protectToken,
+        captchaToken: inspectJson.challenge.captchaToken,
+        captchaAnswer: 'WRONG',
+        humanChecked: false,
+      }),
+    });
+    assert.equal(noCheckRes.status, 400);
+    const noCheckJson = (await noCheckRes.json()) as {
+      challenge: { captchaToken: string };
+    };
+    assert.ok(noCheckJson.challenge?.captchaToken);
+
+    const wrongCaptchaRes = await realFetch(`${baseUrl}/api/linprotect/unlock`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminAuth.token}`,
+      },
+      body: JSON.stringify({
+        token: protectToken,
+        captchaToken: noCheckJson.challenge.captchaToken,
+        captchaAnswer: 'ZZZZZ',
+        humanChecked: true,
+      }),
+    });
+    assert.equal(wrongCaptchaRes.status, 400);
+    const wrongJson = (await wrongCaptchaRes.json()) as {
+      challenge: { captchaToken: string };
+    };
+    const validAnswer = peekCaptchaAnswerForTest(wrongJson.challenge.captchaToken);
+    assert.ok(validAnswer);
+
+    const unlockRes = await realFetch(`${baseUrl}/api/linprotect/unlock`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminAuth.token}`,
+      },
+      body: JSON.stringify({
+        token: protectToken,
+        captchaToken: wrongJson.challenge.captchaToken,
+        captchaAnswer: validAnswer,
+        humanChecked: true,
+      }),
+    });
+    assert.equal(unlockRes.status, 200);
+    const unlockJson = (await unlockRes.json()) as {
+      ok: boolean;
+      url: string;
+      filename: string;
+      quality: string;
+    };
+    assert.equal(unlockJson.ok, true);
+    assert.equal(unlockJson.url, 'https://cdn.example.com/film-12345-1080p.mp4');
+    assert.equal(unlockJson.filename, 'Film.Test.1080p.mp4');
+    assert.equal(unlockJson.quality, '1080p');
+
+    // 8. Admin enables filmDownloadsEnabled on the free plan -> free member unlocks details & LinProtect
+    const billingRes = await realFetch(`${baseUrl}/api/admin/billing`, {
+      headers: { Authorization: `Bearer ${adminAuth.token}` },
+    });
+    assert.equal(billingRes.status, 200);
+    const billingJson = (await billingRes.json()) as {
+      plans: Array<{
+        id: string;
+        tier: string;
+        name: string;
+        description: string;
+        price: number;
+        currency: string;
+        billingCycle: string;
+        durationDays: number;
+        autoRenew: boolean;
+        active: boolean;
+        features: string[];
+        players: { film: string; serie: string };
+        filmDownloadsEnabled?: boolean;
+      }>;
+    };
+    const freePlan = billingJson.plans.find((p) => p.id === 'free' || p.tier === 'free');
+    assert.ok(freePlan);
+
+    try {
+      const enableFreeDlRes = await realFetch(`${baseUrl}/api/admin/billing/plans`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminAuth.token}`,
+        },
+        body: JSON.stringify({
+          ...freePlan,
+          filmDownloadsEnabled: true,
+        }),
+      });
+      assert.equal(enableFreeDlRes.status, 200);
+
+      // Guest still stays locked even when free plan allows downloads
+      const guestStillLockedRes = await realFetch(`${baseUrl}/api/details/film/12345`);
+      const guestStillLocked = (await guestStillLockedRes.json()) as {
+        downloadLocked?: boolean;
+        downloads?: unknown[];
+      };
+      assert.equal(guestStillLocked.downloadLocked, true);
+      assert.equal(guestStillLocked.downloads?.length, 0);
+
+      // Free member now gets unlocked downloads + 200 on LinProtect inspect/unlock
+      const freeUnlockedRes = await realFetch(`${baseUrl}/api/details/film/12345`, {
+        headers: { Authorization: `Bearer ${memberAuth.token}` },
+      });
+      assert.equal(freeUnlockedRes.status, 200);
+      const freeUnlocked = (await freeUnlockedRes.json()) as {
+        downloadLocked?: boolean;
+        downloads?: Array<{ protectToken: string }>;
+      };
+      assert.equal(freeUnlocked.downloadLocked, false);
+      assert.equal(freeUnlocked.downloads?.length, 1);
+      const memberToken = freeUnlocked.downloads?.[0]?.protectToken ?? '';
+      assert.ok(memberToken.length > 20);
+
+      const freeInspectRes = await realFetch(
+        `${baseUrl}/api/linprotect/inspect?token=${encodeURIComponent(memberToken)}`,
+        { headers: { Authorization: `Bearer ${memberAuth.token}` } }
+      );
+      assert.equal(freeInspectRes.status, 200);
+      const freeInspectJson = (await freeInspectRes.json()) as {
+        challenge: { captchaToken: string };
+      };
+      const freeAnswer = peekCaptchaAnswerForTest(freeInspectJson.challenge.captchaToken);
+      assert.ok(freeAnswer);
+
+      const freeUnlockRes = await realFetch(`${baseUrl}/api/linprotect/unlock`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${memberAuth.token}`,
+        },
+        body: JSON.stringify({
+          token: memberToken,
+          captchaToken: freeInspectJson.challenge.captchaToken,
+          captchaAnswer: freeAnswer,
+          humanChecked: true,
+        }),
+      });
+      assert.equal(freeUnlockRes.status, 200);
+    } finally {
+      // Restore free plan default (filmDownloadsEnabled: false) and verify member is locked again
+      await realFetch(`${baseUrl}/api/admin/billing/plans`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminAuth.token}`,
+        },
+        body: JSON.stringify({
+          ...freePlan,
+          filmDownloadsEnabled: false,
+        }),
+      });
+      const restoredMemberDetailRes = await realFetch(`${baseUrl}/api/details/film/12345`, {
+        headers: { Authorization: `Bearer ${memberAuth.token}` },
+      });
+      const restoredMemberDetail = (await restoredMemberDetailRes.json()) as {
+        downloadLocked?: boolean;
+      };
+      assert.equal(restoredMemberDetail.downloadLocked, true);
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+    await realFetch(`${baseUrl}/api/admin/settings/origin`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminAuth.token}`,
+      },
+      body: JSON.stringify({ origin: originalOrigin }),
+    });
+    await realFetch(`${baseUrl}/api/admin/settings/film-download`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminAuth.token}`,
+      },
+      body: JSON.stringify({
+        apiUrl: originalDlUrl,
+        message: originalDlMsg,
+        clearApiKey: true,
+      }),
+    });
+  }
+});
+
 
 
 

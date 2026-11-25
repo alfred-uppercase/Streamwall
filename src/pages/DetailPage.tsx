@@ -6,6 +6,8 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
+  Crown,
+  Download,
   ExternalLink,
   Film,
   Flag,
@@ -120,7 +122,27 @@ function EpisodeStill({
 export function DetailPage() {
   const params = useParams<{ type: string; id: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { isMember } = useAuth();
+  const { user, isMember, isAdmin, isPro } = useAuth();
+  const billingPlansQuery = useQuery({
+    queryKey: ['billing-plans'],
+    queryFn: () => api.billingPlans(),
+    staleTime: 30_000,
+  });
+  const userPlan = billingPlansQuery.data?.plans.find(
+    (p) => p.id === user?.subscription?.planId
+  );
+  const freePlanAllowsDownloads = Boolean(
+    billingPlansQuery.data?.plans.find((p) => p.id === 'free' || p.tier === 'free')
+      ?.filmDownloadsEnabled
+  );
+  const canDownload =
+    isAdmin ||
+    (isMember &&
+      (userPlan
+        ? typeof userPlan.filmDownloadsEnabled === 'boolean'
+          ? userPlan.filmDownloadsEnabled
+          : userPlan.tier === 'pro'
+        : isPro));
   const setWatchingItem = useSetWatchingItem();
   const queryClient = useQueryClient();
 
@@ -158,7 +180,7 @@ export function DetailPage() {
   }, [type, id]);
 
   const detailQuery = useQuery({
-    queryKey: ['details', type, id],
+    queryKey: ['details', type, id, canDownload ? 'unlocked' : 'locked'],
     queryFn: () => api.details(type, id),
     enabled: Boolean(id),
     staleTime: 180_000,
@@ -168,6 +190,7 @@ export function DetailPage() {
     queryKey: ['member'],
     queryFn: () => api.member(),
     enabled: isMember,
+    staleTime: 300_000,
   });
 
   const item = detailQuery.data?.item ?? null;
@@ -583,6 +606,93 @@ export function DetailPage() {
           </div>
         </div>
       </section>
+
+      {/* Film Direct Downloads (linked to SubscriptionPlan offers) */}
+      {effectiveType === 'film' &&
+        ((!detailData.downloadLocked && (detailData.downloads?.length ?? 0) > 0) ||
+          Boolean(detailData.downloadLocked)) && (
+          <section className="mx-auto max-w-7xl px-4 pt-8 pb-2 sm:px-6">
+            <div className="rounded-xl border border-border bg-card p-5 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-display text-lg font-semibold text-foreground">
+                  {!detailData.downloadLocked && (detailData.downloads?.length ?? 0) > 0
+                    ? `Liens de téléchargement (${detailData.downloads!.length})`
+                    : 'Liens de téléchargement'}
+                </h2>
+                {Boolean(detailData.downloadLocked) && !freePlanAllowsDownloads && (
+                  <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-400">
+                    <Crown className="size-3.5" />
+                    <span>Réservé Pro</span>
+                  </span>
+                )}
+              </div>
+
+              {!detailData.downloadLocked && (detailData.downloads?.length ?? 0) > 0 ? (
+                <div className="flex flex-wrap gap-2.5">
+                  {detailData.downloads!.map((dl) => {
+                    if (!dl.protectToken) return null;
+                    const protectHref = `/linprotect/${encodeURIComponent(dl.protectToken)}`;
+                    return (
+                      <a
+                        key={`${dl.id}-${dl.filename}-${dl.quality}`}
+                        href={protectHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-4 py-2.5 text-xs font-semibold text-foreground transition-colors hover:border-primary/70 hover:bg-accent"
+                      >
+                        <Download className="size-3.5 shrink-0 text-primary" />
+                        <span>{dl.filename || 'Télécharger'}</span>
+                        {dl.quality && (
+                          <span className="font-normal text-muted-foreground">
+                            · {dl.quality}
+                          </span>
+                        )}
+                        <ExternalLink className="size-3 shrink-0 text-muted-foreground" />
+                      </a>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3 rounded-lg border border-border bg-background/60 p-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-start gap-3">
+                    <div className="grid size-9 shrink-0 place-items-center rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-400">
+                      <Lock className="size-4" />
+                    </div>
+                    <p className="text-sm leading-relaxed text-muted-foreground whitespace-pre-line">
+                      {!isMember && freePlanAllowsDownloads
+                        ? 'Connectez-vous pour débloquer les liens de téléchargement direct.'
+                        : detailData.downloadMessage?.trim() ||
+                          'Le téléchargement direct est réservé aux membres Pro et aux administrateurs.'}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 flex-wrap items-center gap-2">
+                    {!isMember && (
+                      <Link
+                        to="/auth"
+                        className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-semibold transition-opacity ${
+                          freePlanAllowsDownloads
+                            ? 'bg-primary text-primary-foreground hover:opacity-90'
+                            : 'border border-border bg-card text-foreground hover:bg-accent'
+                        }`}
+                      >
+                        <span>Se connecter</span>
+                      </Link>
+                    )}
+                    {!freePlanAllowsDownloads && (
+                      <Link
+                        to="/abonnement"
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90"
+                      >
+                        <Crown className="size-3.5" />
+                        <span>Passer Pro</span>
+                      </Link>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
 
       {/* Interactive Seasons Tabs & Scrollable TMDB-Enriched Episodes */}
       {(episodes.length > 0 || seasonsMeta.length > 0) && (

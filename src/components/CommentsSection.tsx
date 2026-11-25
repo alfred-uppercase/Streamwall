@@ -146,6 +146,7 @@ export function CommentsSection({
     queryKey: ['member'],
     queryFn: () => api.member(),
     enabled: isMember,
+    staleTime: 300_000,
   });
 
   const friendIds = new Set((memberQuery.data?.friends ?? []).map((f) => f.id));

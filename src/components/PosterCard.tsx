@@ -44,9 +44,15 @@ export const FavoriteButton = memo(
       },
       onSuccess: (res) => {
         if (Array.isArray(res.favorites)) {
+          const hadCache = Boolean(queryClient.getQueryData<MemberPayload>(['member']));
           queryClient.setQueryData<MemberPayload>(['member'], (old) =>
             old ? { ...old, favorites: res.favorites } : old
           );
+          if (!hadCache) {
+            void queryClient.invalidateQueries({ queryKey: ['member'] });
+          }
+        } else {
+          void queryClient.invalidateQueries({ queryKey: ['member'] });
         }
         toast.success(res.saved ? 'Ajouté à votre liste' : 'Retiré de votre liste');
       },
@@ -54,10 +60,8 @@ export const FavoriteButton = memo(
         if (ctx?.previous) {
           queryClient.setQueryData(['member'], ctx.previous);
         }
-        toast.error('Impossible de modifier vos favoris.');
-      },
-      onSettled: () => {
         void queryClient.invalidateQueries({ queryKey: ['member'] });
+        toast.error('Impossible de modifier vos favoris.');
       },
     });
 

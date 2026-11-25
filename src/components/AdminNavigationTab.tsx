@@ -3,10 +3,13 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowDown,
   ArrowUp,
+  ExternalLink,
+  Globe,
   Monitor,
   Plus,
   RotateCcw,
   Save,
+  Send,
   Smartphone,
   Trash2,
 } from 'lucide-react';
@@ -18,6 +21,21 @@ import {
   MENU_AUTH_RULE_LABELS,
   MENU_ICON_OPTIONS,
 } from '../lib/menuIcons';
+
+function isValidMenuTarget(raw: string): boolean {
+  const val = raw.trim();
+  if (!val) return false;
+  if (/^\/[a-zA-Z0-9/_-]*$/.test(val)) return true;
+  if (/^https?:\/\//i.test(val) && !/[\s\r\n\0]/.test(val)) {
+    try {
+      const parsed = new URL(val);
+      return (parsed.protocol === 'https:' || parsed.protocol === 'http:') && !parsed.username && !parsed.password;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
 
 export function AdminNavigationTab() {
   const queryClient = useQueryClient();
@@ -91,8 +109,10 @@ export function AdminNavigationTab() {
     e.preventDefault();
     const label = newLabel.trim();
     const path = newPath.trim();
-    if (!label || !/^\/[a-zA-Z0-9/_-]*$/.test(path)) {
-      toast.error('Indiquez un libellé et un chemin interne valide commençant par / (ex: /c/drama).');
+    if (!label || !isValidMenuTarget(path)) {
+      toast.error(
+        'Indiquez un libellé et une URL valide : chemin interne (/c/drama) ou lien externe (https://t.me/...).'
+      );
       return;
     }
     const id = `nav_${Date.now().toString(36)}`;
@@ -117,8 +137,19 @@ export function AdminNavigationTab() {
     setNewPath('');
   }
 
+  function applyTelegramFooterPreset() {
+    setNewLabel('Telegram');
+    setNewPath('https://t.me/');
+    setNewIcon('send');
+    setNewAuthRule('all');
+    setNewDesktop(false);
+    setNewMobile(false);
+    setNewFooter(true);
+  }
+
   const desktopCount = items.filter((i) => i.enabled && i.desktop).length;
   const mobileCount = items.filter((i) => i.enabled && i.mobile).length;
+  const footerCount = items.filter((i) => i.enabled && i.footer).length;
 
   return (
     <div className="space-y-6">
@@ -127,10 +158,10 @@ export function AdminNavigationTab() {
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h2 className="font-display text-xl font-semibold text-foreground">
-              Gestion des menus (Ordinateur, Mobile & Pied de page)
+              Gestion des menus & du pied de page (Footer)
             </h2>
             <p className="mt-1 text-xs text-muted-foreground">
-              Configurez l’ordre, les icônes, les permissions d’affichage et les emplacements de chaque lien. Le dock mobile affiche jusqu’à 8 éléments ({mobileCount}/8 actifs · {desktopCount} sur ordinateur).
+              Configurez l’ordre, les icônes, les permissions d’affichage et les liens internes ou externes ({desktopCount} PC · {mobileCount}/8 mobile · {footerCount} footer).
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -156,8 +187,8 @@ export function AdminNavigationTab() {
         </div>
       </section>
 
-      {/* Live Preview Strip */}
-      <section className="grid gap-4 lg:grid-cols-2">
+      {/* Live Preview Strips */}
+      <section className="grid gap-4 lg:grid-cols-3">
         <div className="rounded-xl border border-border bg-card p-4 space-y-2">
           <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
             <Monitor className="size-4 text-primary" />
@@ -197,13 +228,52 @@ export function AdminNavigationTab() {
               })}
           </div>
         </div>
+
+        <div className="rounded-xl border border-border bg-card p-4 space-y-2">
+          <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+            <Globe className="size-4 text-primary" />
+            <span>Aperçu pied de page (Footer)</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-background px-4 py-2.5 text-xs">
+            {items
+              .filter((i) => i.enabled && i.footer)
+              .map((i) => {
+                const isExternal = /^https?:\/\//i.test(i.path);
+                return (
+                  <span
+                    key={i.id}
+                    className="inline-flex items-center gap-1 font-medium text-foreground/90"
+                  >
+                    <span>{i.label}</span>
+                    {isExternal && <ExternalLink className="size-3 text-primary" />}
+                  </span>
+                );
+              })}
+          </div>
+        </div>
       </section>
 
-      {/* Add new custom menu item */}
+      {/* Add new custom menu or footer link */}
       <section className="rounded-xl border border-border bg-card p-5 space-y-4">
-        <h3 className="font-display text-base font-semibold text-foreground">
-          Ajouter un lien au menu
-        </h3>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="font-display text-base font-semibold text-foreground">
+              Ajouter un lien personnalisé (Menu ou Footer)
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Accepte un chemin interne (<code className="font-mono">/c/drama</code>) ou une URL externe (<code className="font-mono">https://t.me/...</code>) pour le pied de page.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={applyTelegramFooterPreset}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:border-primary/60 hover:bg-accent"
+          >
+            <Send className="size-3.5 text-primary" />
+            <span>Prérégler : Lien Telegram (Footer)</span>
+          </button>
+        </div>
+
         <form onSubmit={handleAddLink} className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6 items-end">
           <label className="block text-xs">
             <span className="mb-1 block font-medium text-muted-foreground">Libellé</span>
@@ -211,24 +281,24 @@ export function AdminNavigationTab() {
               value={newLabel}
               onChange={(e) => setNewLabel(e.target.value)}
               maxLength={36}
-              placeholder="Ex : Drama"
+              placeholder="Ex : Telegram, Drama…"
               className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground focus:border-primary focus:outline-none"
             />
           </label>
 
           <label className="block text-xs">
-            <span className="mb-1 block font-medium text-muted-foreground">Chemin (/...)</span>
+            <span className="mb-1 block font-medium text-muted-foreground">Chemin ou URL externe</span>
             <input
               value={newPath}
               onChange={(e) => setNewPath(e.target.value)}
-              maxLength={120}
-              placeholder="/c/drama"
+              maxLength={400}
+              placeholder="/c/drama ou https://t.me/..."
               className="h-9 w-full rounded-lg border border-input bg-background px-3 font-mono text-xs text-foreground focus:border-primary focus:outline-none"
             />
           </label>
 
           <label className="block text-xs">
-            <span className="mb-1 block font-medium text-muted-foreground">Icône mobile</span>
+            <span className="mb-1 block font-medium text-muted-foreground">Icône</span>
             <select
               value={newIcon}
               onChange={(e) => setNewIcon(e.target.value as MenuIconKey)}
@@ -375,10 +445,10 @@ export function AdminNavigationTab() {
                 </label>
 
                 <label className="block text-xs">
-                  <span className="mb-1 block text-muted-foreground">Chemin</span>
+                  <span className="mb-1 block text-muted-foreground">Chemin / URL</span>
                   <input
                     value={item.path}
-                    maxLength={120}
+                    maxLength={400}
                     disabled={Boolean(item.isAccount)}
                     onChange={(e) => updateItem(item.id, { path: e.target.value })}
                     className="h-8 w-full rounded-md border border-input bg-background px-2.5 font-mono text-xs text-foreground focus:border-primary focus:outline-none disabled:opacity-50"

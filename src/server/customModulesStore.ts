@@ -42,6 +42,8 @@ const VALID_ICONS = new Set<MenuIconKey>([
   'star',
   'message-square',
   'lock',
+  'send',
+  'external-link',
 ]);
 
 const VALID_AUTH_RULES = new Set<MenuAuthRule>([
@@ -99,10 +101,20 @@ function cleanFieldPath(raw: unknown, maxLen: number, fallback: string): string 
 }
 
 export function sanitizeMenuPath(raw: unknown): string | null {
-  const val = cleanText(raw, 200, '');
+  const val = cleanText(raw, 400, '');
   if (!val) return null;
   if (/^\/[a-zA-Z0-9/_-]*$/.test(val)) {
     return val === '/' ? '/' : val.replace(/\/+$/, '');
+  }
+  if (/^https?:\/\//i.test(val) && !/[\s\r\n\0]/.test(val)) {
+    try {
+      const parsed = new URL(val);
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+      if (parsed.username || parsed.password) return null;
+      return parsed.toString();
+    } catch {
+      return null;
+    }
   }
   return null;
 }
@@ -139,7 +151,7 @@ export function createDefaultNavigationConfig(): SiteNavigationConfig {
   const now = new Date().toISOString();
   return {
     updatedAt: now,
-    communityNavSeeded: true,
+    communityNavRemoved: true,
     items: [
       {
         id: 'nav_accueil',
@@ -210,20 +222,6 @@ export function createDefaultNavigationConfig(): SiteNavigationConfig {
         order: 50,
         authRule: 'all',
         systemKey: 'suggestion',
-      },
-      {
-        id: 'nav_communaute',
-        label: 'Communauté',
-        path: '/communaute',
-        icon: 'message-square',
-        exact: false,
-        enabled: true,
-        desktop: false,
-        mobile: true,
-        footer: true,
-        order: 55,
-        authRule: 'all',
-        systemKey: 'community',
       },
       {
         id: 'nav_demandes',
@@ -337,39 +335,27 @@ function sanitizeMenuLink(raw: unknown, index: number): MenuLinkConfig | null {
 function loadNavigationConfig(): SiteNavigationConfig {
   const stored = readModuleSnapshot<SiteNavigationConfig>('navigation');
   if (stored && Array.isArray(stored.items) && stored.items.length > 0) {
-    const cleaned = stored.items
+    let cleaned = stored.items
       .map((item, idx) => sanitizeMenuLink(item, idx))
       .filter((x): x is MenuLinkConfig => Boolean(x))
       .sort((a, b) => a.order - b.order);
     if (cleaned.length > 0) {
       let mutated = false;
-      if (
-        !stored.communityNavSeeded &&
-        !cleaned.some((i) => i.path === '/communaute' || i.id === 'nav_communaute')
-      ) {
-        cleaned.push({
-          id: 'nav_communaute',
-          label: 'Communauté',
-          path: '/communaute',
-          icon: 'message-square',
-          exact: false,
-          enabled: true,
-          desktop: false,
-          mobile: true,
-          footer: true,
-          order: 55,
-          authRule: 'all',
-          systemKey: 'community',
-        });
-        cleaned.sort((a, b) => a.order - b.order);
-        mutated = true;
+      if (!stored.communityNavRemoved) {
+        const filtered = cleaned.filter(
+          (i) => i.path !== '/communaute' && i.id !== 'nav_communaute' && i.systemKey !== 'community'
+        );
+        if (filtered.length !== cleaned.length && filtered.length > 0) {
+          cleaned = filtered;
+          mutated = true;
+        }
       }
       const next: SiteNavigationConfig = {
         items: cleaned,
         updatedAt: stored.updatedAt || new Date().toISOString(),
-        communityNavSeeded: true,
+        communityNavRemoved: true,
       };
-      if (mutated || !stored.communityNavSeeded) {
+      if (mutated || !stored.communityNavRemoved) {
         writeModuleSnapshot('navigation', next);
       }
       return next;
@@ -404,7 +390,7 @@ export function updateSiteNavigation(
     if (!item) {
       return {
         ok: false,
-        error: `Élément #${i + 1} invalide : vérifiez le libellé et le chemin (doit commencer par /).`,
+        error: `Élément #${i + 1} invalide : vérifiez le libellé et le chemin (/... ou https://...).`,
       };
     }
     let uniqueId = item.id;
@@ -419,7 +405,7 @@ export function updateSiteNavigation(
   const next: SiteNavigationConfig = {
     items: cleaned,
     updatedAt: new Date().toISOString(),
-    communityNavSeeded: true,
+    communityNavRemoved: true,
   };
   navigationState = next;
   writeModuleSnapshot('navigation', next);
@@ -1069,7 +1055,7 @@ export function deleteCustomModule(slugOrId: string): boolean {
     navigationState = {
       items: nextItems,
       updatedAt: new Date().toISOString(),
-      communityNavSeeded: true,
+      communityNavRemoved: true,
     };
     writeModuleSnapshot('navigation', navigationState);
   }
@@ -1123,7 +1109,7 @@ export function syncNavigationLinkForCustomModule(
   navigationState = {
     items: current,
     updatedAt: new Date().toISOString(),
-    communityNavSeeded: true,
+    communityNavRemoved: true,
   };
   writeModuleSnapshot('navigation', navigationState);
 }
