@@ -1972,10 +1972,131 @@ test('film download links require Pro/Admin, mask Bearer key in admin settings, 
   }
 });
 
+test('Play Report records watch button events locally via /api/player/open and /api/analytics/play and requires admin to read', async () => {
+  const adminRes = await fetch(`${baseUrl}/api/auth/demo-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: 'admin' }),
+  });
+  const adminAuth = (await adminRes.json()) as { token: string };
 
+  const memberRes = await fetch(`${baseUrl}/api/auth/demo-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: 'member' }),
+  });
+  const memberAuth = (await memberRes.json()) as { token: string };
 
+  // 1. /api/admin/analytics/plays blocks guest (403) and non-admin member (403)
+  const guestPlaysRes = await fetch(`${baseUrl}/api/admin/analytics/plays?period=7d`);
+  assert.equal(guestPlaysRes.status, 403);
+  const memberPlaysRes = await fetch(`${baseUrl}/api/admin/analytics/plays?period=7d`, {
+    headers: { Authorization: `Bearer ${memberAuth.token}` },
+  });
+  assert.equal(memberPlaysRes.status, 403);
 
+  const browserHeaders = {
+    'Content-Type': 'application/json',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0 Safari/537.36',
+  };
 
+  // 2. Launching player via /api/player/open records series + movie plays in local SQLite
+  const openSerieRes = await fetch(`${baseUrl}/api/player/open`, {
+    method: 'POST',
+    headers: browserHeaders,
+    body: JSON.stringify({
+      item: {
+        id: '9001',
+        titre: 'Broadchurch Play Test',
+        poster: 'https://image.tmdb.org/t/p/w500/broadchurch.jpg',
+        qualite: 'HD',
+        langue: 'VF',
+        item_type: 'serie',
+        saison: 1,
+        genre: 'Drame',
+        annee: 2013,
+      },
+      tmdb: '46601',
+      season: 1,
+      episode: 1,
+    }),
+  });
+  assert.equal(openSerieRes.status, 200);
 
+  const openFilmRes = await fetch(`${baseUrl}/api/player/open`, {
+    method: 'POST',
+    headers: browserHeaders,
+    body: JSON.stringify({
+      item: {
+        id: '9002',
+        titre: 'Guarding Stars Play Test',
+        poster: 'https://image.tmdb.org/t/p/w500/guarding.jpg',
+        qualite: 'HD',
+        langue: 'VF',
+        item_type: 'film',
+        saison: null,
+        genre: 'Action',
+        annee: 2026,
+      },
+      tmdb: '123456',
+      season: 1,
+      episode: 1,
+    }),
+  });
+  assert.equal(openFilmRes.status, 200);
 
+  // 3. Direct watch button event via /api/analytics/play records Pinoy/custom plays and rejects invalid payload
+  const badPlayRes = await fetch(`${baseUrl}/api/analytics/play`, {
+    method: 'POST',
+    headers: browserHeaders,
+    body: JSON.stringify({ itemType: 'invalid', itemId: '1', title: 'Bad' }),
+  });
+  assert.equal(badPlayRes.status, 400);
 
+  const pinoyPlayRes = await fetch(`${baseUrl}/api/analytics/play`, {
+    method: 'POST',
+    headers: browserHeaders,
+    body: JSON.stringify({
+      itemType: 'pinoy',
+      itemId: '88',
+      slug: 'pinoy-play-test',
+      title: 'Pinoy Watch Test',
+      poster: 'https://streamwall.behoririka.mg/uploads/pinoy/posters/test.jpg',
+    }),
+  });
+  assert.equal(pinoyPlayRes.status, 200);
+
+  // 4. Admin Play Report endpoint returns chart timeline + ranked series & movies
+  const reportRes = await fetch(`${baseUrl}/api/admin/analytics/plays?period=7d`, {
+    headers: { Authorization: `Bearer ${adminAuth.token}` },
+  });
+  assert.equal(reportRes.status, 200);
+  const report = (await reportRes.json()) as {
+    totalPlays: number;
+    moviePlays: number;
+    seriesPlays: number;
+    timeline: Array<{ bucket: string; label: string; plays: number }>;
+    mostPlayedSeries: Array<{ itemId: string; title: string; plays: number; path: string }>;
+    mostPlayedMovies: Array<{ itemId: string; title: string; plays: number; path: string }>;
+  };
+
+  assert.equal(report.timeline.length, 7);
+  assert.ok(report.totalPlays >= 3);
+  assert.ok(report.seriesPlays >= 1);
+  assert.ok(report.moviePlays >= 2);
+  assert.ok(
+    report.mostPlayedSeries.some(
+      (s) => s.itemId === '9001' && s.title === 'Broadchurch Play Test' && s.plays >= 1 && s.path === '/serie/9001'
+    )
+  );
+  assert.ok(
+    report.mostPlayedMovies.some(
+      (m) => m.itemId === '9002' && m.title === 'Guarding Stars Play Test' && m.plays >= 1 && m.path === '/film/9002'
+    )
+  );
+  assert.ok(
+    report.mostPlayedMovies.some(
+      (m) => m.title === 'Pinoy Watch Test' && m.plays >= 1 && m.path === '/pinoy/pinoy-play-test'
+    )
+  );
+});

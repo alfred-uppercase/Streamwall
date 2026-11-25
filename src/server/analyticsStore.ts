@@ -14,12 +14,15 @@ import type {
   DeviceKind,
   HourlyBucket,
   PageStat,
+  PlayReportPayload,
+  PlayTimelinePoint,
   RealtimePayload,
   RealtimeVisitor,
   RegionStat,
   ResolutionStat,
   TechBreakdownItem,
   TimelinePoint,
+  TopPlayedItem,
 } from '../shared/analyticsTypes.ts';
 import { COUNTRIES_BY_CODE, TIMEZONE_TO_GEO } from '../shared/geoCountries.ts';
 
@@ -309,6 +312,43 @@ const pruneRecentSessionsStmt = sqlite.prepare(`
     SELECT session_id FROM analytics_recent_sessions ORDER BY last_activity_ms DESC LIMIT ?
   )
 `);
+
+const selectPlayDayStmt = sqlite.prepare(
+  'SELECT day, total_plays, movie_plays, series_plays, items_json FROM play_report_daily WHERE day = ?'
+);
+const selectPlayRangeStmt = sqlite.prepare(
+  'SELECT day, total_plays, movie_plays, series_plays, items_json FROM play_report_daily WHERE day >= ? AND day <= ? ORDER BY day ASC'
+);
+const upsertPlayDayStmt = sqlite.prepare(`
+  INSERT INTO play_report_daily (day, total_plays, movie_plays, series_plays, items_json, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?)
+  ON CONFLICT(day) DO UPDATE SET
+    total_plays = excluded.total_plays,
+    movie_plays = excluded.movie_plays,
+    series_plays = excluded.series_plays,
+    items_json = excluded.items_json,
+    updated_at = excluded.updated_at
+`);
+
+interface PlayDailyItemBucket {
+  itemType: 'film' | 'serie' | 'anime' | 'pinoy' | 'custom';
+  mediaKind: 'movie' | 'series';
+  itemId: string;
+  title: string;
+  poster: string | null;
+  path: string;
+  plays: number;
+}
+
+interface PlayDailyBucket {
+  day: string;
+  totalPlays: number;
+  moviePlays: number;
+  seriesPlays: number;
+  items: Record<string, PlayDailyItemBucket>;
+}
+
+const playDailyCache = new Map<string, PlayDailyBucket>();
 
 const dailyCache = new Map<string, DailyBucket>();
 const dirtyDays = new Set<string>();
@@ -1640,5 +1680,356 @@ export function computeAnalyticsDashboard(
       topContent,
     },
     realtime,
+  };
+}
+
+function sanitizePlayPoster(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim().slice(0, 400);
+  if (!trimmed) return null;
+  if (trimmed.startsWith('/')) return trimmed;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return parsed.toString();
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function sanitizePlayTitle(raw: unknown): string {
+  if (typeof raw !== 'string') return 'Titre sans nom';
+  const cleaned = raw.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 160);
+  return cleaned || 'Titre sans nom';
+}
+
+function getOrLoadPlayDailyBucket(day: string): PlayDailyBucket {
+  const cached = playDailyCache.get(day);
+  if (cached) return cached;
+
+  try {
+    const row = selectPlayDayStmt.get(day) as
+      | {
+          day: string;
+          total_plays: number;
+          movie_plays: number;
+          series_plays: number;
+          items_json: string;
+        }
+      | undefined;
+    if (row) {
+      let parsedItems: Record<string, PlayDailyItemBucket> = {};
+      try {
+        const raw = JSON.parse(row.items_json) as Record<string, PlayDailyItemBucket>;
+        if (raw && typeof raw === 'object') parsedItems = raw;
+      } catch {
+        parsedItems = {};
+      }
+      const loaded: PlayDailyBucket = {
+        day: row.day,
+        totalPlays: Number(row.total_plays) || 0,
+        moviePlays: Number(row.movie_plays) || 0,
+        seriesPlays: Number(row.series_plays) || 0,
+        items: parsedItems,
+      };
+      if (playDailyCache.size > 90) playDailyCache.clear();
+      playDailyCache.set(day, loaded);
+      return loaded;
+    }
+  } catch {
+    // Fall through to empty bucket
+  }
+
+  const created: PlayDailyBucket = {
+    day,
+    totalPlays: 0,
+    moviePlays: 0,
+    seriesPlays: 0,
+    items: {},
+  };
+  if (playDailyCache.size > 90) playDailyCache.clear();
+  playDailyCache.set(day, created);
+  return created;
+}
+
+export interface RecordPlayEventInput {
+  itemType: 'film' | 'serie' | 'anime' | 'pinoy' | 'custom';
+  itemId: string;
+  title: string;
+  poster?: string | null;
+  slug?: string | null;
+  moduleSlug?: string | null;
+  dayOverride?: string;
+  req?: express.Request;
+}
+
+export function recordPlayEvent(params: RecordPlayEventInput): boolean {
+  if (params.req) {
+    const ua = String(params.req.headers['user-agent'] ?? '');
+    if (isSuspiciousBotUserAgent(ua)) return false;
+  }
+
+  const cleanId = String(params.itemId ?? '').trim().slice(0, 120);
+  if (!cleanId) return false;
+
+  const itemType = (
+    ['film', 'serie', 'anime', 'pinoy', 'custom'].includes(params.itemType)
+      ? params.itemType
+      : 'film'
+  ) as 'film' | 'serie' | 'anime' | 'pinoy' | 'custom';
+
+  const mediaKind: 'movie' | 'series' =
+    itemType === 'serie' || itemType === 'anime' ? 'series' : 'movie';
+
+  const cleanSlug =
+    typeof params.slug === 'string' && params.slug.trim()
+      ? params.slug.trim().slice(0, 140)
+      : cleanId;
+  const cleanModuleSlug =
+    typeof params.moduleSlug === 'string' && /^[a-z0-9_-]{1,40}$/i.test(params.moduleSlug.trim())
+      ? params.moduleSlug.trim().toLowerCase()
+      : 'custom';
+
+  const detailPath =
+    itemType === 'pinoy'
+      ? `/pinoy/${encodeURIComponent(cleanSlug)}`
+      : itemType === 'custom'
+        ? `/c/${encodeURIComponent(cleanModuleSlug)}/${encodeURIComponent(cleanSlug)}`
+        : `/${itemType}/${encodeURIComponent(cleanId)}`;
+
+  const cleanTitle = sanitizePlayTitle(params.title);
+  const cleanPoster = sanitizePlayPoster(params.poster);
+
+  const day =
+    params.dayOverride && /^\d{4}-\d{2}-\d{2}$/.test(params.dayOverride)
+      ? params.dayOverride
+      : utcDayKey(Date.now());
+
+  const bucket = getOrLoadPlayDailyBucket(day);
+  bucket.totalPlays += 1;
+  if (mediaKind === 'series') {
+    bucket.seriesPlays += 1;
+  } else {
+    bucket.moviePlays += 1;
+  }
+
+  const itemKey = `${mediaKind}:${itemType}:${itemType === 'pinoy' || itemType === 'custom' ? cleanSlug : cleanId}`;
+  const existing = bucket.items[itemKey];
+  if (existing) {
+    existing.plays += 1;
+    if (cleanTitle && cleanTitle !== 'Titre sans nom') existing.title = cleanTitle;
+    if (cleanPoster) existing.poster = cleanPoster;
+    existing.path = detailPath;
+  } else {
+    // Guard against unbounded per-day key explosion
+    const keys = Object.keys(bucket.items);
+    if (keys.length >= 2_500) {
+      let minKey: string | null = null;
+      let minPlays = Infinity;
+      for (const k of keys) {
+        const p = bucket.items[k]?.plays ?? 0;
+        if (p < minPlays) {
+          minPlays = p;
+          minKey = k;
+        }
+      }
+      if (minKey) delete bucket.items[minKey];
+    }
+    bucket.items[itemKey] = {
+      itemType,
+      mediaKind,
+      itemId: cleanId,
+      title: cleanTitle,
+      poster: cleanPoster,
+      path: detailPath,
+      plays: 1,
+    };
+  }
+
+  try {
+    upsertPlayDayStmt.run(
+      day,
+      bucket.totalPlays,
+      bucket.moviePlays,
+      bucket.seriesPlays,
+      JSON.stringify(bucket.items),
+      new Date().toISOString()
+    );
+  } catch {
+    // Non-fatal SQLite write error
+  }
+  return true;
+}
+
+export function computePlayReport(
+  periodKey: AnalyticsPeriodKey = '7d',
+  customStart?: string,
+  customEnd?: string
+): PlayReportPayload {
+  const { startDate, endDate } = resolveDateRange(periodKey, customStart, customEnd);
+  const byDay = new Map<string, PlayDailyBucket>();
+
+  try {
+    const rows = selectPlayRangeStmt.all(startDate, endDate) as Array<{
+      day: string;
+      total_plays: number;
+      movie_plays: number;
+      series_plays: number;
+      items_json: string;
+    }>;
+    for (const r of rows) {
+      let parsedItems: Record<string, PlayDailyItemBucket> = {};
+      try {
+        const raw = JSON.parse(r.items_json) as Record<string, PlayDailyItemBucket>;
+        if (raw && typeof raw === 'object') parsedItems = raw;
+      } catch {
+        parsedItems = {};
+      }
+      byDay.set(r.day, {
+        day: r.day,
+        totalPlays: Number(r.total_plays) || 0,
+        moviePlays: Number(r.movie_plays) || 0,
+        seriesPlays: Number(r.series_plays) || 0,
+        items: parsedItems,
+      });
+    }
+  } catch {
+    // Ignore SQLite read error
+  }
+
+  for (const [day, cached] of playDailyCache.entries()) {
+    if (day >= startDate && day <= endDate) {
+      byDay.set(day, cached);
+    }
+  }
+
+  let totalPlays = 0;
+  let moviePlays = 0;
+  let seriesPlays = 0;
+
+  const seriesAgg = new Map<string, TopPlayedItem>();
+  const movieAgg = new Map<string, TopPlayedItem>();
+
+  for (const b of byDay.values()) {
+    totalPlays += b.totalPlays;
+    moviePlays += b.moviePlays;
+    seriesPlays += b.seriesPlays;
+
+    for (const [key, item] of Object.entries(b.items)) {
+      const targetMap = item.mediaKind === 'series' ? seriesAgg : movieAgg;
+      const prev = targetMap.get(key);
+      if (prev) {
+        prev.plays += item.plays;
+        if (item.title && item.title !== 'Titre sans nom') prev.title = item.title;
+        if (item.poster) prev.poster = item.poster;
+        if (item.path) prev.path = item.path;
+      } else {
+        targetMap.set(key, {
+          key,
+          itemType: item.itemType,
+          mediaKind: item.mediaKind,
+          itemId: item.itemId,
+          title: item.title,
+          poster: item.poster,
+          path: item.path,
+          plays: item.plays,
+        });
+      }
+    }
+  }
+
+  const allDays = enumerateDays(startDate, endDate);
+  const granularity: 'day' | 'month' = allDays.length > 110 ? 'month' : 'day';
+  const timeline: PlayTimelinePoint[] = [];
+
+  if (granularity === 'day') {
+    const shortRange = allDays.length <= 14;
+    for (const d of allDays) {
+      const b = byDay.get(d);
+      const [y, m, dayNum] = d.split('-');
+      const dateObj = new Date(Date.UTC(Number(y), Number(m) - 1, Number(dayNum)));
+      const label = shortRange
+        ? `${String(Number(dayNum))} ${dateObj
+            .toLocaleDateString('fr-FR', { weekday: 'short', timeZone: 'UTC' })
+            .replace(/\.$/, '')}`
+        : dateObj.toLocaleDateString('fr-FR', {
+            day: '2-digit',
+            month: 'short',
+            timeZone: 'UTC',
+          });
+      const fullLabel = dateObj.toLocaleDateString('fr-FR', {
+        weekday: 'long',
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric',
+        timeZone: 'UTC',
+      });
+      timeline.push({
+        bucket: d,
+        label,
+        fullLabel,
+        plays: b?.totalPlays ?? 0,
+        moviePlays: b?.moviePlays ?? 0,
+        seriesPlays: b?.seriesPlays ?? 0,
+      });
+    }
+  } else {
+    const monthAgg = new Map<
+      string,
+      { plays: number; moviePlays: number; seriesPlays: number }
+    >();
+    for (const d of allDays) {
+      const mKey = d.slice(0, 7);
+      const entry = monthAgg.get(mKey) ?? { plays: 0, moviePlays: 0, seriesPlays: 0 };
+      const b = byDay.get(d);
+      if (b) {
+        entry.plays += b.totalPlays;
+        entry.moviePlays += b.moviePlays;
+        entry.seriesPlays += b.seriesPlays;
+      }
+      monthAgg.set(mKey, entry);
+    }
+    for (const [mKey, entry] of [...monthAgg.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const [y, m] = mKey.split('-');
+      const dateObj = new Date(Date.UTC(Number(y), Number(m) - 1, 1));
+      const label = dateObj.toLocaleDateString('fr-FR', {
+        month: 'short',
+        year: '2-digit',
+        timeZone: 'UTC',
+      });
+      const fullLabel = dateObj.toLocaleDateString('fr-FR', {
+        month: 'long',
+        year: 'numeric',
+        timeZone: 'UTC',
+      });
+      timeline.push({
+        bucket: mKey,
+        label,
+        fullLabel,
+        plays: entry.plays,
+        moviePlays: entry.moviePlays,
+        seriesPlays: entry.seriesPlays,
+      });
+    }
+  }
+
+  const mostPlayedSeries = [...seriesAgg.values()]
+    .sort((a, b) => b.plays - a.plays || a.title.localeCompare(b.title))
+    .slice(0, 50);
+
+  const mostPlayedMovies = [...movieAgg.values()]
+    .sort((a, b) => b.plays - a.plays || a.title.localeCompare(b.title))
+    .slice(0, 50);
+
+  return {
+    period: { key: periodKey, startDate, endDate },
+    totalPlays,
+    moviePlays,
+    seriesPlays,
+    timeline,
+    mostPlayedSeries,
+    mostPlayedMovies,
   };
 }

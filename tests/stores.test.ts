@@ -1088,3 +1088,97 @@ test('billingStore links film download access to SubscriptionPlan filmDownloadsE
   assert.ok(disabledRes.plan);
   assert.equal(canPlanAccessFilmDownloads('usr_dl_free_check'), false);
 });
+
+test('analyticsStore records local Play Report events in SQLite, filters bots, sanitizes posters, and ranks series/movies', async () => {
+  const { computePlayReport, recordPlayEvent } = await import('../src/server/analyticsStore.ts');
+
+  const today = new Date().toISOString().slice(0, 10);
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+
+  const botReq = {
+    headers: { 'user-agent': 'python-requests/2.31.0' },
+  } as unknown as import('express').Request;
+
+  assert.equal(
+    recordPlayEvent({
+      itemType: 'film',
+      itemId: '99999',
+      title: 'Bot Ignored Film',
+      req: botReq,
+    }),
+    false
+  );
+
+  assert.equal(
+    recordPlayEvent({
+      itemType: 'serie',
+      itemId: '7499',
+      title: 'Monk',
+      poster: 'https://image.tmdb.org/t/p/w500/monk.jpg',
+      dayOverride: yesterday,
+    }),
+    true
+  );
+  assert.equal(
+    recordPlayEvent({
+      itemType: 'serie',
+      itemId: '7499',
+      title: 'Monk',
+      poster: 'https://image.tmdb.org/t/p/w500/monk.jpg',
+      dayOverride: today,
+    }),
+    true
+  );
+  assert.equal(
+    recordPlayEvent({
+      itemType: 'anime',
+      itemId: '8800',
+      title: 'Solo Leveling',
+      poster: 'javascript:alert(1)',
+      dayOverride: today,
+    }),
+    true
+  );
+  assert.equal(
+    recordPlayEvent({
+      itemType: 'film',
+      itemId: '24433',
+      title: 'Toy Story 5',
+      poster: 'https://image.tmdb.org/t/p/w500/toystory5.jpg',
+      dayOverride: today,
+    }),
+    true
+  );
+  assert.equal(
+    recordPlayEvent({
+      itemType: 'pinoy',
+      itemId: '15',
+      slug: 'labas-pasok-2026',
+      title: 'Labas Pasok',
+      poster: 'https://streamwall.behoririka.mg/uploads/pinoy/posters/labas-pasok-2026.jpg',
+      dayOverride: today,
+    }),
+    true
+  );
+
+  const report = computePlayReport('7d');
+  assert.equal(report.timeline.length, 7);
+  assert.ok(report.totalPlays >= 5);
+  assert.ok(report.seriesPlays >= 3);
+  assert.ok(report.moviePlays >= 2);
+
+  const monk = report.mostPlayedSeries.find((s) => s.itemId === '7499');
+  assert.ok(monk);
+  assert.equal(monk.plays, 2);
+  assert.equal(monk.path, '/serie/7499');
+  assert.equal(monk.poster, 'https://image.tmdb.org/t/p/w500/monk.jpg');
+
+  const solo = report.mostPlayedSeries.find((s) => s.itemId === '8800');
+  assert.ok(solo);
+  assert.equal(solo.poster, null);
+
+  const pinoy = report.mostPlayedMovies.find((m) => m.itemType === 'pinoy');
+  assert.ok(pinoy);
+  assert.equal(pinoy.path, '/pinoy/labas-pasok-2026');
+});
+

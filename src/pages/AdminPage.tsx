@@ -15,6 +15,7 @@ import {
   Layers,
   Mail,
   Menu,
+  Play,
   Plug,
   RefreshCw,
   RotateCcw,
@@ -51,6 +52,7 @@ import { AdminPrivacyTab } from '../components/AdminPrivacyTab';
 import { AdminErrorsTab } from '../components/AdminErrorsTab';
 import { AdminNavigationTab } from '../components/AdminNavigationTab';
 import { AdminCustomApisTab } from '../components/AdminCustomApisTab';
+import { PlayReportPanel } from '../components/PlayReportPanel';
 import { ProCrownBadge } from '../components/UserAvatar';
 
 const PLAYER_FIELDS: { key: PlayerKey; label: string; hint: string }[] = [
@@ -68,6 +70,7 @@ const PLAYER_FIELDS: { key: PlayerKey; label: string; hint: string }[] = [
 
 type AdminTab =
   | 'analytics'
+  | 'plays'
   | 'offers'
   | 'users'
   | 'navigation'
@@ -84,6 +87,7 @@ type AdminTab =
 
 const VALID_TABS: AdminTab[] = [
   'analytics',
+  'plays',
   'offers',
   'users',
   'navigation',
@@ -101,6 +105,7 @@ const VALID_TABS: AdminTab[] = [
 
 const TAB_TITLE_MAP: Record<AdminTab, string> = {
   analytics: 'Administration · Statistiques',
+  plays: 'Administration · Play Report',
   offers: 'Administration · Offres & Paiements',
   users: 'Administration · Utilisateurs',
   navigation: 'Administration · Menus (PC & Mobile)',
@@ -485,6 +490,7 @@ export function AdminPage() {
         {(
           [
             ['analytics', 'Statistiques', BarChart3],
+            ['plays', 'Play Report', Play],
             ['offers', 'Offres & Paiements', CreditCard],
             ['users', 'Utilisateurs', Users],
             ['navigation', 'Menus', Menu],
@@ -531,6 +537,9 @@ export function AdminPage() {
 
       {/* TAB: WEB ANALYTICS & STATISTIQUES */}
       {tab === 'analytics' && <AdminAnalyticsTab />}
+
+      {/* TAB: PLAY REPORT */}
+      {tab === 'plays' && <PlayReportPanel />}
 
       {/* TAB: OFFERS & PAYMENTS */}
       {tab === 'offers' && <AdminBillingTab />}

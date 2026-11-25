@@ -147,6 +147,15 @@ sqlite.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_analytics_recent_last_activity
     ON analytics_recent_sessions (last_activity_ms DESC);
+
+  CREATE TABLE IF NOT EXISTS play_report_daily (
+    day TEXT PRIMARY KEY,
+    total_plays INTEGER NOT NULL DEFAULT 0,
+    movie_plays INTEGER NOT NULL DEFAULT 0,
+    series_plays INTEGER NOT NULL DEFAULT 0,
+    items_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL
+  );
 `);
 
 const selectModuleStmt = sqlite.prepare(

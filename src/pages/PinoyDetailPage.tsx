@@ -378,7 +378,16 @@ export function PinoyDetailPage() {
               {primaryPlayer && (
                 <button
                   type="button"
-                  onClick={() => setPlayerModalOpen(true)}
+                  onClick={() => {
+                    api.recordPlayEvent({
+                      itemType: 'pinoy',
+                      itemId: String(film.id),
+                      slug: film.slug,
+                      title: film.titre,
+                      poster: film.poster,
+                    });
+                    setPlayerModalOpen(true);
+                  }}
                   className="inline-flex items-center gap-2 rounded-lg bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 whitespace-nowrap shrink-0"
                 >
                   <Play className="size-4 fill-current" />

@@ -403,6 +403,14 @@ export function CustomDetailPage() {
                 <button
                   type="button"
                   onClick={() => {
+                    api.recordPlayEvent({
+                      itemType: 'custom',
+                      itemId: String(item.id),
+                      slug: item.routeKey,
+                      moduleSlug: slug,
+                      title: item.titre,
+                      poster: item.poster,
+                    });
                     setSelectedPlayerIdx(0);
                     setPlayerModalOpen(true);
                   }}

@@ -62,6 +62,7 @@ import type {
 import type {
   AnalyticsDashboardPayload,
   AnalyticsPeriodKey,
+  PlayReportPayload,
 } from '../shared/analyticsTypes';
 
 const STORAGE_TOKEN_KEY = 'tapenaka_auth_token';
@@ -774,6 +775,27 @@ export const api = {
     if (params.start) p.set('start', params.start);
     if (params.end) p.set('end', params.end);
     return apiRequest<AnalyticsDashboardPayload>(`/api/admin/analytics?${p.toString()}`);
+  },
+  adminPlayReport: (params: { period: AnalyticsPeriodKey; start?: string; end?: string }) => {
+    const p = new URLSearchParams({ period: params.period });
+    if (params.start) p.set('start', params.start);
+    if (params.end) p.set('end', params.end);
+    return apiRequest<PlayReportPayload>(`/api/admin/analytics/plays?${p.toString()}`);
+  },
+  recordPlayEvent: (payload: {
+    itemType: 'film' | 'serie' | 'anime' | 'pinoy' | 'custom';
+    itemId: string;
+    title: string;
+    poster?: string | null;
+    slug?: string | null;
+    moduleSlug?: string | null;
+  }) => {
+    void fetch('/api/analytics/play', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    }).catch(() => {});
   },
 
   // Billing & Subscriptions

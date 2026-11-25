@@ -30,6 +30,7 @@ import {
 import { api } from '../lib/client';
 import type { AnalyticsPeriodKey, DeviceKind } from '../shared/analyticsTypes';
 import { WorldVisitorMap } from './WorldVisitorMap';
+import { PlayReportPanel } from './PlayReportPanel';
 
 const PERIOD_OPTIONS: { key: AnalyticsPeriodKey; label: string }[] = [
   { key: 'today', label: "Aujourd'hui" },
@@ -277,6 +278,14 @@ export function AdminAnalyticsTab() {
               </p>
             </div>
           </section>
+
+          {/* Local Play Report (Watch button events) */}
+          <PlayReportPanel
+            period={periodKey}
+            customStart={customStart}
+            customEnd={customEnd}
+            showPeriodFilter={false}
+          />
 
           {/* Traffic Evolution & Hourly Frequency Histogram */}
           <section className="grid gap-6 lg:grid-cols-12">

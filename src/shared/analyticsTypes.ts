@@ -155,3 +155,37 @@ export interface AnalyticsDashboardPayload {
   };
   realtime: RealtimePayload;
 }
+
+export interface PlayTimelinePoint {
+  bucket: string;
+  label: string;
+  fullLabel: string;
+  plays: number;
+  moviePlays: number;
+  seriesPlays: number;
+}
+
+export interface TopPlayedItem {
+  key: string;
+  itemType: 'film' | 'serie' | 'anime' | 'pinoy' | 'custom';
+  mediaKind: 'movie' | 'series';
+  itemId: string;
+  title: string;
+  poster: string | null;
+  path: string;
+  plays: number;
+}
+
+export interface PlayReportPayload {
+  period: {
+    key: AnalyticsPeriodKey;
+    startDate: string;
+    endDate: string;
+  };
+  totalPlays: number;
+  moviePlays: number;
+  seriesPlays: number;
+  timeline: PlayTimelinePoint[];
+  mostPlayedSeries: TopPlayedItem[];
+  mostPlayedMovies: TopPlayedItem[];
+}

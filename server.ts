@@ -93,6 +93,7 @@ import {
   antiBotAndRateLimitMiddleware,
   checkLoginLockout,
   clearLoginFailures,
+  consumeRateLimit,
   createCaptchaChallenge,
   csrfOriginCheckMiddleware,
   escapeHtml,
@@ -129,12 +130,14 @@ import {
 import type { AnalyticsPeriodKey } from './src/shared/analyticsTypes.ts';
 import {
   computeAnalyticsDashboard,
+  computePlayReport,
   computeRealtimeAnalytics,
   getActivePresenceStats,
   getOnlineMemberPresence,
   getTopContentStats,
   parseUserAgent,
   recordAnalyticsCollect,
+  recordPlayEvent,
   resolveGeoFromRequest,
   setActiveMembersCountProvider,
   touchActiveUserPresence,
@@ -4021,6 +4024,19 @@ export async function createApiApp(): Promise<express.Express> {
       return;
     }
 
+    const rawTypeStr = String(rawItem.item_type || 'film');
+    const normalizedPlayType = (
+      rawTypeStr.startsWith('custom:') ? 'custom' : rawTypeStr
+    ) as 'film' | 'serie' | 'anime' | 'pinoy' | 'custom';
+    recordPlayEvent({
+      itemType: normalizedPlayType,
+      itemId: String(rawItem.id),
+      title: rawItem.titre,
+      poster: rawItem.poster ?? null,
+      moduleSlug: rawTypeStr.startsWith('custom:') ? rawTypeStr.slice(7) : null,
+      req,
+    });
+
     if (auth) {
       if (isSupabaseEnabled() && auth.sbClient) {
         try {
@@ -6967,6 +6983,37 @@ export async function createApiApp(): Promise<express.Express> {
     res.json({ ok: true });
   });
 
+  app.post('/api/analytics/play', (req, res) => {
+    const ip = getClientIp(req);
+    const rl = consumeRateLimit(`play_event:${ip}`, 90, 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ ok: false, error: 'Trop de requêtes' });
+      return;
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const rawType = String(body.itemType ?? '').trim();
+    if (!['film', 'serie', 'anime', 'pinoy', 'custom'].includes(rawType)) {
+      res.status(400).json({ ok: false, error: 'Type de contenu invalide' });
+      return;
+    }
+    const itemId = String(body.itemId ?? '').trim().slice(0, 120);
+    const title = String(body.title ?? '').trim().slice(0, 160);
+    if (!itemId || !title) {
+      res.status(400).json({ ok: false, error: 'Paramètres manquants' });
+      return;
+    }
+    recordPlayEvent({
+      itemType: rawType as 'film' | 'serie' | 'anime' | 'pinoy' | 'custom',
+      itemId,
+      title,
+      poster: typeof body.poster === 'string' ? body.poster : null,
+      slug: typeof body.slug === 'string' ? body.slug : null,
+      moduleSlug: typeof body.moduleSlug === 'string' ? body.moduleSlug : null,
+      req,
+    });
+    res.json({ ok: true });
+  });
+
   app.get('/api/admin/analytics', async (req, res) => {
     const auth = await requireAdmin(req, res);
     if (!auth) return;
@@ -6986,6 +7033,27 @@ export async function createApiApp(): Promise<express.Express> {
     const customStart = req.query.start ? String(req.query.start).slice(0, 10) : undefined;
     const customEnd = req.query.end ? String(req.query.end).slice(0, 10) : undefined;
     res.json(computeAnalyticsDashboard(period, customStart, customEnd));
+  });
+
+  app.get('/api/admin/analytics/plays', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const rawPeriod = String(req.query.period ?? '7d');
+    const allowedPeriods: AnalyticsPeriodKey[] = [
+      'today',
+      'yesterday',
+      '7d',
+      '30d',
+      '90d',
+      'year',
+      'custom',
+    ];
+    const period: AnalyticsPeriodKey = allowedPeriods.includes(rawPeriod as AnalyticsPeriodKey)
+      ? (rawPeriod as AnalyticsPeriodKey)
+      : '7d';
+    const customStart = req.query.start ? String(req.query.start).slice(0, 10) : undefined;
+    const customEnd = req.query.end ? String(req.query.end).slice(0, 10) : undefined;
+    res.json(computePlayReport(period, customStart, customEnd));
   });
 
   app.get('/api/admin/analytics/realtime', async (req, res) => {
