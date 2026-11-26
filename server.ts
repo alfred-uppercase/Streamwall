@@ -4,6 +4,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
+import compression from 'compression';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createServer as createViteServer } from 'vite';
 import {
@@ -132,6 +133,7 @@ import {
   computeAnalyticsDashboard,
   computePlayReport,
   computeRealtimeAnalytics,
+  flushAnalyticsNow,
   getActivePresenceStats,
   getOnlineMemberPresence,
   getTopContentStats,
@@ -2146,6 +2148,7 @@ export async function createApiApp(): Promise<express.Express> {
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
   app.use(securityHeadersMiddleware);
+  app.use(compression({ threshold: 1024 }));
   app.use('/api', antiBotAndRateLimitMiddleware);
 
   app.get('/api/health', (_req, res) => {
@@ -7906,8 +7909,29 @@ async function startServer() {
   const httpServer = http.createServer(app);
   const distPath = path.join(__dirname, 'dist');
   if (process.env.NODE_ENV === 'production' && fs.existsSync(distPath)) {
-    app.use(express.static(distPath));
+    const assetsPath = path.join(distPath, 'assets');
+    if (fs.existsSync(assetsPath)) {
+      app.use(
+        '/assets',
+        express.static(assetsPath, {
+          maxAge: '365d',
+          immutable: true,
+        })
+      );
+    }
+    app.use(
+      express.static(distPath, {
+        maxAge: '1h',
+        setHeaders: (res, filePath) => {
+          const base = path.basename(filePath);
+          if (base === 'index.html' || base === 'sw.js' || base === 'manifest.json') {
+            res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache, must-revalidate');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   } else {
@@ -7930,6 +7954,24 @@ async function startServer() {
       })`
     );
   });
+
+  let shuttingDown = false;
+  const gracefulShutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      flushAnalyticsNow();
+    } catch {
+      // Non-fatal
+    }
+    httpServer.close(() => {
+      process.exit(0);
+    });
+    const forceTimer = setTimeout(() => process.exit(0), 5_000);
+    if (typeof forceTimer.unref === 'function') forceTimer.unref();
+  };
+  process.on('SIGTERM', gracefulShutdown);
+  process.on('SIGINT', gracefulShutdown);
 }
 
 if (process.env.TAPENAKA_DISABLE_AUTOSTART !== '1') {

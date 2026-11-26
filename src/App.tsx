@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { Suspense, lazy, useEffect } from 'react';
 import {
   BrowserRouter,
   Link,
@@ -16,27 +16,76 @@ import { SiteConfigProvider, useSiteConfig } from './lib/siteConfig';
 import { ThemeProvider, useTheme } from './lib/theme';
 import { Navbar } from './components/Navbar';
 import { HomePage } from './pages/HomePage';
-import { CataloguePage } from './pages/CataloguePage';
-import { DetailPage } from './pages/DetailPage';
-import { SuggestionPage } from './pages/SuggestionPage';
-import { RequestsPage } from './pages/RequestsPage';
-import { FavoritesPage } from './pages/FavoritesPage';
-import { ProfilePage } from './pages/ProfilePage';
-import { AdminPage } from './pages/AdminPage';
-import { PricingPage } from './pages/PricingPage';
-import { PrivacyPage } from './pages/PrivacyPage';
-import { AuthPage, ResetPasswordPage } from './pages/AuthPage';
-import { PinoyCataloguePage } from './pages/PinoyCataloguePage';
-import { PinoyDetailPage } from './pages/PinoyDetailPage';
-import { CustomCataloguePage } from './pages/CustomCataloguePage';
-import { CustomDetailPage } from './pages/CustomDetailPage';
-import { LinkProtectPage } from './pages/LinkProtectPage';
 import { AnalyticsTracker } from './components/AnalyticsTracker';
 import { OfflineIndicator } from './components/PWAInstallButton';
 import { PopupManager } from './components/PopupManager';
 import { WebPushAutoPrompt } from './components/WebPushAutoPrompt';
 import { AppErrorBoundary } from './components/ErrorBoundary';
 import type { MenuLinkConfig } from './shared/types';
+
+const CataloguePage = lazy(() =>
+  import('./pages/CataloguePage').then((m) => ({ default: m.CataloguePage }))
+);
+const DetailPage = lazy(() =>
+  import('./pages/DetailPage').then((m) => ({ default: m.DetailPage }))
+);
+const SuggestionPage = lazy(() =>
+  import('./pages/SuggestionPage').then((m) => ({ default: m.SuggestionPage }))
+);
+const RequestsPage = lazy(() =>
+  import('./pages/RequestsPage').then((m) => ({ default: m.RequestsPage }))
+);
+const FavoritesPage = lazy(() =>
+  import('./pages/FavoritesPage').then((m) => ({ default: m.FavoritesPage }))
+);
+const ProfilePage = lazy(() =>
+  import('./pages/ProfilePage').then((m) => ({ default: m.ProfilePage }))
+);
+const AdminPage = lazy(() =>
+  import('./pages/AdminPage').then((m) => ({ default: m.AdminPage }))
+);
+const PricingPage = lazy(() =>
+  import('./pages/PricingPage').then((m) => ({ default: m.PricingPage }))
+);
+const PrivacyPage = lazy(() =>
+  import('./pages/PrivacyPage').then((m) => ({ default: m.PrivacyPage }))
+);
+const AuthPage = lazy(() =>
+  import('./pages/AuthPage').then((m) => ({ default: m.AuthPage }))
+);
+const ResetPasswordPage = lazy(() =>
+  import('./pages/AuthPage').then((m) => ({ default: m.ResetPasswordPage }))
+);
+const PinoyCataloguePage = lazy(() =>
+  import('./pages/PinoyCataloguePage').then((m) => ({ default: m.PinoyCataloguePage }))
+);
+const PinoyDetailPage = lazy(() =>
+  import('./pages/PinoyDetailPage').then((m) => ({ default: m.PinoyDetailPage }))
+);
+const CustomCataloguePage = lazy(() =>
+  import('./pages/CustomCataloguePage').then((m) => ({ default: m.CustomCataloguePage }))
+);
+const CustomDetailPage = lazy(() =>
+  import('./pages/CustomDetailPage').then((m) => ({ default: m.CustomDetailPage }))
+);
+const LinkProtectPage = lazy(() =>
+  import('./pages/LinkProtectPage').then((m) => ({ default: m.LinkProtectPage }))
+);
+
+function RouteLoadingFallback() {
+  return (
+    <main className="mx-auto max-w-7xl px-4 py-12 sm:px-6" aria-busy="true">
+      <div className="space-y-4">
+        <div className="h-7 w-48 animate-pulse rounded-lg bg-card border border-border" />
+        <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 lg:grid-cols-6 sm:gap-5">
+          {Array.from({ length: 6 }).map((_, idx) => (
+            <div key={idx} className="aspect-[2/3] animate-pulse rounded-lg bg-card border border-border" />
+          ))}
+        </div>
+      </div>
+    </main>
+  );
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -46,6 +95,7 @@ const queryClient = new QueryClient({
       retry: 1,
       refetchOnWindowFocus: false,
       refetchOnReconnect: false,
+      refetchIntervalInBackground: false,
     },
   },
 });
@@ -130,48 +180,50 @@ function AppShell() {
       <PopupManager />
       <Navbar />
       <div className="flex-1">
-        <Routes>
-          <Route path="/" element={<HomePage />} />
-          <Route path="/catalogue" element={<CataloguePage />} />
-          <Route path="/pinoy" element={<PinoyCataloguePage />} />
-          <Route path="/pinoy/:slug" element={<PinoyDetailPage />} />
-          <Route path="/c/:slug" element={<CustomCataloguePage />} />
-          <Route path="/c/:slug/:itemKey" element={<CustomDetailPage />} />
-          <Route path="/suggestion" element={<SuggestionPage />} />
-          <Route path="/communaute" element={<Navigate to="/" replace />} />
-          <Route path="/demandes" element={<RequestsPage />} />
-          <Route path="/abonnement" element={<PricingPage />} />
-          <Route path="/confidentialite" element={<PrivacyPage />} />
-          <Route path="/linprotect/:token" element={<LinkProtectPage />} />
-          <Route path="/:type/:id" element={<DetailPage />} />
-          <Route path="/auth" element={<AuthPage />} />
-          <Route path="/reset-password" element={<ResetPasswordPage />} />
-          <Route
-            path="/favoris"
-            element={
-              <RequireMember>
-                <FavoritesPage />
-              </RequireMember>
-            }
-          />
-          <Route
-            path="/profil"
-            element={
-              <RequireMember>
-                <ProfilePage />
-              </RequireMember>
-            }
-          />
-          <Route
-            path="/admin"
-            element={
-              <RequireAdmin>
-                <AdminPage />
-              </RequireAdmin>
-            }
-          />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+        <Suspense fallback={<RouteLoadingFallback />}>
+          <Routes>
+            <Route path="/" element={<HomePage />} />
+            <Route path="/catalogue" element={<CataloguePage />} />
+            <Route path="/pinoy" element={<PinoyCataloguePage />} />
+            <Route path="/pinoy/:slug" element={<PinoyDetailPage />} />
+            <Route path="/c/:slug" element={<CustomCataloguePage />} />
+            <Route path="/c/:slug/:itemKey" element={<CustomDetailPage />} />
+            <Route path="/suggestion" element={<SuggestionPage />} />
+            <Route path="/communaute" element={<Navigate to="/" replace />} />
+            <Route path="/demandes" element={<RequestsPage />} />
+            <Route path="/abonnement" element={<PricingPage />} />
+            <Route path="/confidentialite" element={<PrivacyPage />} />
+            <Route path="/linprotect/:token" element={<LinkProtectPage />} />
+            <Route path="/:type/:id" element={<DetailPage />} />
+            <Route path="/auth" element={<AuthPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
+            <Route
+              path="/favoris"
+              element={
+                <RequireMember>
+                  <FavoritesPage />
+                </RequireMember>
+              }
+            />
+            <Route
+              path="/profil"
+              element={
+                <RequireMember>
+                  <ProfilePage />
+                </RequireMember>
+              }
+            />
+            <Route
+              path="/admin"
+              element={
+                <RequireAdmin>
+                  <AdminPage />
+                </RequireAdmin>
+              }
+            />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Suspense>
       </div>
 
       <footer className="mt-16 border-t border-border bg-background/80">

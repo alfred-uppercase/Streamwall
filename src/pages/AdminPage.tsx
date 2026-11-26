@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -42,20 +42,55 @@ import type {
 } from '../shared/types';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle, useSiteConfig } from '../lib/siteConfig';
-import { AdminAnalyticsTab } from '../components/AdminAnalyticsTab';
-import { AdminBillingTab } from '../components/AdminBillingTab';
-import { AdminUsersTab } from '../components/AdminUsersTab';
-import { AdminNotificationsTab } from '../components/AdminNotificationsTab';
-import { AdminEmailsTab } from '../components/AdminEmailsTab';
-import { AdminPopupsTab } from '../components/AdminPopupsTab';
-import { AdminRequestsTab } from '../components/AdminRequestsTab';
-import { AdminPrivacyTab } from '../components/AdminPrivacyTab';
-import { AdminErrorsTab } from '../components/AdminErrorsTab';
-import { AdminNavigationTab } from '../components/AdminNavigationTab';
-import { AdminCustomApisTab } from '../components/AdminCustomApisTab';
-import { PlayReportPanel } from '../components/PlayReportPanel';
-import { OnlineNowPanel } from '../components/OnlineNowPanel';
 import { ProCrownBadge } from '../components/UserAvatar';
+
+const AdminAnalyticsTab = lazy(() =>
+  import('../components/AdminAnalyticsTab').then((m) => ({ default: m.AdminAnalyticsTab }))
+);
+const AdminBillingTab = lazy(() =>
+  import('../components/AdminBillingTab').then((m) => ({ default: m.AdminBillingTab }))
+);
+const AdminUsersTab = lazy(() =>
+  import('../components/AdminUsersTab').then((m) => ({ default: m.AdminUsersTab }))
+);
+const AdminNotificationsTab = lazy(() =>
+  import('../components/AdminNotificationsTab').then((m) => ({ default: m.AdminNotificationsTab }))
+);
+const AdminEmailsTab = lazy(() =>
+  import('../components/AdminEmailsTab').then((m) => ({ default: m.AdminEmailsTab }))
+);
+const AdminPopupsTab = lazy(() =>
+  import('../components/AdminPopupsTab').then((m) => ({ default: m.AdminPopupsTab }))
+);
+const AdminRequestsTab = lazy(() =>
+  import('../components/AdminRequestsTab').then((m) => ({ default: m.AdminRequestsTab }))
+);
+const AdminPrivacyTab = lazy(() =>
+  import('../components/AdminPrivacyTab').then((m) => ({ default: m.AdminPrivacyTab }))
+);
+const AdminErrorsTab = lazy(() =>
+  import('../components/AdminErrorsTab').then((m) => ({ default: m.AdminErrorsTab }))
+);
+const AdminNavigationTab = lazy(() =>
+  import('../components/AdminNavigationTab').then((m) => ({ default: m.AdminNavigationTab }))
+);
+const AdminCustomApisTab = lazy(() =>
+  import('../components/AdminCustomApisTab').then((m) => ({ default: m.AdminCustomApisTab }))
+);
+const PlayReportPanel = lazy(() =>
+  import('../components/PlayReportPanel').then((m) => ({ default: m.PlayReportPanel }))
+);
+const OnlineNowPanel = lazy(() =>
+  import('../components/OnlineNowPanel').then((m) => ({ default: m.OnlineNowPanel }))
+);
+
+function AdminTabFallback() {
+  return (
+    <div className="rounded-xl border border-border bg-card p-10 text-center text-xs text-muted-foreground">
+      Chargement du module d’administration…
+    </div>
+  );
+}
 
 const PLAYER_FIELDS: { key: PlayerKey; label: string; hint: string }[] = [
   {
@@ -539,7 +574,9 @@ export function AdminPage() {
             >
               <X className="size-4" />
             </button>
-            <OnlineNowPanel compact onNavigate={() => setShowOnlineNowModal(false)} />
+            <Suspense fallback={<AdminTabFallback />}>
+              <OnlineNowPanel compact onNavigate={() => setShowOnlineNowModal(false)} />
+            </Suspense>
           </div>
         </div>
       )}
@@ -599,63 +636,65 @@ export function AdminPage() {
       </div>
 
       {/* TAB: WEB ANALYTICS & STATISTIQUES */}
-      {tab === 'analytics' && <AdminAnalyticsTab />}
+      <Suspense fallback={<AdminTabFallback />}>
+        {tab === 'analytics' && <AdminAnalyticsTab />}
 
-      {/* TAB: PLAY REPORT */}
-      {tab === 'plays' && <PlayReportPanel />}
+        {/* TAB: PLAY REPORT */}
+        {tab === 'plays' && <PlayReportPanel />}
 
-      {/* TAB: OFFERS & PAYMENTS */}
-      {tab === 'offers' && <AdminBillingTab />}
+        {/* TAB: OFFERS & PAYMENTS */}
+        {tab === 'offers' && <AdminBillingTab />}
 
-      {/* TAB: DYNAMIC USERS TABLE */}
-      {tab === 'users' && (
-        <AdminUsersTab
-          data={data}
-          isError={overviewQuery.isError}
-          error={overviewQuery.error}
-          availablePlans={availablePlans}
-          currentUser={currentUser}
-          onRefreshUser={refreshUser}
-          onNotifyUser={(userId) => {
-            setPreselectedNotifyUserIds([userId]);
-            setTab('notifications');
-          }}
-        />
-      )}
+        {/* TAB: DYNAMIC USERS TABLE */}
+        {tab === 'users' && (
+          <AdminUsersTab
+            data={data}
+            isError={overviewQuery.isError}
+            error={overviewQuery.error}
+            availablePlans={availablePlans}
+            currentUser={currentUser}
+            onRefreshUser={refreshUser}
+            onNotifyUser={(userId) => {
+              setPreselectedNotifyUserIds([userId]);
+              setTab('notifications');
+            }}
+          />
+        )}
 
-      {/* TAB: NAVIGATION CMS */}
-      {tab === 'navigation' && <AdminNavigationTab />}
+        {/* TAB: NAVIGATION CMS */}
+        {tab === 'navigation' && <AdminNavigationTab />}
 
-      {/* TAB: CUSTOM API MODULES */}
-      {tab === 'modules' && <AdminCustomApisTab />}
+        {/* TAB: CUSTOM API MODULES */}
+        {tab === 'modules' && <AdminCustomApisTab />}
 
-      {/* TAB: BROKEN REPORTS & MISSING TITLE REQUESTS */}
-      {tab === 'requests' && <AdminRequestsTab />}
+        {/* TAB: BROKEN REPORTS & MISSING TITLE REQUESTS */}
+        {tab === 'requests' && <AdminRequestsTab />}
 
-      {/* TAB: ADMIN NOTIFICATIONS */}
-      {tab === 'notifications' && (
-        <AdminNotificationsTab
-          users={data?.users ?? []}
-          preselectedUserIds={preselectedNotifyUserIds}
-        />
-      )}
+        {/* TAB: ADMIN NOTIFICATIONS */}
+        {tab === 'notifications' && (
+          <AdminNotificationsTab
+            users={data?.users ?? []}
+            preselectedUserIds={preselectedNotifyUserIds}
+          />
+        )}
 
-      {/* TAB: CONFIGURABLE POPUPS */}
-      {tab === 'popups' && <AdminPopupsTab />}
+        {/* TAB: CONFIGURABLE POPUPS */}
+        {tab === 'popups' && <AdminPopupsTab />}
 
-      {/* TAB: EMAILS, TEMPLATES & MAIL LOGS */}
-      {tab === 'emails' && (
-        <AdminEmailsTab
-          smtpStatus={settingsQuery.data?.smtp}
-          supabaseServiceRoleConfigured={settingsQuery.data?.supabaseServiceRoleConfigured}
-        />
-      )}
+        {/* TAB: EMAILS, TEMPLATES & MAIL LOGS */}
+        {tab === 'emails' && (
+          <AdminEmailsTab
+            smtpStatus={settingsQuery.data?.smtp}
+            supabaseServiceRoleConfigured={settingsQuery.data?.supabaseServiceRoleConfigured}
+          />
+        )}
 
-      {/* TAB: PRIVACY PAGE EDITOR */}
-      {tab === 'privacy' && <AdminPrivacyTab />}
+        {/* TAB: PRIVACY PAGE EDITOR */}
+        {tab === 'privacy' && <AdminPrivacyTab />}
 
-      {/* TAB: ERROR LOGS */}
-      {tab === 'logs' && <AdminErrorsTab />}
+        {/* TAB: ERROR LOGS */}
+        {tab === 'logs' && <AdminErrorsTab />}
+      </Suspense>
 
       {/* TAB: SITE CONFIG, API ORIGIN & EMAIL */}
       {tab === 'api' && (

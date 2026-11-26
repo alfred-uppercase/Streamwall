@@ -90,6 +90,35 @@ export default defineConfig(() => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (!id.includes('node_modules')) return undefined;
+            if (
+              id.includes('/react/') ||
+              id.includes('/react-dom/') ||
+              id.includes('/react-router') ||
+              id.includes('/@tanstack/react-query')
+            ) {
+              return 'vendor-react';
+            }
+            if (
+              id.includes('/recharts/') ||
+              id.includes('/d3-') ||
+              id.includes('/topojson-client/') ||
+              id.includes('/world-atlas/')
+            ) {
+              return 'vendor-charts-geo';
+            }
+            if (id.includes('/motion/') || id.includes('/lucide-react/')) {
+              return 'vendor-ui';
+            }
+            return undefined;
+          },
+        },
+      },
+    },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modify—file watching is disabled to prevent flickering during agent edits.

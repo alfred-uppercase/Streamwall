@@ -79,6 +79,8 @@ function HeroSlider({ slides }: { slides: Slide[] }) {
           key={`bg-${current.id}`}
           src={backdropSrc}
           alt=""
+          decoding="async"
+          fetchPriority={index === 0 ? 'high' : 'auto'}
           referrerPolicy="no-referrer"
           onError={() => setFailedBackdrops((prev) => ({ ...prev, [current.id]: true }))}
           className="absolute inset-0 h-full w-full object-cover opacity-90 brightness-105 transition-opacity duration-300"
