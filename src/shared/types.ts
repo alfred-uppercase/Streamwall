@@ -562,6 +562,7 @@ export interface AdminOverview {
   activeStats?: {
     activeMembers: number;
     activeGuests: number;
+    totalActive?: number;
   };
   source?: 'supabase_auth' | 'supabase_rpc' | 'supabase_profiles' | 'local';
   warning?: string | null;

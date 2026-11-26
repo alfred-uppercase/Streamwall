@@ -23,6 +23,7 @@ import {
   Trash2,
   Upload,
   Users,
+  X,
   XCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -53,6 +54,7 @@ import { AdminErrorsTab } from '../components/AdminErrorsTab';
 import { AdminNavigationTab } from '../components/AdminNavigationTab';
 import { AdminCustomApisTab } from '../components/AdminCustomApisTab';
 import { PlayReportPanel } from '../components/PlayReportPanel';
+import { OnlineNowPanel } from '../components/OnlineNowPanel';
 import { ProCrownBadge } from '../components/UserAvatar';
 
 const PLAYER_FIELDS: { key: PlayerKey; label: string; hint: string }[] = [
@@ -137,11 +139,19 @@ export function AdminPage() {
   useDocumentTitle(isAdmin ? TAB_TITLE_MAP[tab] : 'Accès réservé');
 
   const [preselectedNotifyUserIds, setPreselectedNotifyUserIds] = useState<string[]>([]);
+  const [showOnlineNowModal, setShowOnlineNowModal] = useState(false);
 
   const overviewQuery = useQuery({
     queryKey: ['admin-overview'],
     queryFn: () => api.adminOverview(),
     enabled: isAdmin,
+  });
+
+  const realtimeQuery = useQuery({
+    queryKey: ['admin-realtime'],
+    queryFn: () => api.adminRealtime(),
+    enabled: isAdmin,
+    refetchInterval: 15_000,
   });
 
   const billingQuery = useQuery({
@@ -427,7 +437,12 @@ export function AdminPage() {
 
   const data = overviewQuery.data;
   const availablePlans = billingQuery.data?.plans ?? [];
-  const totalWeekPlays = (data?.top7 ?? []).reduce((sum, r) => sum + r.plays, 0);
+  const onlineMembersCount =
+    realtimeQuery.data?.memberCount ?? data?.activeStats?.activeMembers ?? 0;
+  const onlineGuestsCount =
+    realtimeQuery.data?.guestCount ?? data?.activeStats?.activeGuests ?? 0;
+  const onlineTotalCount =
+    realtimeQuery.data?.activeCount ?? onlineMembersCount + onlineGuestsCount;
 
   const mergedPlayers: PlayerTemplates | null = settingsQuery.data
     ? { ...settingsQuery.data.players, ...playerEdits }
@@ -467,19 +482,67 @@ export function AdminPage() {
 
       {/* 3-column KPI Strip */}
       <div className="grid gap-4 sm:grid-cols-3">
-        {[
-          { label: 'Membres inscrits', value: data?.users.length ?? 0 },
-          { label: 'Membres Pro actifs', value: (data?.users ?? []).filter((u) => u.isPro).length },
-          { label: 'Lectures cumulées (7j)', value: totalWeekPlays },
-        ].map((kpi) => (
-          <div key={kpi.label} className="rounded-xl border border-border bg-card p-5">
-            <p className="text-xs font-medium text-muted-foreground">{kpi.label}</p>
-            <p className="mt-2 font-display text-3xl font-bold text-foreground tabular-nums">
-              {kpi.value}
-            </p>
+        <div className="rounded-xl border border-border bg-card p-5">
+          <p className="text-xs font-medium text-muted-foreground">Membres inscrits</p>
+          <p className="mt-2 font-display text-3xl font-bold text-foreground tabular-nums">
+            {data?.users.length ?? 0}
+          </p>
+        </div>
+
+        <div className="rounded-xl border border-border bg-card p-5">
+          <p className="text-xs font-medium text-muted-foreground">Membres Pro actifs</p>
+          <p className="mt-2 font-display text-3xl font-bold text-foreground tabular-nums">
+            {(data?.users ?? []).filter((u) => u.isPro).length}
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setShowOnlineNowModal(true)}
+          className="group rounded-xl border border-emerald-500/30 bg-card p-5 text-left transition-colors hover:border-emerald-500/60"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-2 text-xs font-medium text-muted-foreground">
+              <span className="size-2 rounded-full bg-emerald-500 animate-pulse" />
+              En ligne maintenant
+            </span>
+            <span className="text-[11px] font-medium text-emerald-500 group-hover:underline">
+              Voir IP & villes →
+            </span>
           </div>
-        ))}
+          <p className="mt-2 font-display text-3xl font-bold text-emerald-500 tabular-nums">
+            {onlineTotalCount}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground tabular-nums">
+            {onlineMembersCount} membre(s) · {onlineGuestsCount} visiteur(s)
+          </p>
+        </button>
       </div>
+
+      {showOnlineNowModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Utilisateurs et visiteurs en ligne maintenant"
+          onClick={() => setShowOnlineNowModal(false)}
+        >
+          <div
+            className="relative max-h-[88vh] w-full max-w-5xl overflow-y-auto rounded-2xl border border-border bg-card p-5 shadow-2xl sm:p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setShowOnlineNowModal(false)}
+              aria-label="Fermer"
+              className="absolute top-4 right-4 grid size-8 place-items-center rounded-lg border border-border bg-background text-muted-foreground hover:text-foreground"
+            >
+              <X className="size-4" />
+            </button>
+            <OnlineNowPanel compact onNavigate={() => setShowOnlineNowModal(false)} />
+          </div>
+        </div>
+      )}
 
       {/* Section Tabs */}
       <div

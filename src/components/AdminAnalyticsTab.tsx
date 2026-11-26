@@ -31,6 +31,7 @@ import { api } from '../lib/client';
 import type { AnalyticsPeriodKey, DeviceKind } from '../shared/analyticsTypes';
 import { WorldVisitorMap } from './WorldVisitorMap';
 import { PlayReportPanel } from './PlayReportPanel';
+import { OnlineNowPanel } from './OnlineNowPanel';
 
 const PERIOD_OPTIONS: { key: AnalyticsPeriodKey; label: string }[] = [
   { key: 'today', label: "Aujourd'hui" },
@@ -196,18 +197,26 @@ export function AdminAnalyticsTab() {
               </p>
             </div>
 
-            <div className="rounded-xl border border-emerald-500/30 bg-card p-5">
+            <button
+              type="button"
+              onClick={() => {
+                document
+                  .getElementById('online-now-panel')
+                  ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }}
+              className="rounded-xl border border-emerald-500/30 bg-card p-5 text-left transition-colors hover:border-emerald-500/60"
+            >
               <div className="flex items-center justify-between gap-2">
                 <p className="text-xs font-medium text-muted-foreground">En ligne maintenant</p>
                 <span className="size-2 rounded-full bg-emerald-400 animate-pulse" />
               </div>
               <p className="mt-2 font-display text-3xl font-bold text-emerald-400 tabular-nums">
-                {formatNumber(data.summary.activeNow ?? 0)}
+                {formatNumber(data.realtime.activeCount ?? data.summary.activeNow ?? 0)}
               </p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Actifs sur les 5 dernières minutes
+              <p className="mt-1 text-xs text-muted-foreground tabular-nums">
+                {data.realtime.memberCount ?? 0} membre(s) · {data.realtime.guestCount ?? 0} invité(s) · Voir détails
               </p>
-            </div>
+            </button>
 
             <div className="rounded-xl border border-border bg-card p-5">
               <p className="text-xs font-medium text-muted-foreground">Nombre total de visiteurs</p>
@@ -278,6 +287,9 @@ export function AdminAnalyticsTab() {
               </p>
             </div>
           </section>
+
+          {/* Live Online Visitors & Members (IP, City, Visitor vs Member) */}
+          <OnlineNowPanel id="online-now-panel" />
 
           {/* Local Play Report (Watch button events) */}
           <PlayReportPanel

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import type express from 'express';
 import { getSqliteDb, readModuleSnapshot } from './persistentDb.ts';
 import { countActivePersistentSessionUsers } from './sessionStore.ts';
-import { isSuspiciousBotUserAgent } from './security.ts';
+import { getClientIp, isSuspiciousBotUserAgent } from './security.ts';
 import type {
   AnalyticsDashboardPayload,
   AnalyticsPeriodKey,
@@ -183,6 +183,15 @@ export function parseUserAgent(uaRaw: string | undefined): {
   return { deviceType, os, browser };
 }
 
+export function normalizeDisplayIp(raw: string | undefined | null): string {
+  const cleaned = String(raw ?? '')
+    .trim()
+    .replace(/^::ffff:/i, '')
+    .slice(0, 64);
+  if (!cleaned || cleaned.toLowerCase() === 'unknown') return 'Inconnue';
+  return cleaned;
+}
+
 export function resolveGeoFromRequest(
   req: express.Request,
   timezone?: string
@@ -192,6 +201,7 @@ export function resolveGeoFromRequest(
   continent: string;
   region: string;
   city: string;
+  geoSource: 'cdn' | 'timezone' | 'lang';
 } {
   const headerCountry = String(
     req.headers['cf-ipcountry'] ||
@@ -205,10 +215,16 @@ export function resolveGeoFromRequest(
   if (headerCountry && headerCountry !== 'XX' && COUNTRIES_BY_CODE[headerCountry]) {
     const meta = COUNTRIES_BY_CODE[headerCountry];
     const region = String(
-      req.headers['cf-region'] || req.headers['x-appengine-region'] || meta.name
+      req.headers['cf-region'] ||
+        req.headers['x-vercel-ip-country-region'] ||
+        req.headers['x-appengine-region'] ||
+        meta.name
     ).trim();
     const city = String(
-      req.headers['cf-ipcity'] || req.headers['x-appengine-city'] || meta.name
+      req.headers['cf-ipcity'] ||
+        req.headers['x-vercel-ip-city'] ||
+        req.headers['x-appengine-city'] ||
+        meta.name
     ).trim();
     return {
       countryCode: meta.code,
@@ -216,6 +232,7 @@ export function resolveGeoFromRequest(
       continent: meta.continent,
       region: region || meta.name,
       city: city || meta.name,
+      geoSource: 'cdn',
     };
   }
 
@@ -228,6 +245,7 @@ export function resolveGeoFromRequest(
       continent: meta.continent,
       region: tz.region,
       city: tz.city,
+      geoSource: 'timezone',
     };
   }
 
@@ -268,6 +286,7 @@ export function resolveGeoFromRequest(
     continent: meta.continent,
     region,
     city,
+    geoSource: 'lang',
   };
 }
 
@@ -833,10 +852,16 @@ function pruneRealtimeVisitors(nowMs: number): void {
 export function touchActiveUserPresence(params: {
   sessionId: string;
   userId?: string | null;
+  username?: string | null;
+  userRole?: 'admin' | 'member' | 'guest';
+  isPro?: boolean;
+  explicitGuest?: boolean;
+  ip?: string;
   countryCode?: string;
   countryName?: string;
   region?: string;
   city?: string;
+  geoSource?: 'cdn' | 'timezone' | 'lang';
   path?: string;
   title?: string;
   deviceType?: DeviceKind;
@@ -844,28 +869,101 @@ export function touchActiveUserPresence(params: {
   browser?: string;
 }): void {
   const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
   const prev = realtimeVisitorsMap.get(params.sessionId);
-  const inferredUserId =
-    params.userId !== undefined
+
+  const isFallbackSession =
+    params.sessionId.startsWith('u_') || params.sessionId.startsWith('user:');
+
+  const inferredUserId = params.explicitGuest
+    ? null
+    : params.userId !== undefined
       ? params.userId
       : params.sessionId.startsWith('u_')
         ? params.sessionId.slice(2)
         : params.sessionId.startsWith('user:')
           ? params.sessionId.slice(5)
           : prev?.userId ?? null;
+
+  const visitorType: 'member' | 'guest' = inferredUserId ? 'member' : 'guest';
+  const resolvedRole: 'admin' | 'member' | 'guest' = inferredUserId
+    ? params.userRole && params.userRole !== 'guest'
+      ? params.userRole
+      : prev?.userRole && prev.userRole !== 'guest'
+        ? prev.userRole
+        : 'member'
+    : 'guest';
+  const resolvedUsername = inferredUserId
+    ? params.username ?? prev?.username ?? null
+    : null;
+  const resolvedIsPro = inferredUserId
+    ? params.isPro ?? prev?.isPro ?? false
+    : false;
+
+  // If this is a fallback auth-only touch (`u_<userId>`) and a live browser session already
+  // exists for this user within the active window, update that richer browser session in place.
+  if (isFallbackSession && inferredUserId) {
+    let bestBrowserKey: string | null = null;
+    let bestBrowserSeen = 0;
+    for (const [k, entry] of realtimeVisitorsMap.entries()) {
+      if (
+        !k.startsWith('u_') &&
+        !k.startsWith('user:') &&
+        entry.userId === inferredUserId &&
+        nowMs - entry.lastSeenMs <= REALTIME_WINDOW_MS &&
+        entry.lastSeenMs >= bestBrowserSeen
+      ) {
+        bestBrowserKey = k;
+        bestBrowserSeen = entry.lastSeenMs;
+      }
+    }
+    if (bestBrowserKey) {
+      const target = realtimeVisitorsMap.get(bestBrowserKey)!;
+      realtimeVisitorsMap.set(bestBrowserKey, {
+        ...target,
+        visitorType: 'member',
+        userId: inferredUserId,
+        username: resolvedUsername ?? target.username ?? null,
+        userRole: resolvedRole,
+        isPro: resolvedIsPro,
+        ip: params.ip && params.ip !== 'Inconnue' ? params.ip : target.ip,
+        lastActivityAt: nowIso,
+        lastSeenMs: nowMs,
+      });
+      return;
+    }
+  }
+
+  // If this is a real browser session for an authenticated user, drop any stale `u_<userId>` fallback.
+  if (!isFallbackSession && inferredUserId) {
+    realtimeVisitorsMap.delete(`u_${inferredUserId}`);
+    realtimeVisitorsMap.delete(`user:${inferredUserId}`);
+  }
+
+  const nextIp =
+    params.ip && params.ip !== 'Inconnue'
+      ? normalizeDisplayIp(params.ip)
+      : prev?.ip ?? 'Inconnue';
+
   realtimeVisitorsMap.set(params.sessionId, {
     sessionId: params.sessionId,
+    visitorType,
     userId: inferredUserId,
+    username: resolvedUsername,
+    userRole: resolvedRole,
+    isPro: resolvedIsPro,
+    ip: nextIp,
     countryCode: params.countryCode ?? prev?.countryCode ?? 'MG',
     countryName: params.countryName ?? prev?.countryName ?? 'Madagascar',
     region: params.region ?? prev?.region ?? 'Analamanga',
     city: params.city ?? prev?.city ?? 'Antananarivo',
+    geoSource: params.geoSource ?? prev?.geoSource ?? 'lang',
     currentPath: (params.path ?? prev?.currentPath ?? '/').slice(0, 160),
     currentTitle: (params.title ?? prev?.currentTitle ?? 'StreamWall').slice(0, 120),
     deviceType: params.deviceType ?? prev?.deviceType ?? 'desktop',
     os: params.os ?? prev?.os ?? 'Autre',
     browser: params.browser ?? prev?.browser ?? 'Chrome',
-    lastActivityAt: new Date(nowMs).toISOString(),
+    lastActivityAt: nowIso,
     lastSeenMs: nowMs,
   });
   if (realtimeVisitorsMap.size > 500) {
@@ -873,41 +971,68 @@ export function touchActiveUserPresence(params: {
   }
 }
 
+function getDeduplicatedRealtimeEntries(
+  nowMs = Date.now()
+): Array<RealtimeVisitor & { lastSeenMs: number; userId?: string | null }> {
+  pruneRealtimeVisitors(nowMs);
+  const byLogicalKey = new Map<
+    string,
+    RealtimeVisitor & { lastSeenMs: number; userId?: string | null }
+  >();
+  for (const v of realtimeVisitorsMap.values()) {
+    const key = v.userId ? `u:${v.userId}` : `s:${v.sessionId}`;
+    const existing = byLogicalKey.get(key);
+    if (!existing) {
+      byLogicalKey.set(key, v);
+      continue;
+    }
+    const vIsBrowser = !v.sessionId.startsWith('u_') && !v.sessionId.startsWith('user:');
+    const existingIsBrowser =
+      !existing.sessionId.startsWith('u_') && !existing.sessionId.startsWith('user:');
+    if (
+      (vIsBrowser && !existingIsBrowser) ||
+      (vIsBrowser === existingIsBrowser && v.lastSeenMs > existing.lastSeenMs)
+    ) {
+      byLogicalKey.set(key, v);
+    }
+  }
+  return [...byLogicalKey.values()].sort((a, b) => b.lastSeenMs - a.lastSeenMs);
+}
+
 export function getOnlineMemberPresence(): Map<
   string,
   { lastSeen: string; currentPage: string | null }
 > {
-  const nowMs = Date.now();
-  pruneRealtimeVisitors(nowMs);
   const map = new Map<string, { lastSeen: string; currentPage: string | null }>();
-  for (const v of realtimeVisitorsMap.values()) {
+  for (const v of getDeduplicatedRealtimeEntries()) {
     if (!v.userId) continue;
-    const existing = map.get(v.userId);
-    if (!existing || v.lastActivityAt > existing.lastSeen) {
-      map.set(v.userId, {
-        lastSeen: v.lastActivityAt,
-        currentPage: v.currentPath || null,
-      });
-    }
+    map.set(v.userId, {
+      lastSeen: v.lastActivityAt,
+      currentPage: v.currentPath || null,
+    });
   }
   return map;
 }
 
-export function getActivePresenceStats(): { activeMembers: number; activeGuests: number } {
-  const nowMs = Date.now();
-  pruneRealtimeVisitors(nowMs);
-  const memberIds = new Set<string>();
-  const guestSessions = new Set<string>();
-  for (const v of realtimeVisitorsMap.values()) {
-    if (v.userId) {
-      memberIds.add(v.userId);
+export function getActivePresenceStats(): {
+  activeMembers: number;
+  activeGuests: number;
+  totalActive: number;
+} {
+  const entries = getDeduplicatedRealtimeEntries();
+  let activeMembers = 0;
+  let activeGuests = 0;
+  for (const v of entries) {
+    if (v.visitorType === 'member' && v.userId) {
+      activeMembers += 1;
     } else {
-      guestSessions.add(v.sessionId);
+      activeGuests += 1;
     }
   }
   return {
-    activeMembers: memberIds.size,
-    activeGuests: guestSessions.size,
+    activeMembers,
+    activeGuests,
+    totalActive: activeMembers + activeGuests,
   };
 }
 
@@ -978,6 +1103,12 @@ export function recordAnalyticsCollect(params: {
   screenResolution?: string;
   timezone?: string;
   req: express.Request;
+  user?: {
+    id: string;
+    username?: string | null;
+    role?: 'admin' | 'member';
+    isPro?: boolean;
+  } | null;
 }) {
   const ua = String(params.req.headers['user-agent'] ?? '');
   if (isSuspiciousBotUserAgent(ua)) {
@@ -989,6 +1120,7 @@ export function recordAnalyticsCollect(params: {
   const todayKey = nowIso.slice(0, 10);
   const parsedUa = parseUserAgent(ua);
   const geo = resolveGeoFromRequest(params.req, params.timezone);
+  const ip = normalizeDisplayIp(getClientIp(params.req));
 
   const rawSeed = params.visitorId || `${params.req.ip || 'anon'}:${ua}`;
   const visitorKey = `v_${crypto.createHash('sha256').update(rawSeed).digest('hex').slice(0, 14)}`;
@@ -1130,10 +1262,17 @@ export function recordAnalyticsCollect(params: {
 
   touchActiveUserPresence({
     sessionId: params.sessionId,
+    userId: params.user ? params.user.id : null,
+    username: params.user?.username ?? null,
+    userRole: params.user ? params.user.role ?? 'member' : 'guest',
+    isPro: Boolean(params.user?.isPro),
+    explicitGuest: !params.user,
+    ip,
     countryCode: geo.countryCode,
     countryName: geo.countryName,
     region: geo.region,
     city: geo.city,
+    geoSource: geo.geoSource,
     path: cleanPath,
     title: cleanTitle,
     deviceType: parsedUa.deviceType,
@@ -1144,13 +1283,65 @@ export function recordAnalyticsCollect(params: {
   scheduleFlush();
 }
 
+export function recordRealtimeHeartbeat(params: {
+  sessionId?: string;
+  path?: string;
+  title?: string;
+  timezone?: string;
+  req: express.Request;
+  user?: {
+    id: string;
+    username?: string | null;
+    role?: 'admin' | 'member';
+    isPro?: boolean;
+  } | null;
+}): void {
+  const ua = String(params.req.headers['user-agent'] ?? '');
+  if (isSuspiciousBotUserAgent(ua)) {
+    return;
+  }
+  const ip = normalizeDisplayIp(getClientIp(params.req));
+  const rawSid = String(params.sessionId ?? '').trim().slice(0, 64);
+  const sessionId =
+    rawSid ||
+    (params.user?.id
+      ? `u_${params.user.id}`
+      : `hb_${crypto.createHash('sha1').update(`${ip}:${ua}`).digest('hex').slice(0, 12)}`);
+
+  const parsedUa = parseUserAgent(ua);
+  const geo = resolveGeoFromRequest(params.req, params.timezone);
+  const cleanPath = params.path ? String(params.path).slice(0, 160) : undefined;
+  const cleanTitle = params.title ? String(params.title).slice(0, 120) : undefined;
+
+  // Strictly in-memory update: zero SQLite or Supabase writes.
+  touchActiveUserPresence({
+    sessionId,
+    userId: params.user ? params.user.id : null,
+    username: params.user?.username ?? null,
+    userRole: params.user ? params.user.role ?? 'member' : 'guest',
+    isPro: Boolean(params.user?.isPro),
+    explicitGuest: !params.user,
+    ip,
+    countryCode: geo.countryCode,
+    countryName: geo.countryName,
+    region: geo.region,
+    city: geo.city,
+    geoSource: geo.geoSource,
+    path: cleanPath,
+    title: cleanTitle,
+    deviceType: parsedUa.deviceType,
+    os: parsedUa.os,
+    browser: parsedUa.browser,
+  });
+}
+
 export function recordAnalyticsPing(_params: {
   sessionId: string;
   path?: string;
   title?: string;
   deltaSec?: number;
 }) {
-  // No-op: live presence is updated passively without timer write bursts.
+  // No-op: live presence is updated in memory by /api/presence/heartbeat without DB write bursts.
 }
 
 function resolveDateRange(
@@ -1240,14 +1431,21 @@ function loadBucketsInRange(startDate: string, endDate: string): DailyBucket[] {
 
 export function computeRealtimeAnalytics(): RealtimePayload {
   const nowMs = Date.now();
-  pruneRealtimeVisitors(nowMs);
-  const visitors = [...realtimeVisitorsMap.values()]
-    .sort((a, b) => b.lastSeenMs - a.lastSeenMs)
-    .slice(0, 50)
-    .map(({ lastSeenMs: _ignored, userId: _userIdIgnored, ...rest }) => rest);
+  const deduped = getDeduplicatedRealtimeEntries(nowMs);
+  let memberCount = 0;
+  let guestCount = 0;
+  for (const entry of deduped) {
+    if (entry.visitorType === 'member' && entry.userId) memberCount += 1;
+    else guestCount += 1;
+  }
+  const visitors = deduped
+    .slice(0, 200)
+    .map(({ lastSeenMs: _ignored, ...rest }) => rest);
 
   return {
-    activeCount: realtimeVisitorsMap.size,
+    activeCount: deduped.length,
+    memberCount,
+    guestCount,
     checkedAt: new Date(nowMs).toISOString(),
     visitors,
   };

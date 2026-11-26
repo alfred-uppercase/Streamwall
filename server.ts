@@ -135,9 +135,11 @@ import {
   getActivePresenceStats,
   getOnlineMemberPresence,
   getTopContentStats,
+  normalizeDisplayIp,
   parseUserAgent,
   recordAnalyticsCollect,
   recordPlayEvent,
+  recordRealtimeHeartbeat,
   resolveGeoFromRequest,
   setActiveMembersCountProvider,
   touchActiveUserPresence,
@@ -1248,17 +1250,27 @@ function enrichUserProfile(user: UserProfile): UserProfile {
   };
 }
 
-function touchAuthPresence(req: express.Request, userId: string): void {
+function touchAuthPresence(
+  req: express.Request,
+  user: { id: string; username?: string | null; role?: 'admin' | 'member'; isPro?: boolean }
+): void {
   try {
     const geo = resolveGeoFromRequest(req);
     const ua = parseUserAgent(String(req.headers['user-agent'] ?? ''));
+    const rawHeaderSid = String(req.headers['x-session-id'] ?? '').trim().slice(0, 64);
+    const sessionId = rawHeaderSid || `u_${user.id}`;
     touchActiveUserPresence({
-      sessionId: `u_${userId}`,
-      userId,
+      sessionId,
+      userId: user.id,
+      username: user.username ?? null,
+      userRole: user.role === 'admin' ? 'admin' : 'member',
+      isPro: Boolean(user.isPro),
+      ip: normalizeDisplayIp(getClientIp(req)),
       countryCode: geo.countryCode,
       countryName: geo.countryName,
       region: geo.region,
       city: geo.city,
+      geoSource: geo.geoSource,
       deviceType: ua.deviceType,
       os: ua.os,
       browser: ua.browser,
@@ -1278,8 +1290,9 @@ async function resolveAuth(req: express.Request): Promise<AuthResolution | null>
       : await sbResolveUser(token);
     if (!resolved) return null;
     if (isUserBanned(resolved.user.id)) return null;
-    touchAuthPresence(req, resolved.user.id);
-    return { user: enrichUserProfile(resolved.user), token, sbClient: resolved.client };
+    const profile = enrichUserProfile(resolved.user);
+    touchAuthPresence(req, profile);
+    return { user: profile, token, sbClient: resolved.client };
   }
 
   let userId: string | null = null;
@@ -1295,18 +1308,19 @@ async function resolveAuth(req: express.Request): Promise<AuthResolution | null>
   const user = db.users.find((u) => u.id === userId);
   if (!user) return null;
   if (isUserBanned(user.id)) return null;
-  touchAuthPresence(req, user.id);
+  const profile = enrichUserProfile({
+    id: user.id,
+    email: user.email,
+    username: user.username,
+    avatar: user.avatar,
+    role: user.role,
+    createdAt: user.createdAt,
+  });
+  touchAuthPresence(req, profile);
   return {
     token,
     sbClient: null,
-    user: enrichUserProfile({
-      id: user.id,
-      email: user.email,
-      username: user.username,
-      avatar: user.avatar,
-      role: user.role,
-      createdAt: user.createdAt,
-    }),
+    user: profile,
   };
 }
 
@@ -5716,9 +5730,27 @@ export async function createApiApp(): Promise<express.Express> {
     res.json({ ok: true });
   });
 
-  // Live presence tracking removed to prevent concurrent database write contention.
-  // Keep endpoint as a zero-DB no-op so any cached client tabs do not receive 404 errors.
-  app.post('/api/presence/heartbeat', (_req, res) => {
+  // Live presence heartbeat: strictly in-memory Map update (zero SQLite/Supabase writes).
+  app.post('/api/presence/heartbeat', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = consumeRateLimit(`presence_hb:${ip}`, 120, 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ ok: false });
+      return;
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const auth = await resolveAuth(req).catch(() => null);
+    const sessionId =
+      (typeof body.sessionId === 'string' ? body.sessionId : '') ||
+      String(req.headers['x-session-id'] ?? '');
+    recordRealtimeHeartbeat({
+      sessionId: sessionId.trim().slice(0, 64) || undefined,
+      path: typeof body.path === 'string' ? body.path : typeof body.page === 'string' ? body.page : undefined,
+      title: typeof body.title === 'string' ? body.title : undefined,
+      timezone: typeof body.timezone === 'string' ? body.timezone : undefined,
+      req,
+      user: auth?.user ?? null,
+    });
     res.json({ ok: true });
   });
 
@@ -6958,7 +6990,7 @@ export async function createApiApp(): Promise<express.Express> {
   // ─────────────────────────────────────────────────────────────────────────
   // WEB ANALYTICS & REAL-TIME TRAFFIC ROUTES (PRIVACY-PRESERVING)
   // ─────────────────────────────────────────────────────────────────────────
-  app.post('/api/analytics/collect', (req, res) => {
+  app.post('/api/analytics/collect', async (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const visitorId = String(body.visitorId ?? '').trim().slice(0, 64);
     const sessionId = String(body.sessionId ?? '').trim().slice(0, 64);
@@ -6966,6 +6998,7 @@ export async function createApiApp(): Promise<express.Express> {
       res.status(400).json({ ok: false });
       return;
     }
+    const auth = await resolveAuth(req).catch(() => null);
     recordAnalyticsCollect({
       visitorId,
       sessionId,
@@ -6974,6 +7007,7 @@ export async function createApiApp(): Promise<express.Express> {
       screenResolution: body.screenResolution ? String(body.screenResolution) : undefined,
       timezone: body.timezone ? String(body.timezone) : undefined,
       req,
+      user: auth?.user ?? null,
     });
     res.json({ ok: true });
   });

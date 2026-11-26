@@ -63,6 +63,7 @@ import type {
   AnalyticsDashboardPayload,
   AnalyticsPeriodKey,
   PlayReportPayload,
+  RealtimePayload,
 } from '../shared/analyticsTypes';
 
 const STORAGE_TOKEN_KEY = 'tapenaka_auth_token';
@@ -92,6 +93,14 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
   }
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
+  }
+  try {
+    const sid = sessionStorage.getItem('tapenaka_sid');
+    if (sid && !headers.has('x-session-id')) {
+      headers.set('x-session-id', sid);
+    }
+  } catch {
+    // Ignore storage errors
   }
 
   const res = await fetch(path, {
@@ -782,6 +791,7 @@ export const api = {
     if (params.end) p.set('end', params.end);
     return apiRequest<PlayReportPayload>(`/api/admin/analytics/plays?${p.toString()}`);
   },
+  adminRealtime: () => apiRequest<RealtimePayload>('/api/admin/analytics/realtime'),
   recordPlayEvent: (payload: {
     itemType: 'film' | 'serie' | 'anime' | 'pinoy' | 'custom';
     itemId: string;

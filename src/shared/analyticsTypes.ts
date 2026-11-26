@@ -110,10 +110,17 @@ export interface ContentStat {
 
 export interface RealtimeVisitor {
   sessionId: string;
+  visitorType: 'member' | 'guest';
+  userId?: string | null;
+  username?: string | null;
+  userRole?: 'admin' | 'member' | 'guest';
+  isPro?: boolean;
+  ip: string;
   countryCode: string;
   countryName: string;
   region: string;
   city: string;
+  geoSource?: 'cdn' | 'timezone' | 'lang';
   currentPath: string;
   currentTitle: string;
   deviceType: DeviceKind;
@@ -124,6 +131,8 @@ export interface RealtimeVisitor {
 
 export interface RealtimePayload {
   activeCount: number;
+  memberCount: number;
+  guestCount: number;
   checkedAt: string;
   visitors: RealtimeVisitor[];
 }

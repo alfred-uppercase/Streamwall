@@ -2100,3 +2100,121 @@ test('Play Report records watch button events locally via /api/player/open and /
     )
   );
 });
+
+test('Realtime En ligne maintenant tracks IP, city, and member vs visitor status without double-counting and requires admin', async () => {
+  const adminRes = await fetch(`${baseUrl}/api/auth/demo-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: 'admin' }),
+  });
+  const adminAuth = (await adminRes.json()) as { token: string; user: { id: string; username: string } };
+
+  const memberRes = await fetch(`${baseUrl}/api/auth/demo-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: 'member' }),
+  });
+  const memberAuth = (await memberRes.json()) as { token: string; user: { id: string; username: string } };
+
+  // 1. /api/admin/analytics/realtime blocks guests and non-admin members
+  const guestRtRes = await fetch(`${baseUrl}/api/admin/analytics/realtime`);
+  assert.equal(guestRtRes.status, 403);
+  const memberRtRes = await fetch(`${baseUrl}/api/admin/analytics/realtime`, {
+    headers: { Authorization: `Bearer ${memberAuth.token}` },
+  });
+  assert.equal(memberRtRes.status, 403);
+
+  // 2. Guest heartbeat with IP + timezone + browser UA
+  const guestSessionId = 's_live_guest_unique_1';
+  const hbGuestRes = await fetch(`${baseUrl}/api/presence/heartbeat`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-forwarded-for': '203.0.113.45',
+      'cf-ipcountry': 'FR',
+      'cf-ipcity': 'Lyon',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0 Safari/537.36',
+    },
+    body: JSON.stringify({
+      sessionId: guestSessionId,
+      path: '/catalogue',
+      title: 'Catalogue — StreamWall',
+    }),
+  });
+  assert.equal(hbGuestRes.status, 200);
+
+  // 3. Authenticated member collect + heartbeat on same browser sessionId (must NOT double-count as guest + member)
+  const memberSessionId = 's_live_member_unique_1';
+  const collectMemberRes = await fetch(`${baseUrl}/api/analytics/collect`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${memberAuth.token}`,
+      'x-forwarded-for': '198.51.100.88',
+      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/604.1',
+    },
+    body: JSON.stringify({
+      visitorId: 'v_live_member_1',
+      sessionId: memberSessionId,
+      path: '/film/24433',
+      title: 'The Social Reckoning',
+      timezone: 'Indian/Antananarivo',
+    }),
+  });
+  assert.equal(collectMemberRes.status, 200);
+
+  const hbMemberRes = await fetch(`${baseUrl}/api/presence/heartbeat`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${memberAuth.token}`,
+      'x-forwarded-for': '198.51.100.88',
+      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/604.1',
+    },
+    body: JSON.stringify({
+      sessionId: memberSessionId,
+      path: '/film/24433',
+      title: 'The Social Reckoning',
+      timezone: 'Indian/Antananarivo',
+    }),
+  });
+  assert.equal(hbMemberRes.status, 200);
+
+  // 4. Admin fetches /api/admin/analytics/realtime and sees IP, city, visitorType, and deduped counts
+  const adminRtRes = await fetch(`${baseUrl}/api/admin/analytics/realtime`, {
+    headers: { Authorization: `Bearer ${adminAuth.token}` },
+  });
+  assert.equal(adminRtRes.status, 200);
+  const rt = (await adminRtRes.json()) as {
+    activeCount: number;
+    memberCount: number;
+    guestCount: number;
+    visitors: Array<{
+      sessionId: string;
+      visitorType: 'member' | 'guest';
+      userId?: string | null;
+      username?: string | null;
+      ip: string;
+      city: string;
+      geoSource?: string;
+      currentPath: string;
+    }>;
+  };
+
+  assert.equal(rt.activeCount, rt.memberCount + rt.guestCount);
+  const guestEntry = rt.visitors.find((v) => v.sessionId === guestSessionId);
+  assert.ok(guestEntry);
+  assert.equal(guestEntry.visitorType, 'guest');
+  assert.equal(guestEntry.ip, '203.0.113.45');
+  assert.equal(guestEntry.city, 'Lyon');
+  assert.equal(guestEntry.geoSource, 'cdn');
+  assert.equal(guestEntry.currentPath, '/catalogue');
+
+  const memberMatches = rt.visitors.filter((v) => v.userId === memberAuth.user.id);
+  assert.equal(memberMatches.length, 1, 'Authenticated member must appear only once (no duplicate guest+member entries)');
+  assert.equal(memberMatches[0]?.visitorType, 'member');
+  assert.equal(memberMatches[0]?.username, memberAuth.user.username);
+  assert.equal(memberMatches[0]?.ip, '198.51.100.88');
+  assert.equal(memberMatches[0]?.city, 'Antananarivo');
+  assert.equal(memberMatches[0]?.geoSource, 'timezone');
+});

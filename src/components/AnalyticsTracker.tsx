@@ -1,11 +1,13 @@
 import { useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
+import { getStoredToken, useAuth } from '../lib/client';
 import { useSiteConfig } from '../lib/siteConfig';
 
 const VISITOR_STORAGE_KEY = 'tapenaka_vid';
 const SESSION_STORAGE_KEY = 'tapenaka_sid';
 const SESSION_LAST_ACTIVE_KEY = 'tapenaka_sid_ts';
 const SESSION_IDLE_MS = 30 * 60_000;
+const HEARTBEAT_INTERVAL_MS = 60_000;
 
 function randomId(prefix: string): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -65,11 +67,31 @@ function resolveRouteTitle(pathname: string, siteName: string): string {
   return document.title || siteName;
 }
 
+function buildHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const token = getStoredToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
+function getTimezone(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch {
+    return undefined;
+  }
+}
+
 export function AnalyticsTracker() {
   const location = useLocation();
+  const { user } = useAuth();
   const { siteName } = useSiteConfig();
   const lastCollectedKeyRef = useRef<string>('');
+  const lastBeatAtRef = useRef<number>(0);
 
+  // Page-view analytics collector on route changes
   useEffect(() => {
     const visitorId = getOrCreateVisitorId();
     const sessionId = getOrCreateSessionId();
@@ -79,41 +101,83 @@ export function AnalyticsTracker() {
 
     const sendCollect = () => {
       lastCollectedKeyRef.current = collectKey;
+      lastBeatAtRef.current = Date.now();
       const title = resolveRouteTitle(cleanPath, siteName);
       const screenResolution =
         typeof window !== 'undefined' && window.screen
           ? `${window.screen.width}×${window.screen.height}`
           : undefined;
-      let timezone: string | undefined;
-      try {
-        timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      } catch {
-        timezone = undefined;
-      }
 
       void fetch('/api/analytics/collect', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildHeaders(),
+        credentials: 'include',
         body: JSON.stringify({
           visitorId,
           sessionId,
           path: cleanPath,
           title,
           screenResolution,
-          timezone,
+          timezone: getTimezone(),
         }),
         keepalive: true,
       }).catch(() => {});
     };
 
-    // Wait briefly on content detail routes so the item heading is rendered
-    const isDetailRoute = /^\/(film|serie|anime)\//.test(cleanPath);
+    const isDetailRoute = /^\/(film|serie|anime|pinoy)\//.test(cleanPath);
     const delayTimer = window.setTimeout(sendCollect, isDetailRoute ? 350 : 60);
 
     return () => {
       window.clearTimeout(delayTimer);
     };
   }, [location.pathname, siteName]);
+
+  // Lightweight in-memory live presence heartbeat (only while tab is visible, zero DB writes on server)
+  useEffect(() => {
+    const sendHeartbeat = (force = false) => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
+      }
+      const now = Date.now();
+      if (!force && now - lastBeatAtRef.current < 25_000) {
+        return;
+      }
+      lastBeatAtRef.current = now;
+      const sessionId = getOrCreateSessionId();
+      const cleanPath = location.pathname || '/';
+      const title = resolveRouteTitle(cleanPath, siteName);
+
+      void fetch('/api/presence/heartbeat', {
+        method: 'POST',
+        headers: buildHeaders(),
+        credentials: 'include',
+        body: JSON.stringify({
+          sessionId,
+          path: cleanPath,
+          title,
+          timezone: getTimezone(),
+        }),
+        keepalive: true,
+      }).catch(() => {});
+    };
+
+    // Sync member/guest identity whenever auth user changes
+    const syncTimer = window.setTimeout(() => sendHeartbeat(true), 250);
+    const interval = window.setInterval(() => sendHeartbeat(false), HEARTBEAT_INTERVAL_MS);
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        sendHeartbeat(false);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      window.clearTimeout(syncTimer);
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [location.pathname, siteName, user?.id]);
 
   return null;
 }
