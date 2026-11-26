@@ -1,4 +1,5 @@
 import type {
+  CustomApiModuleConfig,
   PinoyDetailResponse,
   PinoyFacetsResponse,
   PinoyFilm,
@@ -7,6 +8,32 @@ import type {
   PinoyPlayerSource,
 } from '../shared/types.ts';
 import { InFlightCoalescer, TimedLruCache } from './cacheUtils.ts';
+
+const FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function getFieldByPath(root: unknown, pathStr: string): unknown {
+  if (root === null || root === undefined) return undefined;
+  const trimmed = String(pathStr ?? '').trim();
+  if (!trimmed) return root;
+  const parts = trimmed.split('.').filter(Boolean);
+  let cur: unknown = root;
+  for (const part of parts) {
+    if (FORBIDDEN_SEGMENTS.has(part)) return undefined;
+    if (Array.isArray(cur)) {
+      const idx = Number(part);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= cur.length) return undefined;
+      cur = cur[idx];
+      continue;
+    }
+    if (typeof cur === 'object' && cur !== null) {
+      if (!Object.prototype.hasOwnProperty.call(cur, part)) return undefined;
+      cur = (cur as Record<string, unknown>)[part];
+      continue;
+    }
+    return undefined;
+  }
+  return cur;
+}
 
 const pinoyCache = new TimedLruCache<unknown>(250);
 const pinoyCoalescer = new InFlightCoalescer();
@@ -362,60 +389,106 @@ export function resolvePinoyMediaUrl(
 function normalizeFilm(
   raw: unknown,
   mediaBaseUrl = DEFAULT_PINOY_MEDIA_BASE_URL,
-  apiUrl = ''
+  apiUrl = '',
+  mod?: CustomApiModuleConfig | null
 ): PinoyFilm | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
-  const id = Number(r.id);
-  const titre = typeof r.titre === 'string' ? r.titre.trim() : '';
-  const slug = typeof r.slug === 'string' ? r.slug.trim() : '';
+  const f = mod?.fields;
+
+  const rawId = getFieldByPath(r, f?.itemIdField || 'id');
+  const id = Number(rawId);
+  const rawTitle = getFieldByPath(r, f?.itemTitleField || 'titre');
+  const titre = typeof rawTitle === 'string' ? rawTitle.trim() : '';
+  const rawSlug = getFieldByPath(r, f?.itemSlugField || 'slug');
+  const slug = typeof rawSlug === 'string' ? rawSlug.trim() : '';
   if (!Number.isFinite(id) || id <= 0 || !titre || !slug) return null;
 
-  const rawGenres = Array.isArray(r.genres) ? r.genres : [];
-  const genres = rawGenres
-    .map((g) => (typeof g === 'string' ? g.trim() : ''))
-    .filter(Boolean)
-    .slice(0, 12);
+  const rawGenresVal = getFieldByPath(r, f?.itemGenresField || 'genres');
+  let genres: string[] = [];
+  if (Array.isArray(rawGenresVal)) {
+    genres = rawGenresVal
+      .map((g) =>
+        typeof g === 'string'
+          ? g.trim()
+          : g && typeof g === 'object'
+            ? String((g as Record<string, unknown>).nom ?? (g as Record<string, unknown>).name ?? '').trim()
+            : ''
+      )
+      .filter(Boolean)
+      .slice(0, 12);
+  } else if (typeof rawGenresVal === 'string') {
+    genres = rawGenresVal
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 12);
+  }
 
-  const rawGalerie = Array.isArray(r.galerie) ? r.galerie : [];
+  const rawGalerieVal = getFieldByPath(r, f?.itemGalleryField || 'galerie');
+  const rawGalerie = Array.isArray(rawGalerieVal) ? rawGalerieVal : [];
   const galerie = rawGalerie
     .map((u) => resolvePinoyMediaUrl(u, mediaBaseUrl, apiUrl))
     .filter((u): u is string => Boolean(u))
     .slice(0, 24);
 
-  const anneeNum = r.annee !== null && r.annee !== undefined ? Number(r.annee) : NaN;
-  const noteNum = r.note !== null && r.note !== undefined ? Number(r.note) : NaN;
+  const rawYear = getFieldByPath(r, f?.itemYearField || 'annee');
+  const rawNote = getFieldByPath(r, f?.itemRatingField || 'note');
+  const anneeNum = rawYear !== null && rawYear !== undefined ? Number(rawYear) : NaN;
+  const noteNum = rawNote !== null && rawNote !== undefined ? Number(rawNote) : NaN;
+
+  const rawOrig = getFieldByPath(r, f?.itemOriginalTitleField || 'titre_original');
+  const rawRelease = getFieldByPath(r, f?.itemReleaseDateField || 'date_sortie');
+  const rawCountry = getFieldByPath(r, f?.itemCountryField || 'pays');
+  const rawDuration = getFieldByPath(r, f?.itemDurationField || 'duree');
+  const rawSynopsis = getFieldByPath(r, f?.itemSynopsisField || 'synopsis');
+  const rawPoster = getFieldByPath(r, f?.itemPosterField || 'poster');
 
   return {
     id,
     titre,
-    titre_original: typeof r.titre_original === 'string' && r.titre_original.trim() ? r.titre_original.trim() : null,
+    titre_original: typeof rawOrig === 'string' && rawOrig.trim() ? rawOrig.trim() : null,
     slug,
     url_source: sanitizeExternalHttpUrl(r.url_source),
     annee: Number.isFinite(anneeNum) && anneeNum > 1800 ? Math.trunc(anneeNum) : null,
-    date_sortie: typeof r.date_sortie === 'string' && r.date_sortie.trim() ? r.date_sortie.trim() : null,
+    date_sortie: typeof rawRelease === 'string' && rawRelease.trim() ? rawRelease.trim() : null,
     sortie_le: typeof r.sortie_le === 'string' && r.sortie_le.trim() ? r.sortie_le.trim() : null,
-    pays: typeof r.pays === 'string' && r.pays.trim() ? r.pays.trim().slice(0, 16) : null,
-    duree: typeof r.duree === 'string' && r.duree.trim() ? r.duree.trim().slice(0, 40) : null,
+    pays: typeof rawCountry === 'string' && rawCountry.trim() ? rawCountry.trim().slice(0, 24) : null,
+    duree:
+      typeof rawDuration === 'string' && rawDuration.trim()
+        ? rawDuration.trim().slice(0, 40)
+        : typeof rawDuration === 'number' && rawDuration > 0
+          ? `${rawDuration} min`
+          : null,
     note: Number.isFinite(noteNum) && noteNum >= 0 ? Math.round(noteNum * 10) / 10 : null,
     genres,
-    synopsis: typeof r.synopsis === 'string' && r.synopsis.trim() ? r.synopsis.trim() : null,
-    poster: resolvePinoyMediaUrl(r.poster, mediaBaseUrl, apiUrl),
+    synopsis: typeof rawSynopsis === 'string' && rawSynopsis.trim() ? rawSynopsis.trim() : null,
+    poster: resolvePinoyMediaUrl(rawPoster, mediaBaseUrl, apiUrl),
     galerie,
   };
 }
 
-function normalizePlayerSource(raw: unknown): PinoyPlayerSource | null {
+function normalizePlayerSource(
+  raw: unknown,
+  mod?: CustomApiModuleConfig | null
+): PinoyPlayerSource | null {
+  if (typeof raw === 'string') {
+    const url = sanitizeExternalHttpUrl(raw);
+    return url ? { provider: 'Serveur', url, quality: null, language: null } : null;
+  }
   if (!raw || typeof raw !== 'object') return null;
-  const r = raw as Record<string, unknown>;
-  const url = sanitizeExternalHttpUrl(r.url);
+  const f = mod?.fields;
+  const url = sanitizeExternalHttpUrl(getFieldByPath(raw, f?.playerUrlField || 'url'));
   if (!url) return null;
+  const provRaw = getFieldByPath(raw, f?.playerProviderField || 'provider');
+  const qualRaw = getFieldByPath(raw, f?.playerQualityField || 'quality');
+  const langRaw = getFieldByPath(raw, f?.playerLanguageField || 'language');
   const provider =
-    typeof r.provider === 'string' && r.provider.trim() ? r.provider.trim().slice(0, 64) : 'Serveur';
+    typeof provRaw === 'string' && provRaw.trim() ? provRaw.trim().slice(0, 64) : 'Serveur';
   const quality =
-    typeof r.quality === 'string' && r.quality.trim() ? r.quality.trim().slice(0, 32) : null;
+    typeof qualRaw === 'string' && qualRaw.trim() ? qualRaw.trim().slice(0, 32) : null;
   const language =
-    typeof r.language === 'string' && r.language.trim() ? r.language.trim().slice(0, 32) : null;
+    typeof langRaw === 'string' && langRaw.trim() ? langRaw.trim().slice(0, 32) : null;
   return { provider, url, quality, language };
 }
 
@@ -451,8 +524,12 @@ async function fetchJsonFromPinoy(targetUrl: string): Promise<Record<string, unk
   return obj;
 }
 
-export async function fetchPinoyFacets(apiUrl: string): Promise<PinoyFacetsResponse> {
-  const validation = validatePinoyApiUrl(apiUrl);
+export async function fetchPinoyFacets(
+  apiUrl: string,
+  mod?: CustomApiModuleConfig | null
+): Promise<PinoyFacetsResponse> {
+  const effectiveApiUrl = mod?.endpoints.apiUrl ?? apiUrl;
+  const validation = validatePinoyApiUrl(effectiveApiUrl);
   if (!validation.ok || !validation.url) {
     return {
       status: 'unconfigured',
@@ -462,7 +539,7 @@ export async function fetchPinoyFacets(apiUrl: string): Promise<PinoyFacetsRespo
     };
   }
 
-  const cacheKey = `pinoy:facets:${validation.url}`;
+  const cacheKey = `pinoy:facets:${validation.url}:${mod?.updatedAt ?? ''}`;
   const fresh = pinoyCache.get(cacheKey) as PinoyFacetsResponse | null;
   if (fresh) return fresh;
 
@@ -471,37 +548,41 @@ export async function fetchPinoyFacets(apiUrl: string): Promise<PinoyFacetsRespo
     if (recheck) return recheck;
 
     try {
-      const target = buildPinoyEndpointUrl(validation.url, { action: 'facets' });
+      const actionParam = mod?.endpoints.actionParam ?? 'action';
+      const facetsAction = mod?.endpoints.facetsAction ?? 'facets';
+      const params: Record<string, string | number | undefined> = {};
+      if (actionParam && facetsAction) {
+        params[actionParam] = facetsAction;
+      }
+      const target = buildPinoyEndpointUrl(validation.url, params);
       const json = await fetchJsonFromPinoy(target);
 
-      const rawGenres = Array.isArray(json.genres) ? json.genres : [];
-      const genres = rawGenres
+      const rawGenres = getFieldByPath(json, mod?.fields.facetsGenresPath || 'genres');
+      const genres = (Array.isArray(rawGenres) ? rawGenres : [])
         .map((g) => {
+          if (typeof g === 'string') return g.trim() ? { nom: g.trim(), total: 0 } : null;
           if (!g || typeof g !== 'object') return null;
           const rec = g as Record<string, unknown>;
-          const nom = typeof rec.nom === 'string' ? rec.nom.trim() : '';
-          const total = Number(rec.total) || 0;
+          const nom = String(rec.nom ?? rec.name ?? rec.label ?? '').trim();
+          const total = Number(rec.total ?? rec.count) || 0;
           return nom ? { nom, total } : null;
         })
         .filter((x): x is { nom: string; total: number } => Boolean(x));
 
-      const rawPays = Array.isArray(json.pays) ? json.pays : [];
-      const pays = rawPays
+      const rawPays = getFieldByPath(json, mod?.fields.facetsCountriesPath || 'pays');
+      const pays = (Array.isArray(rawPays) ? rawPays : [])
         .map((p) => {
+          if (typeof p === 'string') return p.trim() ? { code: p.trim(), total: 0 } : null;
           if (!p || typeof p !== 'object') return null;
           const rec = p as Record<string, unknown>;
-          const code = typeof rec.code === 'string' ? rec.code.trim() : '';
-          const total = Number(rec.total) || 0;
+          const code = String(rec.code ?? rec.nom ?? rec.name ?? '').trim();
+          const total = Number(rec.total ?? rec.count) || 0;
           return code ? { code, total } : null;
         })
         .filter((x): x is { code: string; total: number } => Boolean(x));
 
-      const rawAnnees =
-        json.annees && typeof json.annees === 'object'
-          ? (json.annees as Record<string, unknown>)
-          : {};
-      const minY = Number(rawAnnees.min);
-      const maxY = Number(rawAnnees.max);
+      const minY = Number(getFieldByPath(json, mod?.fields.facetsYearMinPath || 'annees.min'));
+      const maxY = Number(getFieldByPath(json, mod?.fields.facetsYearMaxPath || 'annees.max'));
 
       const payload: PinoyFacetsResponse = {
         status: 'live',
@@ -530,14 +611,18 @@ export async function fetchPinoyFacets(apiUrl: string): Promise<PinoyFacetsRespo
 export async function fetchPinoyList(
   apiUrl: string,
   filters: PinoyListFilters,
-  mediaBaseUrl = DEFAULT_PINOY_MEDIA_BASE_URL
+  mediaBaseUrl = DEFAULT_PINOY_MEDIA_BASE_URL,
+  mod?: CustomApiModuleConfig | null
 ): Promise<PinoyListResponse> {
-  const validation = validatePinoyApiUrl(apiUrl);
+  const effectiveApiUrl = mod?.endpoints.apiUrl ?? apiUrl;
+  const effectiveMediaBase = mod ? mod.endpoints.mediaBaseUrl : mediaBaseUrl;
+  const perPage = Math.max(6, Math.min(100, mod?.endpoints.perPage || 24));
+  const validation = validatePinoyApiUrl(effectiveApiUrl);
   if (!validation.ok || !validation.url) {
     return {
       status: 'unconfigured',
       page: 1,
-      per_page: 24,
+      per_page: perPage,
       total: 0,
       total_pages: 0,
       items: [],
@@ -546,7 +631,9 @@ export async function fetchPinoyList(
 
   const normalizedKey = JSON.stringify({
     u: validation.url,
-    m: mediaBaseUrl,
+    m: effectiveMediaBase,
+    upd: mod?.updatedAt ?? '',
+    perPage,
     q: filters.q,
     genre: filters.genre,
     pays: filters.pays,
@@ -563,29 +650,56 @@ export async function fetchPinoyList(
     if (recheck) return recheck;
 
     try {
-      const target = buildPinoyEndpointUrl(validation.url, {
-        action: 'list',
-        page: filters.page,
-        per_page: 24,
-        q: filters.q || undefined,
-        genre: filters.genre || undefined,
-        pays: filters.pays || undefined,
-        annee: filters.annee || undefined,
-        sort: filters.sort || 'recent',
-      });
+      const ep = mod?.endpoints;
+      const actionParam = ep?.actionParam ?? 'action';
+      const listAction = ep?.listAction ?? 'list';
+      const pageParam = ep?.pageParam ?? 'page';
+      const perPageParam = ep?.perPageParam ?? 'per_page';
+      const queryParam = ep?.queryParam ?? 'q';
+      const genreParam = ep?.genreParam ?? 'genre';
+      const countryParam = ep?.countryParam ?? 'pays';
+      const yearParam = ep?.yearParam ?? 'annee';
+      const sortParam = ep?.sortParam ?? 'sort';
+
+      const params: Record<string, string | number | undefined> = {};
+      if (actionParam && listAction) params[actionParam] = listAction;
+      if (pageParam) params[pageParam] = filters.page;
+      if (perPageParam) params[perPageParam] = perPage;
+      if (queryParam && filters.q) params[queryParam] = filters.q;
+      if (genreParam && filters.genre) params[genreParam] = filters.genre;
+      if (countryParam && filters.pays) params[countryParam] = filters.pays;
+      if (yearParam && filters.annee) params[yearParam] = filters.annee;
+      if (sortParam && filters.sort) params[sortParam] = filters.sort;
+
+      const target = buildPinoyEndpointUrl(validation.url, params);
       const json = await fetchJsonFromPinoy(target);
 
-      const rawItems = Array.isArray(json.items) ? json.items : [];
-      const items = rawItems
-        .map((it) => normalizeFilm(it, mediaBaseUrl, validation.url))
+      const rawItems = getFieldByPath(json, mod?.fields.listItemsPath || 'items');
+      const listArr = Array.isArray(rawItems) ? rawItems : Array.isArray(json) ? json : [];
+      const items = listArr
+        .map((it) => normalizeFilm(it, effectiveMediaBase, validation.url, mod))
         .filter((x): x is PinoyFilm => Boolean(x));
+
+      const pageNum = Math.max(
+        1,
+        Number(getFieldByPath(json, mod?.fields.listPagePath || 'page')) || filters.page
+      );
+      const totalNum = Math.max(
+        0,
+        Number(getFieldByPath(json, mod?.fields.listTotalPath || 'total')) || items.length
+      );
+      const totalPagesNum = Math.max(
+        0,
+        Number(getFieldByPath(json, mod?.fields.listTotalPagesPath || 'total_pages')) ||
+          (items.length > 0 ? Math.max(1, Math.ceil(totalNum / perPage)) : 0)
+      );
 
       const payload: PinoyListResponse = {
         status: 'live',
-        page: Math.max(1, Number(json.page) || filters.page),
-        per_page: Math.max(1, Number(json.per_page) || 24),
-        total: Math.max(0, Number(json.total) || items.length),
-        total_pages: Math.max(0, Number(json.total_pages) || (items.length > 0 ? 1 : 0)),
+        page: pageNum,
+        per_page: Number(json.per_page) || perPage,
+        total: totalNum,
+        total_pages: totalPagesNum,
         items,
       };
       pinoyCache.set(cacheKey, payload, LIST_TTL_MS, LIST_STALE_MS);
@@ -596,7 +710,7 @@ export async function fetchPinoyList(
       return {
         status: 'fallback',
         page: filters.page,
-        per_page: 24,
+        per_page: perPage,
         total: 0,
         total_pages: 0,
         items: [],
@@ -611,9 +725,18 @@ export async function fetchPinoyDetail(
   slug: string,
   similarLimit = 12,
   mediaBaseUrl = DEFAULT_PINOY_MEDIA_BASE_URL,
-  playerTemplate = DEFAULT_PINOY_PLAYER_TEMPLATE
+  playerTemplate = DEFAULT_PINOY_PLAYER_TEMPLATE,
+  mod?: CustomApiModuleConfig | null
 ): Promise<PinoyDetailResponse> {
-  const validation = validatePinoyApiUrl(apiUrl);
+  const effectiveApiUrl = mod?.endpoints.apiUrl ?? apiUrl;
+  const effectiveMediaBase = mod ? mod.endpoints.mediaBaseUrl : mediaBaseUrl;
+  const effectivePlayerTemplate = mod ? mod.player.playerUrlTemplate : playerTemplate;
+  const effectiveSimilarLimit = mod ? mod.endpoints.similarLimit : similarLimit;
+  const primaryLabel = mod?.player.primaryPlayerLabel || 'Lecteur Pinoy';
+  const includeUpstreamEmbeds = mod ? mod.player.includeUpstreamEmbeds : true;
+  const onlyDirectDownloads = mod ? mod.player.onlyDirectDownloads : true;
+
+  const validation = validatePinoyApiUrl(effectiveApiUrl);
   if (!validation.ok || !validation.url) {
     return {
       status: 'unconfigured',
@@ -634,7 +757,7 @@ export async function fetchPinoyDetail(
     };
   }
 
-  const cacheKey = `pinoy:detail:${validation.url}:${mediaBaseUrl}:${playerTemplate}:${cleanSlug}`;
+  const cacheKey = `pinoy:detail:${validation.url}:${effectiveMediaBase}:${effectivePlayerTemplate}:${mod?.updatedAt ?? ''}:${cleanSlug}`;
   const fresh = pinoyCache.get(cacheKey) as PinoyDetailResponse | null;
   if (fresh) return fresh;
 
@@ -643,74 +766,87 @@ export async function fetchPinoyDetail(
     if (recheck) return recheck;
 
     try {
-      const target = buildPinoyEndpointUrl(validation.url, {
-        action: 'detail',
-        slug: cleanSlug,
-        similar_limit: similarLimit,
-      });
-      const json = await fetchJsonFromPinoy(target);
-      const film = normalizeFilm(json.film, mediaBaseUrl, validation.url);
+      const ep = mod?.endpoints;
+      const actionParam = ep?.actionParam ?? 'action';
+      const detailAction = ep?.detailAction ?? 'detail';
+      const detailKeyParam = ep?.detailKeyParam ?? 'slug';
+      const similarLimitParam = ep?.similarLimitParam ?? 'similar_limit';
 
-      const rawPlayers =
-        json.players && typeof json.players === 'object'
-          ? (json.players as Record<string, unknown>)
-          : {};
-      const upstreamEmbed = (Array.isArray(rawPlayers.embed) ? rawPlayers.embed : [])
-        .map((p) => normalizePlayerSource(p))
+      const params: Record<string, string | number | undefined> = {};
+      if (actionParam && detailAction) params[actionParam] = detailAction;
+      if (detailKeyParam) params[detailKeyParam] = cleanSlug;
+      if (similarLimitParam && effectiveSimilarLimit > 0) {
+        params[similarLimitParam] = effectiveSimilarLimit;
+      }
+
+      const target = buildPinoyEndpointUrl(validation.url, params);
+      const json = await fetchJsonFromPinoy(target);
+      const rawFilm = getFieldByPath(json, mod?.fields.detailItemPath || 'film') ?? json;
+      const film = normalizeFilm(rawFilm, effectiveMediaBase, validation.url, mod);
+
+      const rawEmbed = getFieldByPath(json, mod?.fields.detailEmbedsPath || 'players.embed');
+      const upstreamEmbed = (Array.isArray(rawEmbed) ? rawEmbed : [])
+        .map((p) => normalizePlayerSource(p, mod))
         .filter((x): x is PinoyPlayerSource => Boolean(x));
 
-      const customPlayerUrl = film ? resolvePinoyPlayerUrl(playerTemplate, film) : null;
+      const customPlayerUrl = film ? resolvePinoyPlayerUrl(effectivePlayerTemplate, film) : null;
       const embed: PinoyPlayerSource[] = [];
       const seenEmbedUrls = new Set<string>();
       if (customPlayerUrl) {
         embed.push({
-          provider: 'Lecteur Pinoy',
+          provider: primaryLabel,
           url: customPlayerUrl,
           quality: 'HD',
           language: null,
         });
         seenEmbedUrls.add(customPlayerUrl);
       }
-      for (const srv of upstreamEmbed) {
-        if (!seenEmbedUrls.has(srv.url)) {
-          seenEmbedUrls.add(srv.url);
-          embed.push(srv);
+      if (includeUpstreamEmbeds || !customPlayerUrl) {
+        for (const srv of upstreamEmbed) {
+          if (!seenEmbedUrls.has(srv.url)) {
+            seenEmbedUrls.add(srv.url);
+            embed.push(srv);
+          }
         }
       }
 
-      const rawDownload = (Array.isArray(rawPlayers.download) ? rawPlayers.download : [])
-        .map((p) => normalizePlayerSource(p))
+      const rawDownload = getFieldByPath(json, mod?.fields.detailDownloadsPath || 'players.download');
+      const rawDlList = (Array.isArray(rawDownload) ? rawDownload : [])
+        .map((p) => normalizePlayerSource(p, mod))
         .filter((x): x is PinoyPlayerSource => Boolean(x));
 
       const download: PinoyPlayerSource[] = [];
       const seenDownloadUrls = new Set<string>();
 
-      for (const dl of rawDownload) {
-        const directUrl =
-          embedToDirectDownloadUrl(dl.url, dl.provider) ??
-          (isDirectDownloadUrl(dl.url) ? dl.url : null);
+      for (const dl of rawDlList) {
+        const directUrl = onlyDirectDownloads
+          ? embedToDirectDownloadUrl(dl.url, dl.provider) ??
+            (isDirectDownloadUrl(dl.url) ? dl.url : null)
+          : dl.url;
         if (directUrl && !seenDownloadUrls.has(directUrl)) {
           seenDownloadUrls.add(directUrl);
           download.push({ ...dl, url: directUrl });
         }
       }
 
-      for (const srv of upstreamEmbed) {
-        const directUrl = embedToDirectDownloadUrl(srv.url, srv.provider);
-        if (directUrl && !seenDownloadUrls.has(directUrl)) {
-          seenDownloadUrls.add(directUrl);
-          download.push({
-            provider: srv.provider,
-            url: directUrl,
-            quality: srv.quality,
-            language: srv.language,
-          });
+      if (onlyDirectDownloads) {
+        for (const srv of upstreamEmbed) {
+          const directUrl = embedToDirectDownloadUrl(srv.url, srv.provider);
+          if (directUrl && !seenDownloadUrls.has(directUrl)) {
+            seenDownloadUrls.add(directUrl);
+            download.push({
+              provider: srv.provider,
+              url: directUrl,
+              quality: srv.quality,
+              language: srv.language,
+            });
+          }
         }
       }
 
-      const rawSimilar = Array.isArray(json.similar) ? json.similar : [];
-      const similar = rawSimilar
-        .map((s) => normalizeFilm(s, mediaBaseUrl, validation.url))
+      const rawSimilar = getFieldByPath(json, mod?.fields.detailSimilarPath || 'similar');
+      const similar = (Array.isArray(rawSimilar) ? rawSimilar : [])
+        .map((s) => normalizeFilm(s, effectiveMediaBase, validation.url, mod))
         .filter((x): x is PinoyFilm => Boolean(x));
 
       const payload: PinoyDetailResponse = {

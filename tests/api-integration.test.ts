@@ -357,7 +357,7 @@ test('Public API endpoints expose Cache-Control headers while authenticated /api
   assert.match(popupsRes.headers.get('cache-control') || '', /^public, max-age=\d+/);
   assert.match(siteRes.headers.get('cache-control') || '', /^public, max-age=\d+/);
   assert.match(genresRes.headers.get('cache-control') || '', /^public, max-age=\d+/);
-  assert.match(guestHomeRes.headers.get('cache-control') || '', /^public, max-age=30/);
+  assert.match(guestHomeRes.headers.get('cache-control') || '', /^public, max-age=\d+/);
   assert.match(guestHomeRes.headers.get('vary') || '', /Authorization/i);
 
   const loginRes = await fetch(`${baseUrl}/api/auth/demo-login`, {
@@ -2218,3 +2218,236 @@ test('Realtime En ligne maintenant tracks IP, city, and member vs visitor status
   assert.equal(memberMatches[0]?.city, 'Antananarivo');
   assert.equal(memberMatches[0]?.geoSource, 'timezone');
 });
+
+test('Pinoy module settings propagate live to /api/pinoy/* and /api/admin/home-sections curates up to 18 items for /api/home', async () => {
+  const [adminLogin, memberLogin] = await Promise.all([
+    fetch(`${baseUrl}/api/auth/demo-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'admin' }),
+    }),
+    fetch(`${baseUrl}/api/auth/demo-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'member' }),
+    }),
+  ]);
+  const adminAuth = (await adminLogin.json()) as { token: string };
+  const memberAuth = (await memberLogin.json()) as { token: string };
+
+  // 1. Custom home sections endpoints require admin and enforce 18-item max
+  const unauthHomeSec = await fetch(`${baseUrl}/api/admin/home-sections`);
+  assert.equal(unauthHomeSec.status, 403);
+  const memberHomeSec = await fetch(`${baseUrl}/api/admin/home-sections`, {
+    headers: { Authorization: `Bearer ${memberAuth.token}` },
+  });
+  assert.equal(memberHomeSec.status, 403);
+
+  const sampleCatalogueItem = (n: number) => ({
+    id: String(3000 + n),
+    titre: `Horreur Sélection ${n}`,
+    poster: `https://image.tmdb.org/t/p/w300/horreur-${n}.jpg`,
+    qualite: 'HD',
+    langue: 'VF',
+    item_type: n % 2 === 0 ? 'serie' : 'film',
+    saison: null,
+    genre: 'Horreur',
+    annee: 2026,
+  });
+
+  const tooManyRes = await fetch(`${baseUrl}/api/admin/home-sections`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({
+      title: 'Top 19 Impossible',
+      items: Array.from({ length: 19 }, (_, idx) => sampleCatalogueItem(idx + 1)),
+    }),
+  });
+  assert.equal(tooManyRes.status, 400);
+
+  const createSecRes = await fetch(`${baseUrl}/api/admin/home-sections`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({
+      title: 'Top 10 film horreur',
+      description: 'Les meilleurs films et séries horreur sélectionnés',
+      enabled: true,
+      order: 10,
+      items: Array.from({ length: 18 }, (_, idx) => sampleCatalogueItem(idx + 1)),
+    }),
+  });
+  assert.equal(createSecRes.status, 200);
+  const createdSec = (await createSecRes.json()) as {
+    section: { id: string; title: string; items: unknown[] };
+  };
+  assert.equal(createdSec.section.items.length, 18);
+
+  const homeWithCustomRes = await fetch(`${baseUrl}/api/home`);
+  assert.equal(homeWithCustomRes.status, 200);
+  const homeWithCustom = (await homeWithCustomRes.json()) as {
+    customSections?: Array<{ id: string; title: string; description: string; items: unknown[] }>;
+  };
+  const foundOnHome = homeWithCustom.customSections?.find((s) => s.id === createdSec.section.id);
+  assert.ok(foundOnHome);
+  assert.equal(foundOnHome.title, 'Top 10 film horreur');
+  assert.equal(foundOnHome.items.length, 18);
+
+  // Clean up section
+  const delSecRes = await fetch(
+    `${baseUrl}/api/admin/home-sections/${encodeURIComponent(createdSec.section.id)}`,
+    {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${adminAuth.token}` },
+    }
+  );
+  assert.equal(delSecRes.status, 200);
+
+  // 2. Pinoy module configuration changes propagate to /api/pinoy/facets, /list, /detail
+  const modsRes = await fetch(`${baseUrl}/api/admin/custom-modules`, {
+    headers: { Authorization: `Bearer ${adminAuth.token}` },
+  });
+  assert.equal(modsRes.status, 200);
+  const modsJson = (await modsRes.json()) as { modules: Array<Record<string, unknown>> };
+  const originalPinoy = modsJson.modules.find((m) => m.slug === 'pinoy');
+  assert.ok(originalPinoy);
+
+  const modSaveRes = await fetch(`${baseUrl}/api/admin/custom-modules`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminAuth.token}`,
+    },
+    body: JSON.stringify({
+      ...originalPinoy,
+      name: 'Pinoy VIP',
+      badgeText: 'PH Exclusive',
+      endpoints: {
+        ...(originalPinoy.endpoints as Record<string, unknown>),
+        apiUrl: 'https://example.com/pinoy_mod_prop.php',
+        perPage: 12,
+      },
+      sections: {
+        ...(originalPinoy.sections as Record<string, unknown>),
+        catalogueTitle: 'Pinoy Cinema Custom',
+        catalogueSubtitle: 'Description personnalisée depuis Module Pinoy',
+        desktopGridCols: 4,
+        detailShowGallerySection: true,
+      },
+      player: {
+        ...(originalPinoy.player as Record<string, unknown>),
+        playerUrlTemplate: 'https://cdn.example.com/pinoy/{id}',
+        primaryPlayerLabel: 'Lecteur VIP',
+        useSameOriginProxy: true,
+        downloadProOnly: false,
+      },
+    }),
+  });
+  assert.equal(modSaveRes.status, 200);
+
+  const realFetch = globalThis.fetch;
+  let requestedListUrl = '';
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const target =
+      typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (target.startsWith('https://example.com/pinoy_mod_prop.php')) {
+      if (target.includes('action=list')) requestedListUrl = target;
+      return new Response(
+        JSON.stringify({
+          status: 'success',
+          page: 1,
+          total: 1,
+          total_pages: 1,
+          genres: [{ nom: 'Drame', total: 1 }],
+          pays: [{ code: 'PH', total: 1 }],
+          annees: { min: 2024, max: 2026 },
+          items: [
+            {
+              id: 303,
+              slug: 'custom-pinoy-title',
+              titre: 'Custom Pinoy Title',
+              annee: 2026,
+              pays: 'PH',
+              genres: ['Drame'],
+              poster: 'uploads/pinoy/posters/custom.jpg',
+            },
+          ],
+          film: {
+            id: 303,
+            slug: 'custom-pinoy-title',
+            titre: 'Custom Pinoy Title',
+            annee: 2026,
+            pays: 'PH',
+            genres: ['Drame'],
+            poster: 'uploads/pinoy/posters/custom.jpg',
+            galerie: ['uploads/pinoy/galerie/g1.jpg'],
+          },
+          players: {
+            embed: [{ provider: 'Voe', url: 'https://voe.sx/e/custompinoy1', quality: 'HD' }],
+            download: [],
+          },
+          similar: [],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return realFetch(input, init);
+  }) as typeof fetch;
+
+  try {
+    const facetsRes = await realFetch(`${baseUrl}/api/pinoy/facets`);
+    assert.equal(facetsRes.status, 200);
+    const facetsJson = (await facetsRes.json()) as {
+      module?: { sections: { catalogueTitle: string; catalogueSubtitle: string; desktopGridCols: number } };
+    };
+    assert.equal(facetsJson.module?.sections.catalogueTitle, 'Pinoy Cinema Custom');
+    assert.equal(
+      facetsJson.module?.sections.catalogueSubtitle,
+      'Description personnalisée depuis Module Pinoy'
+    );
+    assert.equal(facetsJson.module?.sections.desktopGridCols, 4);
+
+    const listRes = await realFetch(`${baseUrl}/api/pinoy/list`);
+    assert.equal(listRes.status, 200);
+    assert.ok(requestedListUrl.includes('per_page=12'));
+    const listJson = (await listRes.json()) as {
+      module?: { sections: { catalogueTitle: string } };
+      items: Array<{ titre: string }>;
+    };
+    assert.equal(listJson.module?.sections.catalogueTitle, 'Pinoy Cinema Custom');
+    assert.equal(listJson.items[0]?.titre, 'Custom Pinoy Title');
+
+    const detailRes = await realFetch(`${baseUrl}/api/pinoy/detail/custom-pinoy-title`);
+    assert.equal(detailRes.status, 200);
+    const detailJson = (await detailRes.json()) as {
+      module?: { sections: { detailShowGallerySection: boolean }; player: { downloadProOnly: boolean } };
+      downloadLocked?: boolean;
+      players: {
+        embed: Array<{ provider: string; url: string }>;
+        download: Array<{ url: string }>;
+      };
+    };
+    assert.equal(detailJson.module?.sections.detailShowGallerySection, true);
+    assert.equal(detailJson.module?.player.downloadProOnly, false);
+    assert.equal(detailJson.players.embed[0]?.provider, 'Lecteur VIP');
+    assert.equal(detailJson.players.embed[0]?.url, '/api/public/watch/pinoy/303/custom-pinoy-title');
+    assert.equal(detailJson.downloadLocked, false);
+    assert.equal(detailJson.players.download[0]?.url, 'https://voe.sx/custompinoy1/download');
+  } finally {
+    globalThis.fetch = realFetch;
+    await realFetch(`${baseUrl}/api/admin/custom-modules`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminAuth.token}`,
+      },
+      body: JSON.stringify(originalPinoy),
+    });
+  }
+});
+

@@ -31,6 +31,7 @@ import type {
   FilmDownloadItem,
   FriendRecord,
   FriendRequestRecord,
+  HomeCustomSection,
   HomePayload,
   Item,
   MailLogEntry,
@@ -620,26 +621,23 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ origin }),
     }),
-  adminSavePinoyApiUrl: (
-    payload:
-      | string
-      | {
-          pinoyApiUrl?: string;
-          pinoyMediaBaseUrl?: string;
-          pinoyPlayerTemplate?: string;
-          pinoyDownloadMessage?: string;
-        }
-  ) =>
-    apiRequest<{
-      pinoyApiUrl: string;
-      pinoyMediaBaseUrl: string;
-      pinoyPlayerTemplate: string;
-      pinoyDownloadMessage: string;
-    }>('/api/admin/settings/pinoy', {
-      method: 'PUT',
-      body: JSON.stringify(
-        typeof payload === 'string' ? { pinoyApiUrl: payload } : payload
-      ),
+  adminHomeSections: () =>
+    apiRequest<{ sections: HomeCustomSection[]; maxItems: number; maxSections: number }>(
+      '/api/admin/home-sections'
+    ),
+  adminSaveHomeSection: (payload: Partial<HomeCustomSection>) =>
+    apiRequest<{ section: HomeCustomSection }>(
+      payload.id
+        ? `/api/admin/home-sections/${encodeURIComponent(payload.id)}`
+        : '/api/admin/home-sections',
+      {
+        method: payload.id ? 'PUT' : 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+  adminDeleteHomeSection: (id: string) =>
+    apiRequest<{ ok: boolean }>(`/api/admin/home-sections/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
     }),
   adminSaveFilmDownload: (payload: {
     apiUrl?: string;

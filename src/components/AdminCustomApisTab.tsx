@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -151,8 +151,18 @@ export function AdminCustomApisTab() {
   const [showMobile, setShowMobile] = useState(true);
   const [showFooter, setShowFooter] = useState(true);
   const [testReport, setTestReport] = useState<CustomApiTestReport | null>(null);
+  const initialSelectedRef = useRef(false);
 
   const modules = modulesQuery.data?.modules ?? [];
+
+  useEffect(() => {
+    if (initialSelectedRef.current || modules.length === 0) return;
+    initialSelectedRef.current = true;
+    const preferred = modules.find((m) => m.slug === 'pinoy') ?? modules[0];
+    if (preferred) {
+      setDraft(preferred);
+    }
+  }, [modules]);
 
   const saveMutation = useMutation({
     mutationFn: () =>

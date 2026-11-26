@@ -2,10 +2,34 @@ import React, { memo, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { Film, Play, RotateCcw, Search, Settings, Star } from 'lucide-react';
-import type { Item, PinoyFilm, PinoyListFilters } from '../shared/types';
+import type {
+  CustomApiPublicModule,
+  Item,
+  PinoyFilm,
+  PinoyListFilters,
+} from '../shared/types';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
 import { FavoriteButton, PosterSkeletonGrid } from '../components/PosterCard';
+
+const DEFAULT_PINOY_SORTS = [
+  { value: 'recent', label: 'Plus récents' },
+  { value: 'oldest', label: 'Plus anciens' },
+  { value: 'note', label: 'Mieux notés' },
+  { value: 'az', label: 'Titre A → Z' },
+  { value: 'za', label: 'Titre Z → A' },
+];
+
+const MOBILE_GRID_CLASS: Record<2 | 3, string> = {
+  2: 'grid-cols-2',
+  3: 'grid-cols-3',
+};
+
+const DESKTOP_GRID_CLASS: Record<4 | 5 | 6, string> = {
+  4: 'md:grid-cols-3 lg:grid-cols-4',
+  5: 'md:grid-cols-4 lg:grid-cols-5',
+  6: 'md:grid-cols-4 lg:grid-cols-6',
+};
 
 function sanitizePosterUrl(raw: string | null | undefined): string | null {
   if (!raw) return null;
@@ -13,12 +37,12 @@ function sanitizePosterUrl(raw: string | null | undefined): string | null {
   return /^https?:\/\//i.test(trimmed) ? trimmed : null;
 }
 
-function pinoyToFavoriteItem(film: PinoyFilm): Item {
+function pinoyToFavoriteItem(film: PinoyFilm, badgeText?: string | null): Item {
   return {
     id: film.slug || String(film.id),
     titre: film.titre,
     poster: sanitizePosterUrl(film.poster),
-    qualite: film.note !== null ? `★ ${film.note.toFixed(1)}` : null,
+    qualite: film.note !== null ? `★ ${film.note.toFixed(1)}` : badgeText || null,
     langue: film.pays || null,
     item_type: 'pinoy',
     saison: null,
@@ -27,7 +51,13 @@ function pinoyToFavoriteItem(film: PinoyFilm): Item {
   };
 }
 
-const PinoyCard = memo(function PinoyCard({ film }: { film: PinoyFilm }) {
+const PinoyCard = memo(function PinoyCard({
+  film,
+  mod,
+}: {
+  film: PinoyFilm;
+  mod: CustomApiPublicModule | null;
+}) {
   const [imgFailed, setImgFailed] = useState(false);
 
   useEffect(() => {
@@ -37,10 +67,15 @@ const PinoyCard = memo(function PinoyCard({ film }: { film: PinoyFilm }) {
   const safePoster = sanitizePosterUrl(film.poster);
   const showImg = Boolean(safePoster && !imgFailed);
 
+  const showYear = mod ? mod.sections.showYear : true;
+  const showDuration = mod ? mod.sections.showDuration : true;
+  const showCountry = mod ? mod.sections.showCountry : true;
+  const showRating = mod ? mod.sections.showRating : true;
+
   const metaParts = [
-    film.annee ? String(film.annee) : null,
-    film.duree || null,
-    film.pays || null,
+    showYear && film.annee ? String(film.annee) : null,
+    showDuration && film.duree ? film.duree : null,
+    showCountry && film.pays ? film.pays : null,
   ].filter(Boolean);
 
   return (
@@ -81,19 +116,19 @@ const PinoyCard = memo(function PinoyCard({ film }: { film: PinoyFilm }) {
         </h3>
 
         <p className="mt-0.5 flex items-center gap-1.5 truncate text-[10px] sm:text-xs text-muted-foreground tabular-nums leading-tight">
-          {film.note !== null && (
+          {showRating && film.note !== null && (
             <span className="inline-flex items-center gap-0.5 font-medium text-amber-400 shrink-0">
               <Star className="size-3 fill-current" />
               <span>{film.note.toFixed(1)}</span>
             </span>
           )}
-          {film.note !== null && metaParts.length > 0 && <span aria-hidden="true">·</span>}
+          {showRating && film.note !== null && metaParts.length > 0 && <span aria-hidden="true">·</span>}
           {metaParts.length > 0 && <span className="truncate">{metaParts.join(' · ')}</span>}
         </p>
       </Link>
 
       <div className="absolute right-1.5 top-1.5 sm:right-2 sm:top-2 z-10">
-        <FavoriteButton item={pinoyToFavoriteItem(film)} compact />
+        <FavoriteButton item={pinoyToFavoriteItem(film, mod?.badgeText)} compact />
       </div>
     </div>
   );
@@ -109,15 +144,18 @@ export function PinoyCataloguePage() {
   const [genre, setGenre] = useState(searchParams.get('genre') ?? '');
   const [pays, setPays] = useState(searchParams.get('pays') ?? '');
   const [annee, setAnnee] = useState(searchParams.get('annee') ?? '');
-  const [sort, setSort] = useState<PinoyListFilters['sort']>(() => {
-    const raw = searchParams.get('sort');
-    return raw === 'recent' || raw === 'oldest' || raw === 'az' || raw === 'za' || raw === 'note'
-      ? raw
-      : 'recent';
-  });
+  const [sort, setSort] = useState<string>(() => searchParams.get('sort') ?? '');
   const [page, setPage] = useState(Math.max(1, Number(searchParams.get('page')) || 1));
 
-  useDocumentTitle(q ? `Pinoy · « ${q} »` : 'Pinoy · Films');
+  const facetsQuery = useQuery({
+    queryKey: ['pinoy-facets'],
+    queryFn: () => api.pinoyFacets(),
+    staleTime: 300_000,
+    retry: false,
+  });
+
+  const preliminaryMod = facetsQuery.data?.module ?? null;
+  const effectiveSortForQuery = sort || preliminaryMod?.filters.defaultSort || 'recent';
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -136,19 +174,19 @@ export function PinoyCataloguePage() {
     if (genre) next.set('genre', genre);
     if (pays) next.set('pays', pays);
     if (annee) next.set('annee', annee);
-    if (sort !== 'recent') next.set('sort', sort);
+    if (sort) next.set('sort', sort);
     if (page > 1) next.set('page', String(page));
     setSearchParams(next, { replace: true });
   }, [q, genre, pays, annee, sort, page, setSearchParams]);
 
-  const filters: PinoyListFilters = { q, genre, pays, annee, sort, page };
-
-  const facetsQuery = useQuery({
-    queryKey: ['pinoy-facets'],
-    queryFn: () => api.pinoyFacets(),
-    staleTime: 300_000,
-    retry: false,
-  });
+  const filters: PinoyListFilters = {
+    q,
+    genre,
+    pays,
+    annee,
+    sort: effectiveSortForQuery,
+    page,
+  };
 
   const listQuery = useQuery({
     queryKey: ['pinoy-list', filters],
@@ -157,6 +195,15 @@ export function PinoyCataloguePage() {
     staleTime: 60_000,
     retry: false,
   });
+
+  const data = listQuery.data;
+  const mod = data?.module ?? facetsQuery.data?.module ?? null;
+  const displayTitle = mod?.sections.catalogueTitle?.trim() || mod?.name || 'Pinoy';
+  const displaySubtitle = mod
+    ? mod.sections.catalogueSubtitle
+    : 'Catalogue de films Pinoy avec lecteur intégré et liens disponibles.';
+
+  useDocumentTitle(q ? `${displayTitle} · « ${q} »` : displayTitle);
 
   const years = useMemo(() => {
     const maxY = facetsQuery.data?.annees.max ?? new Date().getFullYear();
@@ -171,12 +218,21 @@ export function PinoyCataloguePage() {
 
   const genres = facetsQuery.data?.genres ?? [];
   const countries = facetsQuery.data?.pays ?? [];
-  const data = listQuery.data;
   const items = data?.items ?? [];
   const isUnconfigured = data?.status === 'unconfigured';
+  const defaultSort = mod?.filters.defaultSort || 'recent';
+  const effectiveSort = sort || defaultSort;
+  const sortOptions =
+    mod?.filters.sortOptions && mod.filters.sortOptions.length > 0
+      ? mod.filters.sortOptions
+      : DEFAULT_PINOY_SORTS;
 
   const hasActiveFilters =
-    Boolean(input) || Boolean(genre) || Boolean(pays) || Boolean(annee) || sort !== 'recent';
+    Boolean(input) ||
+    Boolean(genre) ||
+    Boolean(pays) ||
+    Boolean(annee) ||
+    (Boolean(sort) && sort !== defaultSort);
 
   function resetAll() {
     setInput('');
@@ -184,24 +240,29 @@ export function PinoyCataloguePage() {
     setGenre('');
     setPays('');
     setAnnee('');
-    setSort('recent');
+    setSort('');
     setPage(1);
   }
+
+  const mobileGridClass = MOBILE_GRID_CLASS[mod?.sections.mobileGridCols ?? 3];
+  const desktopGridClass = DESKTOP_GRID_CLASS[mod?.sections.desktopGridCols ?? 6];
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-10">
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="font-display text-3xl font-bold text-foreground sm:text-4xl">Pinoy</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Catalogue de films Pinoy avec lecteur intégré et liens disponibles.
-          </p>
+          <h1 className="font-display text-3xl font-bold text-foreground sm:text-4xl">
+            {displayTitle}
+          </h1>
+          {displaySubtitle && (
+            <p className="mt-1 text-sm text-muted-foreground">{displaySubtitle}</p>
+          )}
         </div>
         {!isUnconfigured && (
           <p aria-live="polite" className="text-sm text-muted-foreground tabular-nums">
             {listQuery.isFetching
               ? 'Actualisation…'
-              : `${(data?.total ?? 0).toLocaleString('fr-FR')} film${
+              : `${(data?.total ?? 0).toLocaleString('fr-FR')} titre${
                   (data?.total ?? 0) > 1 ? 's' : ''
                 }`}
           </p>
@@ -209,100 +270,118 @@ export function PinoyCataloguePage() {
       </div>
 
       {/* Search bar */}
-      <div className="relative mb-5">
-        <Search className="pointer-events-none absolute left-4 top-1/2 size-5 -translate-y-1/2 text-primary" />
-        <input
-          type="search"
-          aria-label="Rechercher un film Pinoy"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="Rechercher un titre, titre original ou synopsis…"
-          className="h-14 w-full rounded-xl border border-input bg-card pl-12 pr-4 text-base text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
-        />
-      </div>
+      {(!mod || mod.filters.showSearch) && (
+        <div className="relative mb-5">
+          <Search className="pointer-events-none absolute left-4 top-1/2 size-5 -translate-y-1/2 text-primary" />
+          <input
+            type="search"
+            aria-label={`Rechercher dans ${displayTitle}`}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder={
+              mod?.filters.searchPlaceholder || 'Rechercher un titre, titre original ou synopsis…'
+            }
+            className="h-14 w-full rounded-xl border border-input bg-card pl-12 pr-4 text-base text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+          />
+        </div>
+      )}
 
       {/* Filter toolbar */}
-      <div className="mb-8 flex flex-wrap items-center gap-3">
-        <select
-          aria-label="Genre"
-          value={genre}
-          onChange={(e) => {
-            setGenre(e.target.value);
-            setPage(1);
-          }}
-          className="h-10 rounded-lg border border-input bg-card px-3 text-sm text-foreground focus:border-primary focus:outline-none"
-        >
-          <option value="">Tous les genres</option>
-          {genres.map((g) => (
-            <option key={g.nom} value={g.nom}>
-              {g.nom} ({g.total})
-            </option>
-          ))}
-        </select>
+      {(!mod ||
+        mod.filters.showGenreFilter ||
+        mod.filters.showCountryFilter ||
+        mod.filters.showYearFilter ||
+        mod.filters.showSortFilter) && (
+        <div className="mb-8 flex flex-wrap items-center gap-3">
+          {(!mod || mod.filters.showGenreFilter) && (
+            <select
+              aria-label="Genre"
+              value={genre}
+              onChange={(e) => {
+                setGenre(e.target.value);
+                setPage(1);
+              }}
+              className="h-10 rounded-lg border border-input bg-card px-3 text-sm text-foreground focus:border-primary focus:outline-none"
+            >
+              <option value="">Tous les genres</option>
+              {genres.map((g) => (
+                <option key={g.nom} value={g.nom}>
+                  {g.nom}
+                  {g.total > 0 ? ` (${g.total})` : ''}
+                </option>
+              ))}
+            </select>
+          )}
 
-        {countries.length > 0 && (
-          <select
-            aria-label="Pays"
-            value={pays}
-            onChange={(e) => {
-              setPays(e.target.value);
-              setPage(1);
-            }}
-            className="h-10 rounded-lg border border-input bg-card px-3 text-sm text-foreground focus:border-primary focus:outline-none"
-          >
-            <option value="">Tous les pays</option>
-            {countries.map((p) => (
-              <option key={p.code} value={p.code}>
-                {p.code} ({p.total})
-              </option>
-            ))}
-          </select>
-        )}
+          {(!mod || mod.filters.showCountryFilter) && countries.length > 0 && (
+            <select
+              aria-label="Pays"
+              value={pays}
+              onChange={(e) => {
+                setPays(e.target.value);
+                setPage(1);
+              }}
+              className="h-10 rounded-lg border border-input bg-card px-3 text-sm text-foreground focus:border-primary focus:outline-none"
+            >
+              <option value="">Tous les pays</option>
+              {countries.map((p) => (
+                <option key={p.code} value={p.code}>
+                  {p.code}
+                  {p.total > 0 ? ` (${p.total})` : ''}
+                </option>
+              ))}
+            </select>
+          )}
 
-        <select
-          aria-label="Année"
-          value={annee}
-          onChange={(e) => {
-            setAnnee(e.target.value);
-            setPage(1);
-          }}
-          className="h-10 rounded-lg border border-input bg-card px-3 text-sm text-foreground tabular-nums focus:border-primary focus:outline-none"
-        >
-          <option value="">Toutes les années</option>
-          {years.map((y) => (
-            <option key={y} value={y}>
-              {y}
-            </option>
-          ))}
-        </select>
+          {(!mod || mod.filters.showYearFilter) && (
+            <select
+              aria-label="Année"
+              value={annee}
+              onChange={(e) => {
+                setAnnee(e.target.value);
+                setPage(1);
+              }}
+              className="h-10 rounded-lg border border-input bg-card px-3 text-sm text-foreground tabular-nums focus:border-primary focus:outline-none"
+            >
+              <option value="">Toutes les années</option>
+              {years.map((y) => (
+                <option key={y} value={y}>
+                  {y}
+                </option>
+              ))}
+            </select>
+          )}
 
-        <select
-          aria-label="Trier par"
-          value={sort}
-          onChange={(e) => {
-            setSort(e.target.value as PinoyListFilters['sort']);
-            setPage(1);
-          }}
-          className="h-10 rounded-lg border border-input bg-card px-3 text-sm text-foreground focus:border-primary focus:outline-none"
-        >
-          <option value="recent">Plus récents</option>
-          <option value="oldest">Plus anciens</option>
-          <option value="note">Mieux notés</option>
-          <option value="az">Titre A → Z</option>
-          <option value="za">Titre Z → A</option>
-        </select>
+          {(!mod || mod.filters.showSortFilter) && sortOptions.length > 0 && (
+            <select
+              aria-label="Trier par"
+              value={effectiveSort}
+              onChange={(e) => {
+                setSort(e.target.value);
+                setPage(1);
+              }}
+              className="h-10 rounded-lg border border-input bg-card px-3 text-sm text-foreground focus:border-primary focus:outline-none"
+            >
+              {sortOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          )}
 
-        {hasActiveFilters && (
-          <button
-            type="button"
-            onClick={resetAll}
-            className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-border bg-card px-3.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground whitespace-nowrap shrink-0"
-          >
-            <RotateCcw className="size-3.5" />
-            <span>Réinitialiser</span>
-          </button>
-        )}
-      </div>
+          {hasActiveFilters && (
+            <button
+              type="button"
+              onClick={resetAll}
+              className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-border bg-card px-3.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground whitespace-nowrap shrink-0"
+            >
+              <RotateCcw className="size-3.5" />
+              <span>Réinitialiser</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Results grid */}
       {listQuery.isLoading && !data ? (
@@ -311,21 +390,21 @@ export function PinoyCataloguePage() {
         <div className="rounded-xl border border-border bg-card p-10 text-center space-y-3">
           <Film className="mx-auto size-10 text-primary/80" />
           <h2 className="font-display text-xl font-semibold text-foreground">
-            Source API Pinoy à configurer
+            Source API {displayTitle} à configurer
           </h2>
           <p className="mx-auto max-w-lg text-sm text-muted-foreground">
             {isAdmin
-              ? 'Renseignez l’URL complète de votre script korotoko_ph.php dans l’administration pour charger le catalogue Pinoy.'
-              : 'Le catalogue Pinoy est en cours de configuration et sera bientôt disponible.'}
+              ? `Renseignez l’URL API du module « ${mod?.name || 'Pinoy'} » dans APIs & Lecteurs pour charger ce catalogue.`
+              : `Le catalogue ${displayTitle} est en cours de configuration et sera bientôt disponible.`}
           </p>
           {isAdmin && (
             <div className="pt-2">
               <Link
-                to="/admin?tab=api"
+                to="/admin?tab=modules"
                 className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90"
               >
                 <Settings className="size-4" />
-                <span>Configurer l’API Pinoy</span>
+                <span>Configurer le module {mod?.name || 'Pinoy'}</span>
               </Link>
             </div>
           )}
@@ -333,7 +412,7 @@ export function PinoyCataloguePage() {
       ) : listQuery.isError ? (
         <div className="rounded-xl border border-border bg-card p-12 text-center space-y-3">
           <p className="text-base font-medium text-foreground">
-            Le catalogue Pinoy est désactivé ou momentanément indisponible.
+            Le catalogue {displayTitle} est désactivé ou momentanément indisponible.
           </p>
           <p className="mt-1 text-sm text-muted-foreground">
             Vérifiez la configuration dans l’administration ou réessayez dans quelques instants.
@@ -350,18 +429,18 @@ export function PinoyCataloguePage() {
         </div>
       ) : items.length > 0 ? (
         <div
-          className={`grid grid-cols-3 gap-2.5 sm:gap-5 md:grid-cols-4 lg:grid-cols-6 transition-opacity duration-150 ${
+          className={`grid ${mobileGridClass} gap-2.5 sm:gap-5 ${desktopGridClass} transition-opacity duration-150 ${
             listQuery.isFetching ? 'opacity-65' : 'opacity-100'
           }`}
         >
           {items.map((film) => (
-            <PinoyCard key={`${film.id}:${film.slug}`} film={film} />
+            <PinoyCard key={`${film.id}:${film.slug}`} film={film} mod={mod} />
           ))}
         </div>
       ) : (
         <div className="rounded-xl border border-border bg-card p-12 text-center">
           <p className="text-base font-medium text-foreground">
-            Aucun film Pinoy ne correspond à ces critères.
+            Aucun titre dans {displayTitle} ne correspond à ces critères.
           </p>
           <p className="mt-1 mb-5 text-sm text-muted-foreground">
             Essayez d’élargir la recherche ou de réinitialiser les filtres.

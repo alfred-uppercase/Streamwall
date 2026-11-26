@@ -518,6 +518,17 @@ export interface RankingEntry {
   plays: number;
 }
 
+export interface HomeCustomSection {
+  id: string;
+  title: string;
+  description: string;
+  enabled: boolean;
+  order: number;
+  items: Item[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface HomePayload {
   upstreamStatus: 'live' | 'fallback';
   slider: Slide[];
@@ -533,6 +544,7 @@ export interface HomePayload {
     viewedAt: string;
   }[];
   week: RankingEntry[];
+  customSections?: HomeCustomSection[];
 }
 
 export interface AdminUserSummary {
@@ -828,6 +840,7 @@ export interface PinoyPlayerSource {
 
 export interface PinoyFacetsResponse {
   status: 'live' | 'unconfigured' | 'fallback';
+  module?: CustomApiPublicModule | null;
   genres: { nom: string; total: number }[];
   pays: { code: string; total: number }[];
   annees: { min: number | null; max: number | null };
@@ -838,12 +851,13 @@ export interface PinoyListFilters {
   genre: string;
   pays: string;
   annee: string;
-  sort: 'recent' | 'oldest' | 'az' | 'za' | 'note';
+  sort: string;
   page: number;
 }
 
 export interface PinoyListResponse {
   status: 'live' | 'unconfigured' | 'fallback';
+  module?: CustomApiPublicModule | null;
   page: number;
   per_page: number;
   total: number;
@@ -854,6 +868,7 @@ export interface PinoyListResponse {
 
 export interface PinoyDetailResponse {
   status: 'live' | 'unconfigured' | 'fallback';
+  module?: CustomApiPublicModule | null;
   film: PinoyFilm | null;
   players: {
     embed: PinoyPlayerSource[];

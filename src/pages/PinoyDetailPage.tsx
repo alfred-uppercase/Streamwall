@@ -14,6 +14,7 @@ import {
   Globe,
   Lock,
   Play,
+  Server,
   Star,
   X,
 } from 'lucide-react';
@@ -39,12 +40,12 @@ function sanitizePlayerUrl(raw: string | null | undefined): string | null {
   return /^https?:\/\//i.test(trimmed) ? trimmed : null;
 }
 
-function pinoyToFavoriteItem(film: PinoyFilm): Item {
+function pinoyToFavoriteItem(film: PinoyFilm, badgeText?: string | null): Item {
   return {
     id: film.slug || String(film.id),
     titre: film.titre,
     poster: sanitizeHttpUrl(film.poster),
-    qualite: film.note !== null ? `★ ${film.note.toFixed(1)}` : null,
+    qualite: film.note !== null ? `★ ${film.note.toFixed(1)}` : badgeText || null,
     langue: film.pays || null,
     item_type: 'pinoy',
     saison: null,
@@ -53,7 +54,13 @@ function pinoyToFavoriteItem(film: PinoyFilm): Item {
   };
 }
 
-const SimilarPinoyCard = memo(function SimilarPinoyCard({ film }: { film: PinoyFilm }) {
+const SimilarPinoyCard = memo(function SimilarPinoyCard({
+  film,
+  badgeText,
+}: {
+  film: PinoyFilm;
+  badgeText?: string | null;
+}) {
   const [imgFailed, setImgFailed] = useState(false);
   const safePoster = sanitizeHttpUrl(film.poster);
   const showImg = Boolean(safePoster && !imgFailed);
@@ -98,7 +105,7 @@ const SimilarPinoyCard = memo(function SimilarPinoyCard({ film }: { film: PinoyF
       </Link>
 
       <div className="absolute right-1.5 top-1.5 sm:right-2 sm:top-2 z-10">
-        <FavoriteButton item={pinoyToFavoriteItem(film)} compact />
+        <FavoriteButton item={pinoyToFavoriteItem(film, badgeText)} compact />
       </div>
     </div>
   );
@@ -107,12 +114,12 @@ const SimilarPinoyCard = memo(function SimilarPinoyCard({ film }: { film: PinoyF
 export function PinoyDetailPage() {
   const { slug = '' } = useParams<{ slug: string }>();
   const { isMember, isAdmin, isPro } = useAuth();
-  const canDownload = isAdmin || isPro;
   const [posterFailed, setPosterFailed] = useState(false);
   const [galleryHeroFailed, setGalleryHeroFailed] = useState(false);
   const [posterHeroFailed, setPosterHeroFailed] = useState(false);
   const [descExpanded, setDescExpanded] = useState(false);
   const [playerModalOpen, setPlayerModalOpen] = useState(false);
+  const [selectedPlayerIdx, setSelectedPlayerIdx] = useState(0);
 
   const [reportModalOpen, setReportModalOpen] = useState(false);
   const [guestAuthAlertOpen, setGuestAuthAlertOpen] = useState(false);
@@ -126,6 +133,7 @@ export function PinoyDetailPage() {
     setPosterHeroFailed(false);
     setDescExpanded(false);
     setPlayerModalOpen(false);
+    setSelectedPlayerIdx(0);
     setReportModalOpen(false);
     setGuestAuthAlertOpen(false);
   }, [slug]);
@@ -150,7 +158,7 @@ export function PinoyDetailPage() {
   }, [playerModalOpen, reportModalOpen, guestAuthAlertOpen]);
 
   const detailQuery = useQuery({
-    queryKey: ['pinoy-detail', slug, canDownload ? 'unlocked' : 'locked'],
+    queryKey: ['pinoy-detail', slug, isAdmin || isPro ? 'privileged' : 'standard'],
     queryFn: () => api.pinoyDetail(slug),
     enabled: Boolean(slug),
     staleTime: 180_000,
@@ -158,8 +166,12 @@ export function PinoyDetailPage() {
   });
 
   const data = detailQuery.data;
+  const mod = data?.module ?? null;
   const film = data?.film ?? null;
-  useDocumentTitle(film ? `${film.titre} · Pinoy` : 'Film Pinoy');
+  const moduleName = mod?.name?.trim() || 'Pinoy';
+  const badgeLabel = mod?.badgeText?.trim() || 'Film Pinoy';
+
+  useDocumentTitle(film ? `${film.titre} · ${moduleName}` : moduleName);
 
   const embedPlayers: PinoyPlayerSource[] = (data?.players.embed ?? []).filter((p) =>
     Boolean(sanitizePlayerUrl(p.url))
@@ -167,12 +179,26 @@ export function PinoyDetailPage() {
   const downloadPlayers: PinoyPlayerSource[] = (data?.players.download ?? []).filter((p) =>
     Boolean(sanitizeHttpUrl(p.url))
   );
+  const activePlayer = embedPlayers[selectedPlayerIdx] ?? embedPlayers[0] ?? null;
+
+  const downloadProOnly = mod?.player.downloadProOnly ?? true;
+  const canDownload = !downloadProOnly || isAdmin || isPro;
   const isDownloadLocked =
-    Boolean(data?.downloadLocked) || (!canDownload && downloadPlayers.length > 0);
+    Boolean(data?.downloadLocked) || (downloadProOnly && !canDownload && downloadPlayers.length > 0);
   const downloadRestrictionMessage =
     data?.downloadMessage?.trim() ||
+    mod?.player.downloadRestrictionMessage ||
     'Le téléchargement direct est réservé aux membres Pro et aux administrateurs.';
-  const primaryPlayer = embedPlayers[0] ?? null;
+
+  const showHeroGallery = mod ? mod.sections.detailShowHeroGallery : true;
+  const showSynopsis = mod ? mod.sections.detailShowSynopsis : true;
+  const showAvailablePlayersList = mod ? mod.sections.detailShowAvailablePlayersList : false;
+  const showDownloads = mod ? mod.sections.detailShowDownloads : true;
+  const showGallerySection = mod ? mod.sections.detailShowGallerySection : false;
+  const showSimilar = mod ? mod.sections.detailShowSimilar : true;
+  const showComments = mod ? mod.sections.detailShowComments : true;
+  const showReportButton = mod ? mod.sections.detailShowReportButton : true;
+  const showServerSwitcherInModal = mod?.player.showServerSwitcherInModal ?? false;
 
   function openReportModal() {
     if (!isMember) {
@@ -222,16 +248,16 @@ export function PinoyDetailPage() {
   if (detailQuery.isError || !film) {
     return (
       <main className="mx-auto max-w-7xl px-4 pt-24 pb-16 text-center sm:px-6 sm:pt-28">
-        <h1 className="font-display text-3xl font-bold text-foreground">Film Pinoy introuvable</h1>
+        <h1 className="font-display text-3xl font-bold text-foreground">Contenu introuvable</h1>
         <p className="mt-2 mb-6 text-sm text-muted-foreground">
-          Ce film n’existe plus ou l’API Pinoy est momentanément inaccessible.
+          Ce titre n’existe plus ou l’API du module « {moduleName} » est momentanément inaccessible.
         </p>
         <Link
           to="/pinoy"
           className="inline-flex items-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground"
         >
           <ArrowLeft className="size-4" />
-          <span>Retour au catalogue Pinoy</span>
+          <span>Retour au catalogue {moduleName}</span>
         </Link>
       </main>
     );
@@ -241,7 +267,7 @@ export function PinoyDetailPage() {
   const safeGallery = film.galerie
     .map((u) => sanitizeHttpUrl(u))
     .filter((u): u is string => Boolean(u));
-  const firstGalleryPhoto = !galleryHeroFailed ? safeGallery[0] ?? null : null;
+  const firstGalleryPhoto = showHeroGallery && !galleryHeroFailed ? safeGallery[0] ?? null : null;
   const fallbackPosterPhoto = !posterHeroFailed ? safePoster : null;
   const backdropUrl = firstGalleryPhoto ?? fallbackPosterPhoto ?? FALLBACK_CINEMA_BACKDROP;
 
@@ -249,7 +275,7 @@ export function PinoyDetailPage() {
   const isLongDescr = descrText.length > 240;
 
   const metaLine = [
-    'Film Pinoy',
+    badgeLabel,
     film.annee ? String(film.annee) : null,
     film.duree || null,
     film.pays || null,
@@ -258,7 +284,7 @@ export function PinoyDetailPage() {
 
   return (
     <div>
-      {/* Hero section — première photo de la galerie en bannière Background */}
+      {/* Hero section */}
       <section className="relative overflow-hidden border-b border-border bg-zinc-950 dark:bg-card">
         <img
           src={backdropUrl}
@@ -300,7 +326,7 @@ export function PinoyDetailPage() {
               className="inline-flex items-center gap-1.5 text-xs font-medium text-white/80 hover:text-primary"
             >
               <ArrowLeft className="size-3.5" />
-              <span>Catalogue Pinoy</span>
+              <span>Catalogue {moduleName}</span>
             </Link>
 
             <p className="text-xs font-medium text-primary tabular-nums drop-shadow-xs">
@@ -348,7 +374,7 @@ export function PinoyDetailPage() {
               )}
             </div>
 
-            {descrText && (
+            {showSynopsis && descrText && (
               <div className="max-w-3xl space-y-1.5">
                 <p
                   className={`text-sm leading-relaxed text-white/90 dark:text-foreground/90 sm:text-base ${
@@ -375,7 +401,7 @@ export function PinoyDetailPage() {
             )}
 
             <div className="flex flex-wrap items-center gap-3 pt-2">
-              {primaryPlayer && (
+              {activePlayer && (
                 <button
                   type="button"
                   onClick={() => {
@@ -386,6 +412,7 @@ export function PinoyDetailPage() {
                       title: film.titre,
                       poster: film.poster,
                     });
+                    setSelectedPlayerIdx(0);
                     setPlayerModalOpen(true);
                   }}
                   className="inline-flex items-center gap-2 rounded-lg bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 whitespace-nowrap shrink-0"
@@ -395,28 +422,69 @@ export function PinoyDetailPage() {
                 </button>
               )}
 
-              <FavoriteButton item={pinoyToFavoriteItem(film)} />
+              <FavoriteButton item={pinoyToFavoriteItem(film, mod?.badgeText)} />
 
-              <button
-                type="button"
-                onClick={openReportModal}
-                className="inline-flex items-center gap-2 rounded-lg border border-white/20 bg-black/45 px-4 py-3 text-xs font-semibold text-white hover:bg-black/70 whitespace-nowrap shrink-0"
-              >
-                <Flag className="size-3.5 text-amber-400" />
-                <span>Signaler un lien</span>
-              </button>
+              {showReportButton && (
+                <button
+                  type="button"
+                  onClick={openReportModal}
+                  className="inline-flex items-center gap-2 rounded-lg border border-white/20 bg-black/45 px-4 py-3 text-xs font-semibold text-white hover:bg-black/70 whitespace-nowrap shrink-0"
+                >
+                  <Flag className="size-3.5 text-amber-400" />
+                  <span>Signaler un lien</span>
+                </button>
+              )}
             </div>
           </div>
         </div>
       </section>
 
-      {/* Direct download links (Admin & Pro only) */}
-      {((canDownload && downloadPlayers.length > 0) || isDownloadLocked) && (
+      {/* Optional Available Players List */}
+      {showAvailablePlayersList && embedPlayers.length > 0 && (
+        <section className="mx-auto max-w-7xl px-4 pt-8 sm:px-6">
+          <div className="rounded-xl border border-border bg-card p-5 space-y-3">
+            <h2 className="font-display text-lg font-semibold text-foreground">
+              Lecteurs disponibles ({embedPlayers.length})
+            </h2>
+            <div className="flex flex-wrap gap-2.5">
+              {embedPlayers.map((pl, idx) => (
+                <button
+                  key={`${pl.provider}-${idx}`}
+                  type="button"
+                  onClick={() => {
+                    api.recordPlayEvent({
+                      itemType: 'pinoy',
+                      itemId: String(film.id),
+                      slug: film.slug,
+                      title: film.titre,
+                      poster: film.poster,
+                    });
+                    setSelectedPlayerIdx(idx);
+                    setPlayerModalOpen(true);
+                  }}
+                  className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-4 py-2.5 text-xs font-semibold text-foreground transition-colors hover:border-primary/70 hover:bg-accent"
+                >
+                  <Server className="size-3.5 text-primary" />
+                  <span>{pl.provider}</span>
+                  {(pl.quality || pl.language) && (
+                    <span className="text-muted-foreground font-normal">
+                      ({[pl.quality, pl.language].filter(Boolean).join(' · ')})
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Optional Download links (configured Pro-only or open in Module Pinoy) */}
+      {showDownloads && ((!isDownloadLocked && downloadPlayers.length > 0) || isDownloadLocked) && (
         <section className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
           <div className="rounded-xl border border-border bg-card p-5 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="font-display text-lg font-semibold text-foreground">
-                {canDownload && downloadPlayers.length > 0
+                {!isDownloadLocked && downloadPlayers.length > 0
                   ? `Liens de téléchargement (${downloadPlayers.length})`
                   : 'Liens de téléchargement'}
               </h2>
@@ -428,7 +496,7 @@ export function PinoyDetailPage() {
               )}
             </div>
 
-            {canDownload && downloadPlayers.length > 0 ? (
+            {!isDownloadLocked && downloadPlayers.length > 0 ? (
               <div className="flex flex-wrap gap-2.5">
                 {downloadPlayers.map((dl, idx) => {
                   const safeHref = sanitizeHttpUrl(dl.url);
@@ -483,48 +551,100 @@ export function PinoyDetailPage() {
         </section>
       )}
 
-      {/* Similar Pinoy films */}
-      {data && data.similar.length > 0 && (
+      {/* Optional Gallery Section */}
+      {showGallerySection && safeGallery.length > 0 && (
+        <section className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
+          <h2 className="mb-4 font-display text-2xl font-semibold text-foreground">
+            Galerie d’images
+          </h2>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+            {safeGallery.map((imgUrl, idx) => (
+              <div
+                key={`${imgUrl}-${idx}`}
+                className="overflow-hidden rounded-xl border border-border bg-card aspect-video"
+              >
+                <img
+                  src={imgUrl}
+                  alt={`${film.titre} — image ${idx + 1}`}
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                  className="h-full w-full object-cover"
+                />
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Similar films */}
+      {showSimilar && data && data.similar.length > 0 && (
         <section className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
           <h2 className="mb-5 font-display text-2xl font-semibold text-foreground">
-            Films similaires
+            Titres similaires
           </h2>
           <div className="grid grid-cols-3 gap-2.5 sm:gap-5 md:grid-cols-4 lg:grid-cols-6">
             {data.similar.map((sim) => (
-              <SimilarPinoyCard key={`${sim.id}:${sim.slug}`} film={sim} />
+              <SimilarPinoyCard
+                key={`${sim.id}:${sim.slug}`}
+                film={sim}
+                badgeText={mod?.badgeText}
+              />
             ))}
           </div>
         </section>
       )}
 
       {/* Community comments & mentions */}
-      <CommentsSection itemType="pinoy" itemId={film.slug} itemTitle={film.titre} />
+      {showComments && (
+        <CommentsSection itemType="pinoy" itemId={film.slug} itemTitle={film.titre} />
+      )}
 
       {/* Fullscreen Player Modal */}
-      {playerModalOpen && primaryPlayer && (
+      {playerModalOpen && activePlayer && (
         <div
           role="dialog"
           aria-modal="true"
           aria-label={`Lecture de ${film.titre}`}
           className="fixed inset-0 z-50 flex flex-col bg-black"
         >
-          <div className="flex items-center justify-between gap-4 border-b border-white/10 bg-zinc-950 px-4 py-3">
-            <div className="min-w-0">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 bg-zinc-950 px-4 py-3">
+            <div className="min-w-0 flex-1">
               <p className="truncate font-display text-sm font-semibold text-white sm:text-base">
                 {film.titre}
               </p>
             </div>
 
+            {showServerSwitcherInModal && embedPlayers.length > 1 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {embedPlayers.map((srv, idx) => (
+                  <button
+                    key={`${srv.provider}-${idx}`}
+                    type="button"
+                    onClick={() => setSelectedPlayerIdx(idx)}
+                    className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                      selectedPlayerIdx === idx
+                        ? 'bg-primary text-primary-foreground'
+                        : 'border border-white/15 bg-zinc-900 text-white/80 hover:text-white'
+                    }`}
+                  >
+                    {srv.provider}
+                  </button>
+                ))}
+              </div>
+            )}
+
             <div className="flex shrink-0 items-center gap-2">
-              <button
-                type="button"
-                onClick={openReportModal}
-                title="Signaler un lien cassé ou un problème de lecture"
-                className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-zinc-800 whitespace-nowrap shrink-0"
-              >
-                <Flag className="size-3.5" />
-                <span className="hidden sm:inline">Signaler</span>
-              </button>
+              {showReportButton && (
+                <button
+                  type="button"
+                  onClick={openReportModal}
+                  title="Signaler un lien cassé ou un problème de lecture"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-zinc-800 whitespace-nowrap shrink-0"
+                >
+                  <Flag className="size-3.5" />
+                  <span className="hidden sm:inline">Signaler</span>
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setPlayerModalOpen(false)}
@@ -538,8 +658,8 @@ export function PinoyDetailPage() {
 
           <div className="relative flex-1 bg-black">
             <iframe
-              key={primaryPlayer.url}
-              src={sanitizePlayerUrl(primaryPlayer.url) ?? undefined}
+              key={activePlayer.url}
+              src={sanitizePlayerUrl(activePlayer.url) ?? undefined}
               title={`Regarder — ${film.titre}`}
               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
               allowFullScreen
@@ -568,7 +688,7 @@ export function PinoyDetailPage() {
                   Signaler un problème
                 </h2>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  {film.titre} · Pinoy
+                  {film.titre} · {moduleName}
                 </p>
               </div>
               <button

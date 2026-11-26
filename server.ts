@@ -271,10 +271,16 @@ import {
   listCustomModules,
   resetSiteNavigation,
   syncPinoyModuleFromSettings,
+  toPublicCustomModule,
   updateSiteNavigation,
   upsertCustomModule,
   validateCustomModuleDraft,
 } from './src/server/customModulesStore.ts';
+import {
+  deleteHomeSection,
+  listHomeSections,
+  upsertHomeSection,
+} from './src/server/homeSectionsStore.ts';
 import {
   clearCustomApiCache,
   fetchCustomDetail,
@@ -1078,8 +1084,13 @@ async function getTmdbApiKey(): Promise<string> {
 async function getPinoyApiUrl(): Promise<string> {
   if (isPinoyModuleDeleted()) return '';
   const pinoyMod = getCustomModule('pinoy');
-  if (pinoyMod && pinoyMod.endpoints.apiUrl.trim()) {
-    return pinoyMod.endpoints.apiUrl.trim();
+  if (pinoyMod) {
+    if (pinoyMod.endpoints.apiUrl.trim()) {
+      return pinoyMod.endpoints.apiUrl.trim();
+    }
+    const localUrl = (db.settings.pinoy_api_url || DEFAULT_PINOY_API_URL).trim();
+    if (localUrl) return localUrl;
+    return '';
   }
   const localUrl = (db.settings.pinoy_api_url || DEFAULT_PINOY_API_URL).trim();
   if (isSupabaseEnabled()) {
@@ -1090,7 +1101,7 @@ async function getPinoyApiUrl(): Promise<string> {
 
 async function getPinoyMediaBaseUrl(): Promise<string> {
   const pinoyMod = getCustomModule('pinoy');
-  if (pinoyMod && pinoyMod.endpoints.mediaBaseUrl.trim()) {
+  if (pinoyMod) {
     return pinoyMod.endpoints.mediaBaseUrl.trim();
   }
   const localUrl = (db.settings.pinoy_media_base_url ?? DEFAULT_PINOY_MEDIA_BASE_URL).trim();
@@ -1102,7 +1113,7 @@ async function getPinoyMediaBaseUrl(): Promise<string> {
 
 async function getPinoyPlayerTemplate(): Promise<string> {
   const pinoyMod = getCustomModule('pinoy');
-  if (pinoyMod && pinoyMod.player.playerUrlTemplate.trim()) {
+  if (pinoyMod) {
     return pinoyMod.player.playerUrlTemplate.trim();
   }
   const localTpl = (db.settings.pinoy_player_template ?? DEFAULT_PINOY_PLAYER_TEMPLATE).trim();
@@ -1114,7 +1125,7 @@ async function getPinoyPlayerTemplate(): Promise<string> {
 
 async function getPinoyDownloadMessage(): Promise<string> {
   const pinoyMod = getCustomModule('pinoy');
-  if (pinoyMod && pinoyMod.player.downloadRestrictionMessage.trim()) {
+  if (pinoyMod) {
     return sanitizePinoyDownloadMessage(pinoyMod.player.downloadRestrictionMessage);
   }
   const localMsg = sanitizePinoyDownloadMessage(
@@ -3466,10 +3477,14 @@ export async function createApiApp(): Promise<express.Express> {
 
     res.setHeader('Vary', 'Authorization, Cookie');
     if (!auth && !extractToken(req)) {
-      res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=120, stale-while-revalidate=300');
+      res.setHeader('Cache-Control', 'public, max-age=5, s-maxage=30, stale-while-revalidate=60');
     } else {
       res.setHeader('Cache-Control', 'private, no-store');
     }
+
+    const customSections = listHomeSections(false)
+      .filter((s) => s.items.length > 0)
+      .map((s) => ({ ...s, items: s.items.slice(0, 18) }));
 
     res.json({
       upstreamStatus: base.upstreamStatus,
@@ -3480,6 +3495,7 @@ export async function createApiApp(): Promise<express.Express> {
       continueWatching,
       friendsActivity,
       week: base.week,
+      customSections,
     });
   });
 
@@ -3548,10 +3564,14 @@ export async function createApiApp(): Promise<express.Express> {
       res.status(404).json({ error: 'Module Pinoy désactivé ou supprimé.' });
       return;
     }
+    const pinoyMod = getCustomModule('pinoy');
     const apiUrl = await getPinoyApiUrl();
-    const facets = await fetchPinoyFacets(apiUrl);
-    res.setHeader('Cache-Control', 'public, max-age=180, s-maxage=600, stale-while-revalidate=1800');
-    res.json(facets);
+    const facets = await fetchPinoyFacets(apiUrl, pinoyMod);
+    res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=60, must-revalidate');
+    res.json({
+      ...facets,
+      module: pinoyMod ? toPublicCustomModule(pinoyMod) : null,
+    });
   });
 
   app.get('/api/pinoy/list', async (req, res) => {
@@ -3559,18 +3579,21 @@ export async function createApiApp(): Promise<express.Express> {
       res.status(404).json({ error: 'Module Pinoy désactivé ou supprimé.' });
       return;
     }
+    const pinoyMod = getCustomModule('pinoy');
     const [apiUrl, mediaBaseUrl] = await Promise.all([getPinoyApiUrl(), getPinoyMediaBaseUrl()]);
-    const rawSort = String(req.query.sort ?? 'recent').trim();
-    const sort: PinoyListFilters['sort'] = ['recent', 'oldest', 'az', 'za', 'note'].includes(
-      rawSort
-    )
-      ? (rawSort as PinoyListFilters['sort'])
-      : 'recent';
+    const defaultSort = pinoyMod?.filters.defaultSort || 'recent';
+    const allowedSorts = new Set(
+      pinoyMod?.filters.sortOptions?.length
+        ? pinoyMod.filters.sortOptions.map((s) => s.value)
+        : ['recent', 'oldest', 'az', 'za', 'note']
+    );
+    const rawSort = String(req.query.sort ?? defaultSort).trim();
+    const sort = allowedSorts.has(rawSort) ? rawSort : defaultSort;
 
     const filters: PinoyListFilters = {
       q: String(req.query.q ?? '').trim().slice(0, 120),
       genre: String(req.query.genre ?? '').trim().slice(0, 80),
-      pays: /^[A-Za-z0-9_-]{1,8}$/.test(String(req.query.pays ?? '').trim())
+      pays: /^[A-Za-z0-9._-]{1,16}$/.test(String(req.query.pays ?? '').trim())
         ? String(req.query.pays).trim()
         : '',
       annee: /^\d{4}$/.test(String(req.query.annee ?? '').trim())
@@ -3579,9 +3602,12 @@ export async function createApiApp(): Promise<express.Express> {
       sort,
       page: Math.max(1, Math.min(500, Number(req.query.page) || 1)),
     };
-    const data = await fetchPinoyList(apiUrl, filters, mediaBaseUrl);
-    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
-    res.json(data);
+    const data = await fetchPinoyList(apiUrl, filters, mediaBaseUrl, pinoyMod);
+    res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=60, must-revalidate');
+    res.json({
+      ...data,
+      module: pinoyMod ? toPublicCustomModule(pinoyMod) : null,
+    });
   });
 
   app.get('/api/pinoy/detail/:slug', async (req, res) => {
@@ -3594,6 +3620,7 @@ export async function createApiApp(): Promise<express.Express> {
       res.status(400).json({ error: 'Identifiant de film Pinoy invalide.' });
       return;
     }
+    const pinoyMod = getCustomModule('pinoy');
     const [auth, apiUrl, mediaBaseUrl, playerTemplate, downloadMessage] = await Promise.all([
       resolveAuth(req),
       getPinoyApiUrl(),
@@ -3601,16 +3628,26 @@ export async function createApiApp(): Promise<express.Express> {
       getPinoyPlayerTemplate(),
       getPinoyDownloadMessage(),
     ]);
-    const detail = await fetchPinoyDetail(apiUrl, slug, 12, mediaBaseUrl, playerTemplate);
+    const similarLimit = pinoyMod ? pinoyMod.endpoints.similarLimit : 12;
+    const detail = await fetchPinoyDetail(
+      apiUrl,
+      slug,
+      similarLimit,
+      mediaBaseUrl,
+      playerTemplate,
+      pinoyMod
+    );
     if (detail.status === 'live' && !detail.film) {
       res.status(404).json({ error: 'Film Pinoy introuvable.' });
       return;
     }
 
-    const pinoyMod = getCustomModule('pinoy');
     const useProxy = pinoyMod?.player.useSameOriginProxy !== false;
+    const hasCustomPlayer = Boolean(
+      (pinoyMod ? pinoyMod.player.playerUrlTemplate : playerTemplate).trim()
+    );
     const effectiveEmbed = detail.players.embed.map((src, index) => {
-      if (index === 0 && useProxy && src.provider === 'Lecteur Pinoy' && detail.film) {
+      if (index === 0 && useProxy && hasCustomPlayer && detail.film) {
         return {
           ...src,
           url: `/api/public/watch/pinoy/${detail.film.id}/${encodeURIComponent(detail.film.slug)}`,
@@ -3622,9 +3659,11 @@ export async function createApiApp(): Promise<express.Express> {
     const proOnly = pinoyMod ? pinoyMod.player.downloadProOnly : true;
     const canDownload = !proOnly || Boolean(auth && (auth.user.role === 'admin' || auth.user.isPro));
     const hasDownloads = detail.players.download.length > 0;
+    const pubMod = pinoyMod ? toPublicCustomModule(pinoyMod) : null;
     const responsePayload: PinoyDetailResponse = canDownload
       ? {
           ...detail,
+          module: pubMod,
           players: {
             ...detail.players,
             embed: effectiveEmbed,
@@ -3633,6 +3672,7 @@ export async function createApiApp(): Promise<express.Express> {
         }
       : {
           ...detail,
+          module: pubMod,
           players: {
             ...detail.players,
             embed: effectiveEmbed,
@@ -3644,7 +3684,7 @@ export async function createApiApp(): Promise<express.Express> {
 
     res.setHeader('Vary', 'Authorization, Cookie');
     if (!auth && !extractToken(req)) {
-      res.setHeader('Cache-Control', 'public, max-age=120, s-maxage=600, stale-while-revalidate=1200');
+      res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=60, must-revalidate');
     } else {
       res.setHeader('Cache-Control', 'private, no-store');
     }
@@ -6233,6 +6273,49 @@ export async function createApiApp(): Promise<express.Express> {
     }
     clearCustomApiCache();
     res.json({ ok: true, navigation: getSiteNavigation() });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // ADMIN CUSTOM HOMEPAGE SECTIONS (Max 18 curated items from catalogue API)
+  // ─────────────────────────────────────────────────────────────────────────
+  app.get('/api/admin/home-sections', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    res.json({ sections: listHomeSections(true) });
+  });
+
+  app.post('/api/admin/home-sections', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const outcome = upsertHomeSection(req.body ?? {});
+    if (!outcome.ok) {
+      res.status(400).json({ error: outcome.error });
+      return;
+    }
+    res.json({ section: outcome.section, sections: listHomeSections(true) });
+  });
+
+  app.put('/api/admin/home-sections/:id', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const payload = { ...(req.body ?? {}), id: req.params.id };
+    const outcome = upsertHomeSection(payload);
+    if (!outcome.ok) {
+      res.status(400).json({ error: outcome.error });
+      return;
+    }
+    res.json({ section: outcome.section, sections: listHomeSections(true) });
+  });
+
+  app.delete('/api/admin/home-sections/:id', async (req, res) => {
+    const auth = await requireAdmin(req, res);
+    if (!auth) return;
+    const ok = deleteHomeSection(String(req.params.id ?? ''));
+    if (!ok) {
+      res.status(404).json({ error: 'Section accueil introuvable.' });
+      return;
+    }
+    res.json({ ok: true, sections: listHomeSections(true) });
   });
 
   app.get('/api/site/config', async (_req, res) => {

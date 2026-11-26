@@ -13,6 +13,7 @@ import {
   Flag,
   Globe,
   Layers,
+  LayoutGrid,
   Mail,
   Menu,
   Play,
@@ -74,6 +75,9 @@ const AdminErrorsTab = lazy(() =>
 const AdminNavigationTab = lazy(() =>
   import('../components/AdminNavigationTab').then((m) => ({ default: m.AdminNavigationTab }))
 );
+const AdminHomeSectionsTab = lazy(() =>
+  import('../components/AdminHomeSectionsTab').then((m) => ({ default: m.AdminHomeSectionsTab }))
+);
 const AdminCustomApisTab = lazy(() =>
   import('../components/AdminCustomApisTab').then((m) => ({ default: m.AdminCustomApisTab }))
 );
@@ -111,6 +115,7 @@ type AdminTab =
   | 'offers'
   | 'users'
   | 'navigation'
+  | 'homeSections'
   | 'modules'
   | 'requests'
   | 'notifications'
@@ -128,6 +133,7 @@ const VALID_TABS: AdminTab[] = [
   'offers',
   'users',
   'navigation',
+  'homeSections',
   'modules',
   'requests',
   'notifications',
@@ -146,6 +152,7 @@ const TAB_TITLE_MAP: Record<AdminTab, string> = {
   offers: 'Administration · Offres & Paiements',
   users: 'Administration · Utilisateurs',
   navigation: 'Administration · Menus (PC & Mobile)',
+  homeSections: 'Administration · Sections Accueil',
   modules: 'Administration · APIs & Lecteurs',
   requests: 'Administration · Signalements & Demandes',
   notifications: 'Administration · Notifications',
@@ -215,15 +222,6 @@ export function AdminPage() {
   const [originInput, setOriginInput] = useState('');
   const [embedProviderInput, setEmbedProviderInput] = useState('');
   const [tmdbKeyInput, setTmdbKeyInput] = useState('');
-  const [pinoyApiUrlInput, setPinoyApiUrlInput] = useState('');
-  const [pinoyMediaBaseUrlInput, setPinoyMediaBaseUrlInput] = useState('https://streamwall.behoririka.mg/');
-  const [pinoyPlayerTemplateInput, setPinoyPlayerTemplateInput] = useState(
-    'https://streamwall.behoririka.mg/pinoy/{id}'
-  );
-  const [pinoyDownloadMessageInput, setPinoyDownloadMessageInput] = useState(
-    'Le téléchargement direct est réservé aux membres Pro et aux administrateurs.'
-  );
-  const pinoyInitRef = useRef(false);
   const [filmDlUrlInput, setFilmDlUrlInput] = useState('https://streamwall.behoririka.mg/api/api_f.php');
   const [filmDlKeyInput, setFilmDlKeyInput] = useState('');
   const [filmDlMessageInput, setFilmDlMessageInput] = useState(
@@ -265,22 +263,6 @@ export function AdminPage() {
       setTmdbKeyInput(settingsQuery.data.tmdbApiKey);
     }
   }, [settingsQuery.data?.tmdbApiKey, tmdbKeyInput]);
-
-  useEffect(() => {
-    if (!settingsQuery.data || pinoyInitRef.current) return;
-    pinoyInitRef.current = true;
-    setPinoyApiUrlInput(settingsQuery.data.pinoyApiUrl ?? '');
-    setPinoyMediaBaseUrlInput(
-      settingsQuery.data.pinoyMediaBaseUrl ?? 'https://streamwall.behoririka.mg/'
-    );
-    setPinoyPlayerTemplateInput(
-      settingsQuery.data.pinoyPlayerTemplate ?? 'https://streamwall.behoririka.mg/pinoy/{id}'
-    );
-    setPinoyDownloadMessageInput(
-      settingsQuery.data.pinoyDownloadMessage ??
-        'Le téléchargement direct est réservé aux membres Pro et aux administrateurs.'
-    );
-  }, [settingsQuery.data]);
 
   useEffect(() => {
     if (!settingsQuery.data?.filmDownload || filmDlInitRef.current) return;
@@ -339,27 +321,6 @@ export function AdminPage() {
       toast.success('Clé API TMDB enregistrée');
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : 'Clé API TMDB invalide'),
-  });
-
-  const savePinoyApiMutation = useMutation({
-    mutationFn: (payload: {
-      pinoyApiUrl: string;
-      pinoyMediaBaseUrl: string;
-      pinoyPlayerTemplate: string;
-      pinoyDownloadMessage: string;
-    }) => api.adminSavePinoyApiUrl(payload),
-    onSuccess: (res) => {
-      setPinoyApiUrlInput(res.pinoyApiUrl);
-      setPinoyMediaBaseUrlInput(res.pinoyMediaBaseUrl);
-      setPinoyPlayerTemplateInput(res.pinoyPlayerTemplate);
-      setPinoyDownloadMessageInput(res.pinoyDownloadMessage);
-      void queryClient.invalidateQueries({ queryKey: ['admin-settings'] });
-      void queryClient.invalidateQueries({ queryKey: ['pinoy-facets'] });
-      void queryClient.invalidateQueries({ queryKey: ['pinoy-list'] });
-      void queryClient.invalidateQueries({ queryKey: ['pinoy-detail'] });
-      toast.success('Configuration Pinoy enregistrée');
-    },
-    onError: (err) => toast.error(err instanceof Error ? err.message : 'Configuration Pinoy invalide'),
   });
 
   const saveFilmDownloadMutation = useMutation({
@@ -594,6 +555,7 @@ export function AdminPage() {
             ['offers', 'Offres & Paiements', CreditCard],
             ['users', 'Utilisateurs', Users],
             ['navigation', 'Menus', Menu],
+            ['homeSections', 'Sections Accueil', LayoutGrid],
             ['modules', 'APIs & Lecteurs', Plug],
             ['requests', 'Signalements & Demandes', Flag],
             ['notifications', 'Notifications', Bell],
@@ -663,6 +625,9 @@ export function AdminPage() {
 
         {/* TAB: NAVIGATION CMS */}
         {tab === 'navigation' && <AdminNavigationTab />}
+
+        {/* TAB: CUSTOM HOME SECTIONS */}
+        {tab === 'homeSections' && <AdminHomeSectionsTab />}
 
         {/* TAB: CUSTOM API MODULES */}
         {tab === 'modules' && <AdminCustomApisTab />}
@@ -964,98 +929,6 @@ export function AdminPage() {
               >
                 {saveTmdbMutation.isPending ? 'Enregistrement…' : 'Enregistrer la clé TMDB'}
               </button>
-            </form>
-          </section>
-
-          <section className="rounded-xl border border-border bg-card p-6">
-            <h2 className="mb-1 font-display text-xl font-semibold text-foreground">
-              API Films Pinoy (korotoko_ph.php)
-            </h2>
-            <p className="mb-4 text-sm text-muted-foreground">
-              Configurez l’URL de votre point d’accès <code className="font-mono text-primary">korotoko_ph.php</code> ainsi que le domaine utilisé pour les images (<code className="font-mono text-primary">uploads/pinoy/...</code>).
-            </p>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                savePinoyApiMutation.mutate({
-                  pinoyApiUrl: pinoyApiUrlInput.trim(),
-                  pinoyMediaBaseUrl: pinoyMediaBaseUrlInput.trim(),
-                  pinoyPlayerTemplate: pinoyPlayerTemplateInput.trim(),
-                  pinoyDownloadMessage: pinoyDownloadMessageInput.trim(),
-                });
-              }}
-              className="space-y-4"
-            >
-              <div>
-                <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
-                  URL de l’API (korotoko_ph.php)
-                </label>
-                <input
-                  type="url"
-                  value={pinoyApiUrlInput}
-                  onChange={(e) => setPinoyApiUrlInput(e.target.value)}
-                  placeholder="https://monsite.com/korotoko_ph.php"
-                  className="w-full rounded-lg border border-input bg-background px-3.5 py-2.5 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
-                  Domaine des médias Pinoy (posters & galerie)
-                </label>
-                <input
-                  type="url"
-                  value={pinoyMediaBaseUrlInput}
-                  onChange={(e) => setPinoyMediaBaseUrlInput(e.target.value)}
-                  placeholder="https://streamwall.behoririka.mg/"
-                  className="w-full rounded-lg border border-input bg-background px-3.5 py-2.5 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
-                  Lecteur Pinoy (variable <code className="font-mono text-primary">{'{id}'}</code>)
-                </label>
-                <input
-                  type="text"
-                  value={pinoyPlayerTemplateInput}
-                  onChange={(e) => setPinoyPlayerTemplateInput(e.target.value)}
-                  placeholder="https://streamwall.behoririka.mg/pinoy/{id}"
-                  className="w-full rounded-lg border border-input bg-background px-3.5 py-2.5 font-mono text-sm text-foreground focus:border-primary focus:outline-none"
-                />
-                {pinoyPlayerTemplateInput.trim() && (
-                  <p className="mt-1.5 font-mono text-xs text-muted-foreground">
-                    Aperçu (film ID 15) :{' '}
-                    {/\{id\}/i.test(pinoyPlayerTemplateInput)
-                      ? pinoyPlayerTemplateInput.trim().replace(/\{id\}/gi, '15')
-                      : `${pinoyPlayerTemplateInput.trim().replace(/\/+$/, '')}/15`}
-                  </p>
-                )}
-              </div>
-
-              <div>
-                <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
-                  Message affiché à la place du téléchargement (invités & membres gratuits)
-                </label>
-                <textarea
-                  rows={2}
-                  maxLength={500}
-                  value={pinoyDownloadMessageInput}
-                  onChange={(e) => setPinoyDownloadMessageInput(e.target.value)}
-                  placeholder="Le téléchargement direct est réservé aux membres Pro et aux administrateurs."
-                  className="w-full rounded-lg border border-input bg-background px-3.5 py-2.5 text-sm text-foreground focus:border-primary focus:outline-none"
-                />
-              </div>
-
-              <div className="flex justify-end">
-                <button
-                  type="submit"
-                  disabled={savePinoyApiMutation.isPending}
-                  className="rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 whitespace-nowrap shrink-0"
-                >
-                  {savePinoyApiMutation.isPending ? 'Enregistrement…' : 'Enregistrer l’API Pinoy'}
-                </button>
-              </div>
             </form>
           </section>
 

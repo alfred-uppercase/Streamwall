@@ -344,6 +344,30 @@ export function HomePage() {
 
         <CategoryStripSection />
 
+        {/* Sections personnalisées (Admin -> Sections Accueil) */}
+        {(data?.customSections ?? [])
+          .filter((sec) => sec.enabled && sec.items.length > 0)
+          .map((sec) => (
+            <section key={sec.id} className="mb-14">
+              <div className="mb-5 flex flex-wrap items-baseline justify-between gap-4">
+                <div className="min-w-0">
+                  <h2 className="font-display text-2xl font-bold text-foreground">{sec.title}</h2>
+                  {sec.description && (
+                    <p className="mt-0.5 text-sm text-muted-foreground">{sec.description}</p>
+                  )}
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-2.5 sm:gap-5 md:grid-cols-4 lg:grid-cols-6">
+                {sec.items.slice(0, 18).map((item) => (
+                  <PosterCard
+                    key={`hs-${sec.id}-${item.item_type}:${item.id}`}
+                    item={item}
+                  />
+                ))}
+              </div>
+            </section>
+          ))}
+
         {/* Dernières séries */}
         {(homeQuery.isLoading || Boolean(data?.lastSeries?.length)) && (
           <section className="mb-14">

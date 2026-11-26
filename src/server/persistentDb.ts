@@ -183,6 +183,7 @@ const REMOTE_MIRROR_ALLOWLIST = new Set([
   'privacy',
   'navigation',
   'custom_modules',
+  'home_sections',
 ]);
 const MAX_REMOTE_MIRROR_BYTES = 100 * 1024;
 

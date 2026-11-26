@@ -1182,3 +1182,67 @@ test('analyticsStore records local Play Report events in SQLite, filters bots, s
   assert.equal(pinoy.path, '/pinoy/labas-pasok-2026');
 });
 
+test('homeSectionsStore enforces 18-item max, sanitizes posters, orders sections, and persists in SQLite', async () => {
+  const {
+    deleteHomeSection,
+    getHomeSection,
+    listHomeSections,
+    MAX_ITEMS_PER_HOME_SECTION,
+    upsertHomeSection,
+  } = await import('../src/server/homeSectionsStore.ts');
+
+  assert.equal(MAX_ITEMS_PER_HOME_SECTION, 18);
+
+  const makeItem = (idx: number) => ({
+    id: String(1000 + idx),
+    titre: `Film Horreur ${idx}`,
+    poster: idx === 1 ? 'javascript:alert(1)' : `https://image.tmdb.org/t/p/w300/p${idx}.jpg`,
+    qualite: 'HD',
+    langue: 'VF',
+    item_type: 'film' as const,
+    saison: null,
+    genre: 'Horreur',
+    annee: 2025,
+  });
+
+  // 19 items must be rejected cleanly
+  const tooMany = upsertHomeSection({
+    title: 'Trop de films',
+    items: Array.from({ length: 19 }, (_, i) => makeItem(i + 1)),
+  });
+  assert.equal(tooMany.ok, false);
+
+  // 18 items succeeds & sanitizes unsafe poster URLs
+  const created = upsertHomeSection({
+    title: 'Top 10 film horreur',
+    description: 'Sélection épouvante du mois',
+    order: 5,
+    enabled: true,
+    items: Array.from({ length: 18 }, (_, i) => makeItem(i + 1)),
+  });
+  assert.equal(created.ok, true);
+  if (created.ok) {
+    assert.equal(created.section.items.length, 18);
+    assert.equal(created.section.items[0]?.poster, null);
+    assert.equal(
+      created.section.items[1]?.poster,
+      'https://image.tmdb.org/t/p/w300/p2.jpg'
+    );
+    assert.ok(getHomeSection(created.section.id));
+    assert.equal(listHomeSections(false).some((s) => s.id === created.section.id), true);
+
+    // Disable section -> hidden when includeDisabled=false
+    const updated = upsertHomeSection({
+      id: created.section.id,
+      title: 'Top 10 film horreur',
+      enabled: false,
+      items: [makeItem(2)],
+    });
+    assert.equal(updated.ok, true);
+    assert.equal(listHomeSections(false).some((s) => s.id === created.section.id), false);
+    assert.equal(listHomeSections(true).some((s) => s.id === created.section.id), true);
+
+    assert.equal(deleteHomeSection(created.section.id), true);
+  }
+});
+
