@@ -22,7 +22,14 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { TYPE_LABELS } from '../shared/types';
-import type { CastMember, Episode, Item, ItemType, SeasonMeta } from '../shared/types';
+import type {
+  CastMember,
+  Episode,
+  Item,
+  ItemType,
+  LockedFilmDownloadItem,
+  SeasonMeta,
+} from '../shared/types';
 import { api, useAuth, useSetWatchingItem } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
 import { FavoriteButton, PosterCard } from '../components/PosterCard';
@@ -122,14 +129,18 @@ function EpisodeStill({
 export function DetailPage() {
   const params = useParams<{ type: string; id: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { user, isMember, isAdmin, isPro } = useAuth();
+  const { user, loading: authLoading, isMember, isAdmin, isPro } = useAuth();
   const billingPlansQuery = useQuery({
     queryKey: ['billing-plans'],
     queryFn: () => api.billingPlans(),
     staleTime: 10_000,
   });
   const plans = billingPlansQuery.data?.plans ?? [];
-  const userPlan = plans.find((p) => p.id === user?.subscription?.planId);
+  const userPlan =
+    plans.find((p) => p.id === user?.subscription?.planId) ??
+    (user?.subscription?.tier === 'pro'
+      ? plans.find((p) => p.tier === 'pro' && p.active) ?? plans.find((p) => p.tier === 'pro')
+      : plans.find((p) => p.id === 'free' || p.tier === 'free'));
   const freePlanAllowsDownloads = Boolean(
     plans.find((p) => p.id === 'free' || p.tier === 'free')?.filmDownloadsEnabled
   );
@@ -172,6 +183,8 @@ export function DetailPage() {
 
   const [reportModalOpen, setReportModalOpen] = useState(false);
   const [guestAuthAlertOpen, setGuestAuthAlertOpen] = useState(false);
+  const [lockedDownloadPrompt, setLockedDownloadPrompt] =
+    useState<LockedFilmDownloadItem | null>(null);
   const [reportReason, setReportReason] = useState<string>('Lien mort / ne charge pas');
   const [reportSeason, setReportSeason] = useState<number>(1);
   const [reportEpisode, setReportEpisode] = useState<number>(1);
@@ -183,6 +196,7 @@ export function DetailPage() {
     setPosterFailed(false);
     setDescExpanded(false);
     setEpisodeFilter('');
+    setLockedDownloadPrompt(null);
   }, [type, id]);
 
   const detailQuery = useQuery({
@@ -194,7 +208,7 @@ export function DetailPage() {
       canDownload ? 'unlocked' : 'locked',
     ],
     queryFn: () => api.details(type, id),
-    enabled: Boolean(id),
+    enabled: Boolean(id) && !authLoading,
     staleTime: 30_000,
   });
 
@@ -327,9 +341,13 @@ export function DetailPage() {
 
   // Close modals on Escape
   useEffect(() => {
-    if (!modal && !reportModalOpen && !guestAuthAlertOpen) return;
+    if (!modal && !reportModalOpen && !guestAuthAlertOpen && !lockedDownloadPrompt) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (lockedDownloadPrompt) {
+          setLockedDownloadPrompt(null);
+          return;
+        }
         if (guestAuthAlertOpen) {
           setGuestAuthAlertOpen(false);
           return;
@@ -344,7 +362,7 @@ export function DetailPage() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [modal, reportModalOpen, guestAuthAlertOpen, setWatchingItem]);
+  }, [modal, reportModalOpen, guestAuthAlertOpen, lockedDownloadPrompt, setWatchingItem]);
 
   function openReportModal(seasonOverride?: number, episodeOverride?: number) {
     if (!isMember) {
@@ -413,7 +431,7 @@ export function DetailPage() {
     );
   }, [seasonsMap, selectedSeason, episodes, episodeFilter]);
 
-  if (detailQuery.isLoading) {
+  if (authLoading || detailQuery.isLoading) {
     return (
       <main className="mx-auto max-w-7xl px-4 pt-24 pb-12 sm:px-6 sm:pt-28">
         <div className="h-96 animate-pulse rounded-xl border border-border bg-card" />
@@ -620,62 +638,84 @@ export function DetailPage() {
       </section>
 
       {/* Film Direct Downloads (linked to SubscriptionPlan offers) */}
-      {effectiveType === 'film' &&
-        ((!detailData.downloadLocked && (detailData.downloads?.length ?? 0) > 0) ||
-          Boolean(detailData.downloadLocked)) && (
-          <section className="mx-auto max-w-7xl px-4 pt-8 pb-2 sm:px-6">
-            <div className="rounded-xl border border-border bg-card p-5 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="font-display text-lg font-semibold text-foreground">
-                  {!detailData.downloadLocked && (detailData.downloads?.length ?? 0) > 0
-                    ? `Liens de téléchargement (${detailData.downloads!.length})`
-                    : detailData.downloadCount && detailData.downloadCount > 0
-                      ? `Liens de téléchargement (${detailData.downloadCount})`
-                      : 'Liens de téléchargement'}
-                </h2>
-                {Boolean(detailData.downloadLocked) && (
-                  <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-400">
-                    {!freePlanAllowsDownloads && proPlansAllowDownloads ? (
-                      <>
-                        <Crown className="size-3.5" />
-                        <span>Réservé Pro</span>
-                      </>
-                    ) : (
-                      <>
-                        <Lock className="size-3.5" />
-                        <span>Accès verrouillé</span>
-                      </>
-                    )}
-                  </span>
-                )}
-              </div>
+      {((!detailData.downloadLocked && (detailData.downloads?.length ?? 0) > 0) ||
+        Boolean(detailData.downloadLocked) ||
+        (detailData.lockedDownloads?.length ?? 0) > 0) && (
+        <section className="mx-auto max-w-7xl px-4 pt-8 pb-2 sm:px-6">
+          <div className="rounded-xl border border-border bg-card p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="font-display text-lg font-semibold text-foreground">
+                {!detailData.downloadLocked && (detailData.downloads?.length ?? 0) > 0
+                  ? `Liens de téléchargement (${detailData.downloads!.length})`
+                  : detailData.downloadCount && detailData.downloadCount > 0
+                    ? `Liens de téléchargement (${detailData.downloadCount})`
+                    : 'Liens de téléchargement'}
+              </h2>
+              {Boolean(detailData.downloadLocked) && (
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-amber-400">
+                  {!freePlanAllowsDownloads && proPlansAllowDownloads ? (
+                    <>
+                      <Crown className="size-3" />
+                      <span>Réservé Pro</span>
+                    </>
+                  ) : (
+                    <>
+                      <Lock className="size-3" />
+                      <span>Connexion requise</span>
+                    </>
+                  )}
+                </span>
+              )}
+            </div>
 
-              {!detailData.downloadLocked && (detailData.downloads?.length ?? 0) > 0 ? (
-                <div className="flex flex-wrap gap-2.5">
-                  {detailData.downloads!.map((dl) => {
-                    if (!dl.protectToken) return null;
-                    const protectHref = `/linprotect/${encodeURIComponent(dl.protectToken)}`;
-                    return (
-                      <a
-                        key={`${dl.id}-${dl.filename}-${dl.quality}`}
-                        href={protectHref}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-4 py-2.5 text-xs font-semibold text-foreground transition-colors hover:border-primary/70 hover:bg-accent"
+            {!detailData.downloadLocked && (detailData.downloads?.length ?? 0) > 0 ? (
+              <div className="flex flex-wrap gap-2.5">
+                {detailData.downloads!.map((dl) => {
+                  if (!dl.protectToken) return null;
+                  const protectHref = `/linprotect/${encodeURIComponent(dl.protectToken)}`;
+                  return (
+                    <a
+                      key={`${dl.id}-${dl.filename}-${dl.quality}`}
+                      href={protectHref}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-4 py-2.5 text-xs font-semibold text-foreground transition-colors hover:border-primary/70 hover:bg-accent"
+                    >
+                      <Download className="size-3.5 shrink-0 text-primary" />
+                      <span>{dl.filename || 'Télécharger'}</span>
+                      {dl.quality && (
+                        <span className="font-normal text-muted-foreground">· {dl.quality}</span>
+                      )}
+                      <ExternalLink className="size-3 shrink-0 text-muted-foreground" />
+                    </a>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {(detailData.lockedDownloads?.length ?? 0) > 0 && (
+                  <div className="flex flex-wrap gap-2.5">
+                    {detailData.lockedDownloads!.map((dl) => (
+                      <button
+                        key={`locked-${dl.id}-${dl.filename}-${dl.quality}`}
+                        type="button"
+                        onClick={() => setLockedDownloadPrompt(dl)}
+                        className="inline-flex items-center gap-2 rounded-lg border border-amber-500/30 bg-background/80 px-4 py-2.5 text-xs font-semibold text-foreground transition-colors hover:border-amber-400/70 hover:bg-amber-500/10"
                       >
-                        <Download className="size-3.5 shrink-0 text-primary" />
+                        <Lock className="size-3.5 shrink-0 text-amber-400" />
                         <span>{dl.filename || 'Télécharger'}</span>
                         {dl.quality && (
-                          <span className="font-normal text-muted-foreground">
-                            · {dl.quality}
-                          </span>
+                          <span className="font-normal text-muted-foreground">· {dl.quality}</span>
                         )}
-                        <ExternalLink className="size-3 shrink-0 text-muted-foreground" />
-                      </a>
-                    );
-                  })}
-                </div>
-              ) : (
+                        <span className="inline-flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-400">
+                          <Crown className="size-2.5" />
+                          <span>{freePlanAllowsDownloads && !isMember ? 'Membre' : 'Pro'}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
                 <div className="flex flex-col gap-3 rounded-lg border border-border bg-background/60 p-4 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex items-start gap-3">
                     <div className="grid size-9 shrink-0 place-items-center rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-400">
@@ -686,11 +726,11 @@ export function DetailPage() {
                         {!isMember
                           ? freePlanAllowsDownloads
                             ? 'Connectez-vous pour accéder aux liens de téléchargement direct de ce film.'
-                            : 'Téléchargement réservé aux offres compatibles. Connectez-vous ou achetez une offre pour débloquer les liens.'
+                            : 'Téléchargement protégé par le statut Pro. Connectez-vous ou souscrivez à une offre Pro pour débloquer les liens.'
                           : detailData.downloadMessage?.trim() &&
                               detailData.downloadMessage.trim().toLowerCase() !== 'téléchargement'
                             ? detailData.downloadMessage.trim()
-                            : 'Le téléchargement direct est verrouillé pour votre offre actuelle. Passez à une offre Pro pour débloquer les liens.'}
+                            : 'Le téléchargement direct est protégé et réservé aux offres Pro. Souscrivez à une offre Pro pour débloquer les liens.'}
                       </p>
                       {!isMember &&
                         !freePlanAllowsDownloads &&
@@ -721,15 +761,16 @@ export function DetailPage() {
                         className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90"
                       >
                         <Crown className="size-3.5" />
-                        <span>{isMember ? 'Passer Pro' : 'Acheter une offre Pro'}</span>
+                        <span>Souscrire à une offre Pro</span>
                       </Link>
                     )}
                   </div>
                 </div>
-              )}
-            </div>
-          </section>
-        )}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* Interactive Seasons Tabs & Scrollable TMDB-Enriched Episodes */}
       {(episodes.length > 0 || seasonsMeta.length > 0) && (
@@ -1243,6 +1284,89 @@ export function DetailPage() {
               >
                 <span>Se connecter</span>
               </Link>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Locked Download Prompt Dialog */}
+      {lockedDownloadPrompt && (
+        <div
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="locked-download-dialog-title"
+          aria-describedby="locked-download-dialog-desc"
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/80 p-4 backdrop-blur-xs"
+          onClick={() => setLockedDownloadPrompt(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="grid size-10 shrink-0 place-items-center rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-400">
+                <Crown className="size-5" />
+              </div>
+              <div className="min-w-0 flex-1 space-y-1">
+                <h2
+                  id="locked-download-dialog-title"
+                  className="font-display text-base font-bold text-foreground"
+                >
+                  {!isMember
+                    ? freePlanAllowsDownloads
+                      ? 'Connexion requise pour télécharger'
+                      : 'Connexion ou offre Pro requise'
+                    : 'Téléchargement réservé aux offres Pro'}
+                </h2>
+                <p className="truncate text-xs font-medium text-primary">
+                  {lockedDownloadPrompt.filename}
+                  {lockedDownloadPrompt.quality ? ` · ${lockedDownloadPrompt.quality}` : ''}
+                </p>
+                <p
+                  id="locked-download-dialog-desc"
+                  className="pt-1 text-sm leading-relaxed text-muted-foreground"
+                >
+                  {!isMember
+                    ? freePlanAllowsDownloads
+                      ? 'Connectez-vous à votre compte pour accéder à ce lien de téléchargement.'
+                      : 'Ce lien de téléchargement est protégé par le statut Pro. Connectez-vous ou souscrivez à une offre Pro pour le débloquer.'
+                    : detailData.downloadMessage?.trim() &&
+                        detailData.downloadMessage.trim().toLowerCase() !== 'téléchargement'
+                      ? detailData.downloadMessage.trim()
+                      : 'Votre offre actuelle ne permet pas ce téléchargement. Souscrivez à une offre Pro pour débloquer ce lien.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setLockedDownloadPrompt(null)}
+                className="rounded-lg border border-border px-4 py-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+              >
+                Fermer
+              </button>
+              {!isMember && (
+                <Link
+                  to="/auth"
+                  className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition-opacity ${
+                    freePlanAllowsDownloads
+                      ? 'bg-primary text-primary-foreground hover:opacity-90'
+                      : 'border border-border bg-background text-foreground hover:bg-accent'
+                  }`}
+                >
+                  <span>Se connecter</span>
+                </Link>
+              )}
+              {(!freePlanAllowsDownloads || !isMember) && proPlansAllowDownloads && (
+                <Link
+                  to="/abonnement"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90"
+                >
+                  <Crown className="size-3.5" />
+                  <span>Souscrire à une offre Pro</span>
+                </Link>
+              )}
             </div>
           </div>
         </div>

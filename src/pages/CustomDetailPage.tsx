@@ -19,7 +19,12 @@ import {
   X,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import type { CustomApiItem, Item, PinoyPlayerSource } from '../shared/types';
+import type {
+  CustomApiItem,
+  Item,
+  LockedPinoyDownloadItem,
+  PinoyPlayerSource,
+} from '../shared/types';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle } from '../lib/siteConfig';
 import { CommentsSection } from '../components/CommentsSection';
@@ -121,7 +126,7 @@ const SimilarCustomCard = memo(function SimilarCustomCard({
 
 export function CustomDetailPage() {
   const { slug = '', itemKey = '' } = useParams<{ slug: string; itemKey: string }>();
-  const { isMember, isAdmin, isPro } = useAuth();
+  const { user, loading: authLoading, isMember, isAdmin, isPro } = useAuth();
   const canDownload = isAdmin || isPro;
 
   const [posterFailed, setPosterFailed] = useState(false);
@@ -133,6 +138,8 @@ export function CustomDetailPage() {
 
   const [reportModalOpen, setReportModalOpen] = useState(false);
   const [guestAuthAlertOpen, setGuestAuthAlertOpen] = useState(false);
+  const [lockedDownloadPrompt, setLockedDownloadPrompt] =
+    useState<LockedPinoyDownloadItem | null>(null);
   const [reportReason, setReportReason] = useState('Lien mort / ne charge pas');
   const [reportDetails, setReportDetails] = useState('');
   const [reportSubmitting, setReportSubmitting] = useState(false);
@@ -146,12 +153,17 @@ export function CustomDetailPage() {
     setSelectedPlayerIdx(0);
     setReportModalOpen(false);
     setGuestAuthAlertOpen(false);
+    setLockedDownloadPrompt(null);
   }, [slug, itemKey]);
 
   useEffect(() => {
-    if (!playerModalOpen && !reportModalOpen && !guestAuthAlertOpen) return;
+    if (!playerModalOpen && !reportModalOpen && !guestAuthAlertOpen && !lockedDownloadPrompt) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (lockedDownloadPrompt) {
+          setLockedDownloadPrompt(null);
+          return;
+        }
         if (guestAuthAlertOpen) {
           setGuestAuthAlertOpen(false);
           return;
@@ -165,13 +177,19 @@ export function CustomDetailPage() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [playerModalOpen, reportModalOpen, guestAuthAlertOpen]);
+  }, [playerModalOpen, reportModalOpen, guestAuthAlertOpen, lockedDownloadPrompt]);
 
   const detailQuery = useQuery({
-    queryKey: ['custom-detail', slug, itemKey, canDownload ? 'unlocked' : 'locked'],
+    queryKey: [
+      'custom-detail',
+      slug,
+      itemKey,
+      isMember ? (user?.id ?? 'member') : 'guest',
+      canDownload ? 'unlocked' : 'locked',
+    ],
     queryFn: () => api.customDetail(slug, itemKey),
-    enabled: Boolean(slug && itemKey),
-    staleTime: 180_000,
+    enabled: Boolean(slug && itemKey) && !authLoading,
+    staleTime: 30_000,
     retry: false,
   });
 
@@ -187,11 +205,14 @@ export function CustomDetailPage() {
   const downloadPlayers: PinoyPlayerSource[] = (data?.players.download ?? []).filter((p) =>
     Boolean(sanitizeHttpUrl(p.url))
   );
+  const lockedDownloads: LockedPinoyDownloadItem[] = data?.lockedDownloads ?? [];
 
   const activePlayer = embedPlayers[selectedPlayerIdx] ?? embedPlayers[0] ?? null;
   const downloadProOnly = mod?.player.downloadProOnly ?? true;
   const isDownloadLocked =
-    Boolean(data?.downloadLocked) || (downloadProOnly && !canDownload && downloadPlayers.length > 0);
+    Boolean(data?.downloadLocked) ||
+    lockedDownloads.length > 0 ||
+    (downloadProOnly && !canDownload && downloadPlayers.length > 0);
   const downloadRestrictionMessage =
     data?.downloadMessage?.trim() ||
     mod?.player.downloadRestrictionMessage ||
@@ -234,7 +255,7 @@ export function CustomDetailPage() {
     }
   }
 
-  if (detailQuery.isLoading) {
+  if (authLoading || detailQuery.isLoading) {
     return (
       <main className="mx-auto max-w-7xl px-4 pt-24 pb-12 sm:px-6 sm:pt-28">
         <div className="h-96 animate-pulse rounded-xl border border-border bg-card" />
@@ -472,14 +493,16 @@ export function CustomDetailPage() {
 
       {/* Optional Downloads Section */}
       {mod.sections.detailShowDownloads &&
-        (downloadPlayers.length > 0 || isDownloadLocked) && (
+        (downloadPlayers.length > 0 || lockedDownloads.length > 0 || isDownloadLocked) && (
           <section className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
-            <div className="rounded-xl border border-border bg-card p-5 space-y-3">
+            <div className="rounded-xl border border-border bg-card p-5 space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h2 className="font-display text-lg font-semibold text-foreground">
                   {!isDownloadLocked && downloadPlayers.length > 0
                     ? `Liens de téléchargement (${downloadPlayers.length})`
-                    : 'Liens de téléchargement'}
+                    : lockedDownloads.length > 0
+                      ? `Liens de téléchargement (${lockedDownloads.length})`
+                      : 'Liens de téléchargement'}
                 </h2>
                 {isDownloadLocked && (
                   <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-amber-400">
@@ -512,31 +535,57 @@ export function CustomDetailPage() {
                   })}
                 </div>
               ) : (
-                <div className="flex flex-col gap-3 rounded-lg border border-border bg-background/60 p-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="flex items-start gap-3">
-                    <div className="grid size-9 shrink-0 place-items-center rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-400">
-                      <Lock className="size-4" />
+                <div className="space-y-3">
+                  {lockedDownloads.length > 0 && (
+                    <div className="flex flex-wrap gap-2.5">
+                      {lockedDownloads.map((dl, idx) => {
+                        const meta = [dl.quality, dl.language].filter(Boolean).join(' · ');
+                        return (
+                          <button
+                            key={`locked-${dl.provider}-${idx}`}
+                            type="button"
+                            onClick={() => setLockedDownloadPrompt(dl)}
+                            className="inline-flex items-center gap-2 rounded-lg border border-amber-500/30 bg-background/80 px-4 py-2.5 text-xs font-semibold text-foreground transition-colors hover:border-amber-400/70 hover:bg-amber-500/10"
+                          >
+                            <Lock className="size-3.5 text-amber-400" />
+                            <span>Télécharger · {dl.provider}</span>
+                            {meta && <span className="text-muted-foreground font-normal">({meta})</span>}
+                            <span className="inline-flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-400">
+                              <Crown className="size-2.5" />
+                              <span>Pro</span>
+                            </span>
+                          </button>
+                        );
+                      })}
                     </div>
-                    <p className="text-sm leading-relaxed text-muted-foreground whitespace-pre-line">
-                      {downloadRestrictionMessage}
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 flex-wrap items-center gap-2">
-                    {!isMember && (
+                  )}
+
+                  <div className="flex flex-col gap-3 rounded-lg border border-border bg-background/60 p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-start gap-3">
+                      <div className="grid size-9 shrink-0 place-items-center rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-400">
+                        <Lock className="size-4" />
+                      </div>
+                      <p className="text-sm leading-relaxed text-muted-foreground whitespace-pre-line">
+                        {downloadRestrictionMessage}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 flex-wrap items-center gap-2">
+                      {!isMember && (
+                        <Link
+                          to="/auth"
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3.5 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-accent"
+                        >
+                          <span>Se connecter</span>
+                        </Link>
+                      )}
                       <Link
-                        to="/auth"
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3.5 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-accent"
+                        to="/abonnement"
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90"
                       >
-                        <span>Se connecter</span>
+                        <Crown className="size-3.5" />
+                        <span>Souscrire à une offre Pro</span>
                       </Link>
-                    )}
-                    <Link
-                      to="/abonnement"
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90"
-                    >
-                      <Crown className="size-3.5" />
-                      <span>Passer Pro</span>
-                    </Link>
+                    </div>
                   </div>
                 </div>
               )}
@@ -803,6 +852,74 @@ export function CustomDetailPage() {
                 className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90"
               >
                 <span>Se connecter</span>
+              </Link>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Locked Download Prompt Dialog */}
+      {lockedDownloadPrompt && (
+        <div
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="custom-locked-dl-title"
+          aria-describedby="custom-locked-dl-desc"
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/80 p-4 backdrop-blur-xs"
+          onClick={() => setLockedDownloadPrompt(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="grid size-10 shrink-0 place-items-center rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-400">
+                <Crown className="size-5" />
+              </div>
+              <div className="min-w-0 flex-1 space-y-1">
+                <h2
+                  id="custom-locked-dl-title"
+                  className="font-display text-base font-bold text-foreground"
+                >
+                  {!isMember ? 'Connexion ou offre Pro requise' : 'Téléchargement réservé aux offres Pro'}
+                </h2>
+                <p className="truncate text-xs font-medium text-primary">
+                  {lockedDownloadPrompt.provider}
+                  {[lockedDownloadPrompt.quality, lockedDownloadPrompt.language].filter(Boolean).length > 0
+                    ? ` · ${[lockedDownloadPrompt.quality, lockedDownloadPrompt.language]
+                        .filter(Boolean)
+                        .join(' · ')}`
+                    : ''}
+                </p>
+                <p
+                  id="custom-locked-dl-desc"
+                  className="pt-1 text-sm leading-relaxed text-muted-foreground"
+                >
+                  {downloadRestrictionMessage}
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setLockedDownloadPrompt(null)}
+                className="rounded-lg border border-border px-4 py-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+              >
+                Fermer
+              </button>
+              {!isMember && (
+                <Link
+                  to="/auth"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-background px-4 py-2 text-xs font-semibold text-foreground hover:bg-accent"
+                >
+                  <span>Se connecter</span>
+                </Link>
+              )}
+              <Link
+                to="/abonnement"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90"
+              >
+                <Crown className="size-3.5" />
+                <span>Souscrire à une offre Pro</span>
               </Link>
             </div>
           </div>

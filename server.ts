@@ -3678,16 +3678,21 @@ export async function createApiApp(): Promise<express.Express> {
             embed: effectiveEmbed,
             download: [],
           },
+          ...(hasDownloads
+            ? {
+                lockedDownloads: detail.players.download.map((dl) => ({
+                  provider: dl.provider,
+                  quality: dl.quality,
+                  language: dl.language,
+                })),
+              }
+            : {}),
           downloadLocked: hasDownloads,
           ...(hasDownloads ? { downloadMessage } : {}),
         };
 
     res.setHeader('Vary', 'Authorization, Cookie');
-    if (!auth && !extractToken(req)) {
-      res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=60, must-revalidate');
-    } else {
-      res.setHeader('Cache-Control', 'private, no-store');
-    }
+    res.setHeader('Cache-Control', auth ? 'private, no-store' : 'private, no-cache');
     res.json(responsePayload);
   });
 
@@ -3765,16 +3770,21 @@ export async function createApiApp(): Promise<express.Express> {
             ...detail.players,
             download: [],
           },
+          ...(hasDownloads
+            ? {
+                lockedDownloads: detail.players.download.map((dl) => ({
+                  provider: dl.provider,
+                  quality: dl.quality,
+                  language: dl.language,
+                })),
+              }
+            : {}),
           downloadLocked: hasDownloads,
           ...(hasDownloads ? { downloadMessage: mod.player.downloadRestrictionMessage } : {}),
         };
 
     res.setHeader('Vary', 'Authorization, Cookie');
-    if (!auth && !extractToken(req)) {
-      res.setHeader('Cache-Control', 'public, max-age=120, s-maxage=600, stale-while-revalidate=1200');
-    } else {
-      res.setHeader('Cache-Control', 'private, no-store');
-    }
+    res.setHeader('Cache-Control', auth ? 'private, no-store' : 'private, no-cache');
     res.json(responsePayload);
   });
 
@@ -3923,6 +3933,15 @@ export async function createApiApp(): Promise<express.Express> {
       ...(hasDownloads
         ? {
             downloads: canDownload ? filmDownloads : [],
+            ...(downloadLocked
+              ? {
+                  lockedDownloads: filmDownloads.map(({ id: dlId, filename, quality }) => ({
+                    id: dlId,
+                    filename,
+                    quality,
+                  })),
+                }
+              : {}),
             downloadCount: filmDownloads.length,
             downloadLocked,
             ...(downloadMessage ? { downloadMessage } : {}),

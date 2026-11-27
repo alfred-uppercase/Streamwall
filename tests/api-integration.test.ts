@@ -666,11 +666,14 @@ test('Pinoy endpoints respond cleanly and admin Pinoy URL settings validate acce
   }) as typeof fetch;
 
   try {
-    // 1. Guest receives same-origin Pinoy player URL, no download URLs + downloadLocked + custom message
+    // 1. Guest receives same-origin Pinoy player URL, no download URLs + downloadLocked + lockedDownloads + custom message
     const guestDetailRes = await realFetch(`${baseUrl}/api/pinoy/detail/milf-2026`);
     assert.equal(guestDetailRes.status, 200);
-    const guestDetail = (await guestDetailRes.json()) as {
+    const guestDetailText = await guestDetailRes.text();
+    assert.equal(guestDetailText.includes('https://voe.sx/3od2eqbnmolo/download'), false);
+    const guestDetail = JSON.parse(guestDetailText) as {
       players: { embed: Array<{ provider: string; url: string }>; download: unknown[] };
+      lockedDownloads?: Array<{ provider: string; quality: string | null; language: string | null; url?: unknown }>;
       downloadLocked?: boolean;
       downloadMessage?: string;
     };
@@ -679,6 +682,8 @@ test('Pinoy endpoints respond cleanly and admin Pinoy URL settings validate acce
     assert.equal(guestDetail.players.download.length, 0);
     assert.equal(guestDetail.downloadLocked, true);
     assert.equal(guestDetail.downloadMessage, customDownloadMsg);
+    assert.equal(guestDetail.lockedDownloads?.length, 1);
+    assert.equal(guestDetail.lockedDownloads?.[0]?.url, undefined);
 
     // Same-origin Pinoy watch proxy strips X-Frame-Options and rewrites /uploads/
     const watchProxyRes = await realFetch(`${baseUrl}/api/public/watch/pinoy/15/milf-2026`);
@@ -690,19 +695,24 @@ test('Pinoy endpoints respond cleanly and admin Pinoy URL settings validate acce
     const badWatchProxyRes = await realFetch(`${baseUrl}/api/public/watch/pinoy/not-numeric`);
     assert.equal(badWatchProxyRes.status, 400);
 
-    // 2. Free member receives no download URLs + downloadLocked + custom message
+    // 2. Free member receives no download URLs + downloadLocked + lockedDownloads + custom message
     const freeDetailRes = await realFetch(`${baseUrl}/api/pinoy/detail/milf-2026`, {
       headers: { Authorization: `Bearer ${memberAuth.token}` },
     });
     assert.equal(freeDetailRes.status, 200);
-    const freeDetail = (await freeDetailRes.json()) as {
+    const freeDetailText = await freeDetailRes.text();
+    assert.equal(freeDetailText.includes('https://voe.sx/3od2eqbnmolo/download'), false);
+    const freeDetail = JSON.parse(freeDetailText) as {
       players: { download: unknown[] };
+      lockedDownloads?: Array<{ provider: string; url?: unknown }>;
       downloadLocked?: boolean;
       downloadMessage?: string;
     };
     assert.equal(freeDetail.players.download.length, 0);
     assert.equal(freeDetail.downloadLocked, true);
     assert.equal(freeDetail.downloadMessage, customDownloadMsg);
+    assert.equal(freeDetail.lockedDownloads?.length, 1);
+    assert.equal(freeDetail.lockedDownloads?.[0]?.url, undefined);
 
     // 3. Admin receives direct download URLs + downloadLocked=false
     const adminDetailRes = await realFetch(`${baseUrl}/api/pinoy/detail/milf-2026`, {
@@ -711,9 +721,11 @@ test('Pinoy endpoints respond cleanly and admin Pinoy URL settings validate acce
     assert.equal(adminDetailRes.status, 200);
     const adminDetail = (await adminDetailRes.json()) as {
       players: { download: Array<{ url: string }> };
+      lockedDownloads?: unknown[];
       downloadLocked?: boolean;
     };
     assert.equal(adminDetail.downloadLocked, false);
+    assert.equal(adminDetail.lockedDownloads, undefined);
     assert.equal(adminDetail.players.download[0]?.url, 'https://voe.sx/3od2eqbnmolo/download');
 
     // 4. Pro member receives direct download URLs + downloadLocked=false
@@ -1705,12 +1717,22 @@ test('film download links require Pro/Admin, mask Bearer key in admin settings, 
     assert.ok(testJson.sample?.protectToken);
     assert.equal(JSON.stringify(testJson).includes('https://cdn.example.com/film-12345-1080p.mp4'), false);
 
-    // 2. Guest hitting /api/details/film/12345 gets downloadLocked=true, empty downloads, and no-cache headers
+    // 2. Guest hitting /api/details/film/12345 gets downloadLocked=true, empty downloads, sanitized lockedDownloads, and no-cache headers
     const guestDetailRes = await realFetch(`${baseUrl}/api/details/film/12345`);
     assert.equal(guestDetailRes.status, 200);
     assert.equal(guestDetailRes.headers.get('cache-control'), 'private, no-cache');
-    const guestDetail = (await guestDetailRes.json()) as {
+    const guestDetailText = await guestDetailRes.text();
+    assert.equal(guestDetailText.includes('https://cdn.example.com/film-12345-1080p.mp4'), false);
+    assert.equal(guestDetailText.includes('Film.Test.2026.FRENCH.1080p'), false);
+    const guestDetail = JSON.parse(guestDetailText) as {
       downloads?: unknown[];
+      lockedDownloads?: Array<{
+        id: number;
+        filename: string;
+        quality: string;
+        protectToken?: unknown;
+        url?: unknown;
+      }>;
       downloadCount?: number;
       downloadLocked?: boolean;
       downloadMessage?: string;
@@ -1718,32 +1740,46 @@ test('film download links require Pro/Admin, mask Bearer key in admin settings, 
     assert.equal(guestDetail.downloadLocked, true);
     assert.equal(guestDetail.downloadCount, 1);
     assert.equal(guestDetail.downloads?.length, 0);
+    assert.equal(guestDetail.lockedDownloads?.length, 1);
+    assert.equal(guestDetail.lockedDownloads?.[0]?.filename, 'Film.Test.1080p.mp4');
+    assert.equal(guestDetail.lockedDownloads?.[0]?.quality, '1080p');
+    assert.equal(guestDetail.lockedDownloads?.[0]?.protectToken, undefined);
+    assert.equal(guestDetail.lockedDownloads?.[0]?.url, undefined);
     assert.equal(
       guestDetail.downloadMessage,
       'Passez en Pro pour débloquer les téléchargements directs.'
     );
 
-    // 2b. Guest hitting /api/details/film/99999 (no download links) omits downloadLocked
+    // 2b. Guest hitting /api/details/film/99999 (no download links) omits downloadLocked & lockedDownloads
     const noDlGuestRes = await realFetch(`${baseUrl}/api/details/film/99999`);
     assert.equal(noDlGuestRes.status, 200);
     const noDlGuestJson = (await noDlGuestRes.json()) as {
       downloadLocked?: boolean;
       downloads?: unknown[];
+      lockedDownloads?: unknown[];
     };
     assert.equal(noDlGuestJson.downloadLocked, undefined);
     assert.equal(noDlGuestJson.downloads, undefined);
+    assert.equal(noDlGuestJson.lockedDownloads, undefined);
 
-    // 3. Free member also gets downloadLocked=true and no leaked URLs
+    // 3. Free member also gets downloadLocked=true, sanitized lockedDownloads, and no leaked URLs/tokens
     const memberDetailRes = await realFetch(`${baseUrl}/api/details/film/12345`, {
       headers: { Authorization: `Bearer ${memberAuth.token}` },
     });
     assert.equal(memberDetailRes.status, 200);
-    const memberDetail = (await memberDetailRes.json()) as {
+    const memberDetailText = await memberDetailRes.text();
+    assert.equal(memberDetailText.includes('https://cdn.example.com/film-12345-1080p.mp4'), false);
+    const memberDetail = JSON.parse(memberDetailText) as {
       downloads?: unknown[];
+      lockedDownloads?: Array<{ filename: string; quality: string; protectToken?: unknown; url?: unknown }>;
       downloadLocked?: boolean;
     };
     assert.equal(memberDetail.downloadLocked, true);
     assert.equal(memberDetail.downloads?.length, 0);
+    assert.equal(memberDetail.lockedDownloads?.length, 1);
+    assert.equal(memberDetail.lockedDownloads?.[0]?.filename, 'Film.Test.1080p.mp4');
+    assert.equal(memberDetail.lockedDownloads?.[0]?.protectToken, undefined);
+    assert.equal(memberDetail.lockedDownloads?.[0]?.url, undefined);
 
     // 4. Admin gets unlocked list containing ONLY id, filename, quality, protectToken (no raw url/release_name/expires_at)
     const adminDetailRes = await realFetch(`${baseUrl}/api/details/film/12345`, {
@@ -1755,10 +1791,12 @@ test('film download links require Pro/Admin, mask Bearer key in admin settings, 
     assert.equal(adminDetailText.includes('Film.Test.2026.FRENCH.1080p'), false);
     const adminDetail = JSON.parse(adminDetailText) as {
       downloads?: Array<{ id: number; filename: string; quality: string; protectToken: string }>;
+      lockedDownloads?: unknown[];
       downloadCount?: number;
       downloadLocked?: boolean;
     };
     assert.equal(adminDetail.downloadLocked, false);
+    assert.equal(adminDetail.lockedDownloads, undefined);
     assert.equal(adminDetail.downloadCount, 1);
     assert.equal(adminDetail.downloads?.length, 1);
     assert.equal(adminDetail.downloads?.[0]?.filename, 'Film.Test.1080p.mp4');

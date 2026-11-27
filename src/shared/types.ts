@@ -70,6 +70,12 @@ export interface FilmDownloadItem {
   protectToken: string;
 }
 
+export interface LockedFilmDownloadItem {
+  id: number;
+  filename: string;
+  quality: string;
+}
+
 export interface ProtectedLinkChallenge {
   captchaToken: string;
   svgDataUri: string;
@@ -114,6 +120,7 @@ export interface DetailResponse {
     myScore: number | null;
   };
   downloads?: FilmDownloadItem[];
+  lockedDownloads?: LockedFilmDownloadItem[];
   downloadCount?: number;
   downloadLocked?: boolean;
   downloadMessage?: string;
@@ -838,6 +845,12 @@ export interface PinoyPlayerSource {
   language: string | null;
 }
 
+export interface LockedPinoyDownloadItem {
+  provider: string;
+  quality: string | null;
+  language: string | null;
+}
+
 export interface PinoyFacetsResponse {
   status: 'live' | 'unconfigured' | 'fallback';
   module?: CustomApiPublicModule | null;
@@ -874,6 +887,7 @@ export interface PinoyDetailResponse {
     embed: PinoyPlayerSource[];
     download: PinoyPlayerSource[];
   };
+  lockedDownloads?: LockedPinoyDownloadItem[];
   downloadLocked?: boolean;
   downloadMessage?: string;
   similar: PinoyFilm[];
@@ -1124,6 +1138,7 @@ export interface CustomApiDetailResponse {
     embed: PinoyPlayerSource[];
     download: PinoyPlayerSource[];
   };
+  lockedDownloads?: LockedPinoyDownloadItem[];
   downloadLocked?: boolean;
   downloadMessage?: string;
   similar: CustomApiItem[];
