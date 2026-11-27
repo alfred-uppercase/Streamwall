@@ -154,9 +154,15 @@ function tokenFingerprint(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex').slice(0, 12);
 }
 
+export interface FilmDownloadFetchErrorInfo {
+  reason: string;
+  statusCode?: number;
+}
+
 export async function fetchFilmDownloads(
   filmId: number,
-  config: { apiUrl: string; apiKey: string }
+  config: { apiUrl: string; apiKey: string },
+  onError?: (info: FilmDownloadFetchErrorInfo) => void
 ): Promise<FilmDownloadItem[]> {
   const apiUrl = config.apiUrl.trim();
   const apiKey = config.apiKey.trim();
@@ -185,15 +191,28 @@ export async function fetchFilmDownloads(
         });
 
         if (!res.ok) {
+          onError?.({
+            reason: `API téléchargement HTTP ${res.status}`,
+            statusCode: res.status,
+          });
           return filmDownloadsCache.getStale(cacheKey) ?? [];
         }
 
         const json = (await res.json()) as {
           success?: unknown;
           downloads?: unknown[];
+          error?: unknown;
         };
 
         if (!json || json.success !== true || !Array.isArray(json.downloads)) {
+          const upstreamErr =
+            json && typeof json.error === 'string' && json.error.trim()
+              ? `: ${json.error.trim().slice(0, 120)}`
+              : '';
+          onError?.({
+            reason: `Réponse API téléchargement invalide${upstreamErr}`,
+            statusCode: res.status,
+          });
           return filmDownloadsCache.getStale(cacheKey) ?? [];
         }
 
@@ -206,7 +225,13 @@ export async function fetchFilmDownloads(
         }
 
         return filmDownloadsCache.set(cacheKey, items, DOWNLOADS_TTL_MS, DOWNLOADS_STALE_MS);
-      } catch {
+      } catch (err) {
+        onError?.({
+          reason:
+            err instanceof Error && err.message
+              ? `Erreur réseau API téléchargement : ${err.message.slice(0, 140)}`
+              : 'Erreur réseau API téléchargement',
+        });
         return filmDownloadsCache.getStale(cacheKey) ?? [];
       }
     });

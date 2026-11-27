@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -302,7 +303,10 @@ import {
 import { decryptProtectedLink } from './src/server/linkProtectService.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = 3000;
+const PORT =
+  process.env.NODE_ENV === 'production' && process.env.PORT
+    ? Number(process.env.PORT) || 3000
+    : 3000;
 const DEFAULT_ORIGIN = (process.env.STREAMWALL_API_ORIGIN || 'https://streamwall.behoririka.mg').replace(
   /\/+$/,
   ''
@@ -1150,7 +1154,12 @@ async function getFilmDownloadApiUrl(): Promise<string> {
 }
 
 function getFilmDownloadApiKey(): string {
-  return (db.settings.film_download_api_key || ENV_FILM_DOWNLOAD_API_KEY || '').trim();
+  return (
+    db.settings.film_download_api_key ||
+    ENV_FILM_DOWNLOAD_API_KEY ||
+    process.env.FILM_DOWNLOAD_API_KEY ||
+    ''
+  ).trim();
 }
 
 async function getFilmDownloadMessage(): Promise<string> {
@@ -3908,10 +3917,27 @@ export async function createApiApp(): Promise<express.Express> {
         Promise.resolve(getFilmDownloadApiKey()),
       ]);
       if (dlUrl && dlKey) {
-        filmDownloads = await fetchFilmDownloads(numericFilmId, {
-          apiUrl: dlUrl,
-          apiKey: dlKey,
-        });
+        filmDownloads = await fetchFilmDownloads(
+          numericFilmId,
+          {
+            apiUrl: dlUrl,
+            apiKey: dlKey,
+          },
+          (errInfo) => {
+            recordErrorLog({
+              level: 'warn',
+              source: 'upstream',
+              message: errInfo.reason,
+              route: req.originalUrl,
+              method: req.method,
+              statusCode: errInfo.statusCode ?? null,
+              context: {
+                filmId: numericFilmId,
+                apiUrl: dlUrl,
+              },
+            });
+          }
+        );
       }
     }
     const hasDownloads = filmDownloads.length > 0;
