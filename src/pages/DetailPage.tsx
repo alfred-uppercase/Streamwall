@@ -126,15 +126,21 @@ export function DetailPage() {
   const billingPlansQuery = useQuery({
     queryKey: ['billing-plans'],
     queryFn: () => api.billingPlans(),
-    staleTime: 30_000,
+    staleTime: 10_000,
   });
-  const userPlan = billingPlansQuery.data?.plans.find(
-    (p) => p.id === user?.subscription?.planId
-  );
+  const plans = billingPlansQuery.data?.plans ?? [];
+  const userPlan = plans.find((p) => p.id === user?.subscription?.planId);
   const freePlanAllowsDownloads = Boolean(
-    billingPlansQuery.data?.plans.find((p) => p.id === 'free' || p.tier === 'free')
-      ?.filmDownloadsEnabled
+    plans.find((p) => p.id === 'free' || p.tier === 'free')?.filmDownloadsEnabled
   );
+  const proPlansAllowDownloads =
+    plans.length === 0 ||
+    plans.some(
+      (p) =>
+        p.active &&
+        p.tier === 'pro' &&
+        (typeof p.filmDownloadsEnabled === 'boolean' ? p.filmDownloadsEnabled : true)
+    );
   const canDownload =
     isAdmin ||
     (isMember &&
@@ -180,10 +186,16 @@ export function DetailPage() {
   }, [type, id]);
 
   const detailQuery = useQuery({
-    queryKey: ['details', type, id, canDownload ? 'unlocked' : 'locked'],
+    queryKey: [
+      'details',
+      type,
+      id,
+      isMember ? (user?.id ?? 'member') : 'guest',
+      canDownload ? 'unlocked' : 'locked',
+    ],
     queryFn: () => api.details(type, id),
     enabled: Boolean(id),
-    staleTime: 180_000,
+    staleTime: 30_000,
   });
 
   const memberQuery = useQuery({
@@ -617,12 +629,23 @@ export function DetailPage() {
                 <h2 className="font-display text-lg font-semibold text-foreground">
                   {!detailData.downloadLocked && (detailData.downloads?.length ?? 0) > 0
                     ? `Liens de téléchargement (${detailData.downloads!.length})`
-                    : 'Liens de téléchargement'}
+                    : detailData.downloadCount && detailData.downloadCount > 0
+                      ? `Liens de téléchargement (${detailData.downloadCount})`
+                      : 'Liens de téléchargement'}
                 </h2>
-                {Boolean(detailData.downloadLocked) && !freePlanAllowsDownloads && (
+                {Boolean(detailData.downloadLocked) && (
                   <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-400">
-                    <Crown className="size-3.5" />
-                    <span>Réservé Pro</span>
+                    {!freePlanAllowsDownloads && proPlansAllowDownloads ? (
+                      <>
+                        <Crown className="size-3.5" />
+                        <span>Réservé Pro</span>
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="size-3.5" />
+                        <span>Accès verrouillé</span>
+                      </>
+                    )}
                   </span>
                 )}
               </div>
@@ -658,12 +681,26 @@ export function DetailPage() {
                     <div className="grid size-9 shrink-0 place-items-center rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-400">
                       <Lock className="size-4" />
                     </div>
-                    <p className="text-sm leading-relaxed text-muted-foreground whitespace-pre-line">
-                      {!isMember && freePlanAllowsDownloads
-                        ? 'Connectez-vous pour débloquer les liens de téléchargement direct.'
-                        : detailData.downloadMessage?.trim() ||
-                          'Le téléchargement direct est réservé aux membres Pro et aux administrateurs.'}
-                    </p>
+                    <div className="space-y-1">
+                      <p className="text-sm leading-relaxed text-muted-foreground whitespace-pre-line">
+                        {!isMember
+                          ? freePlanAllowsDownloads
+                            ? 'Connectez-vous pour accéder aux liens de téléchargement direct de ce film.'
+                            : 'Téléchargement réservé aux offres compatibles. Connectez-vous ou achetez une offre pour débloquer les liens.'
+                          : detailData.downloadMessage?.trim() &&
+                              detailData.downloadMessage.trim().toLowerCase() !== 'téléchargement'
+                            ? detailData.downloadMessage.trim()
+                            : 'Le téléchargement direct est verrouillé pour votre offre actuelle. Passez à une offre Pro pour débloquer les liens.'}
+                      </p>
+                      {!isMember &&
+                        !freePlanAllowsDownloads &&
+                        detailData.downloadMessage?.trim() &&
+                        detailData.downloadMessage.trim().toLowerCase() !== 'téléchargement' && (
+                          <p className="text-xs text-muted-foreground/85 whitespace-pre-line">
+                            {detailData.downloadMessage.trim()}
+                          </p>
+                        )}
+                    </div>
                   </div>
                   <div className="flex shrink-0 flex-wrap items-center gap-2">
                     {!isMember && (
@@ -678,13 +715,13 @@ export function DetailPage() {
                         <span>Se connecter</span>
                       </Link>
                     )}
-                    {!freePlanAllowsDownloads && (
+                    {(!freePlanAllowsDownloads || !isMember) && proPlansAllowDownloads && (
                       <Link
                         to="/abonnement"
                         className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90"
                       >
                         <Crown className="size-3.5" />
-                        <span>Passer Pro</span>
+                        <span>{isMember ? 'Passer Pro' : 'Acheter une offre Pro'}</span>
                       </Link>
                     )}
                   </div>

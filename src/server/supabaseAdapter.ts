@@ -481,7 +481,7 @@ export async function sbGetFilmDownloadApiUrl(fallbackUrl: string): Promise<stri
         .select('value')
         .eq('key', 'film_download_api_url')
         .maybeSingle();
-      if (typeof data?.value === 'string') {
+      if (typeof data?.value === 'string' && data.value.trim()) {
         return setSbCached('film_download_api_url', data.value.trim());
       }
     } catch {

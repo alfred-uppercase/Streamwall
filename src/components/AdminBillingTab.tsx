@@ -149,6 +149,38 @@ export function AdminBillingTab() {
     onError: (err) => toast.error(err instanceof Error ? err.message : 'Erreur d’enregistrement.'),
   });
 
+  const toggleFilmDownloadsMutation = useMutation({
+    mutationFn: ({ plan, enabled }: { plan: SubscriptionPlan; enabled: boolean }) =>
+      api.adminSavePlan({
+        id: plan.id,
+        tier: plan.tier,
+        name: plan.name,
+        description: plan.description,
+        price: plan.price,
+        currency: plan.currency,
+        billingCycle: plan.billingCycle,
+        durationDays: plan.durationDays,
+        autoRenew: plan.autoRenew,
+        active: plan.active,
+        features: plan.features,
+        players: plan.players,
+        filmDownloadsEnabled: enabled,
+      }),
+    onSuccess: (res) => {
+      setDraft((prev) => (prev?.id === res.plan.id ? planToDraft(res.plan) : prev));
+      void queryClient.invalidateQueries({ queryKey: ['admin-billing'] });
+      void queryClient.invalidateQueries({ queryKey: ['billing-plans'] });
+      void queryClient.invalidateQueries({ queryKey: ['details'] });
+      toast.success(
+        `Téléchargement films ${
+          res.plan.filmDownloadsEnabled ? 'activé' : 'désactivé'
+        } pour « ${res.plan.name} ».`
+      );
+    },
+    onError: (err) =>
+      toast.error(err instanceof Error ? err.message : 'Mise à jour impossible.'),
+  });
+
   const deletePlanMutation = useMutation({
     mutationFn: (planId: string) => api.adminDeletePlan(planId),
     onSuccess: () => {
@@ -245,6 +277,10 @@ export function AdminBillingTab() {
           <ul className="divide-y divide-border">
             {plans.map((plan) => {
               const selected = draft?.id === plan.id;
+              const downloadsEnabled =
+                typeof plan.filmDownloadsEnabled === 'boolean'
+                  ? plan.filmDownloadsEnabled
+                  : plan.tier === 'pro';
               return (
                 <li key={plan.id} className="py-3 first:pt-1 last:pb-1">
                   <div
@@ -252,51 +288,63 @@ export function AdminBillingTab() {
                       selected ? 'bg-accent' : 'hover:bg-accent/50'
                     }`}
                   >
-                    <button
-                      type="button"
-                      onClick={() => setDraft(planToDraft(plan))}
-                      className="min-w-0 flex-1 text-left"
-                    >
-                      <div className="flex items-center gap-2">
-                        {plan.tier === 'pro' && (
-                          <Crown className="size-4 fill-amber-400 text-amber-400 shrink-0" />
-                        )}
-                        <span className="truncate text-sm font-semibold text-foreground">
-                          {plan.name}
-                        </span>
-                        {!plan.active && (
-                          <span className="text-xs text-muted-foreground">(Inactive)</span>
-                        )}
-                      </div>
-                      <p className="mt-1 text-xs text-muted-foreground tabular-nums">
-                        {plan.tier === 'free'
-                          ? 'Gratuit · Basic'
-                          : `${plan.price.toFixed(2)} ${plan.currency} · ${
-                              plan.durationDays > 0 ? `${plan.durationDays}j` : 'Illimité'
-                            }${plan.autoRenew ? ' · Renouv. auto' : ''}`}
-                      </p>
-                      <p className="mt-1 font-mono text-[11px] text-muted-foreground truncate">
-                        Film : {plan.players.film} · Série : {plan.players.serie}
-                      </p>
-                      <p className="mt-1 text-[11px] text-muted-foreground">
-                        Téléchargements films :{' '}
+                    <div className="min-w-0 flex-1 space-y-2">
+                      <button
+                        type="button"
+                        onClick={() => setDraft(planToDraft(plan))}
+                        className="w-full text-left"
+                      >
+                        <div className="flex items-center gap-2">
+                          {plan.tier === 'pro' && (
+                            <Crown className="size-4 fill-amber-400 text-amber-400 shrink-0" />
+                          )}
+                          <span className="truncate text-sm font-semibold text-foreground">
+                            {plan.name}
+                          </span>
+                          {!plan.active && (
+                            <span className="text-xs text-muted-foreground">(Inactive)</span>
+                          )}
+                        </div>
+                        <p className="mt-1 text-xs text-muted-foreground tabular-nums">
+                          {plan.tier === 'free'
+                            ? 'Gratuit · Basic'
+                            : `${plan.price.toFixed(2)} ${plan.currency} · ${
+                                plan.durationDays > 0 ? `${plan.durationDays}j` : 'Illimité'
+                              }${plan.autoRenew ? ' · Renouv. auto' : ''}`}
+                        </p>
+                        <p className="mt-1 font-mono text-[11px] text-muted-foreground truncate">
+                          Film : {plan.players.film} · Série : {plan.players.serie}
+                        </p>
+                      </button>
+
+                      <label
+                        onClick={(e) => e.stopPropagation()}
+                        className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-border/80 bg-background/70 px-2.5 py-1 text-[11px] transition-colors hover:bg-background"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={downloadsEnabled}
+                          disabled={toggleFilmDownloadsMutation.isPending}
+                          onChange={(e) =>
+                            toggleFilmDownloadsMutation.mutate({
+                              plan,
+                              enabled: e.target.checked,
+                            })
+                          }
+                          className="size-3.5 accent-primary"
+                        />
+                        <span className="text-muted-foreground">Téléchargements films :</span>
                         <span
                           className={
-                            (typeof plan.filmDownloadsEnabled === 'boolean'
-                              ? plan.filmDownloadsEnabled
-                              : plan.tier === 'pro')
+                            downloadsEnabled
                               ? 'font-semibold text-emerald-500'
-                              : 'text-muted-foreground'
+                              : 'font-medium text-muted-foreground'
                           }
                         >
-                          {(typeof plan.filmDownloadsEnabled === 'boolean'
-                            ? plan.filmDownloadsEnabled
-                            : plan.tier === 'pro')
-                            ? 'Inclus'
-                            : 'Désactivé'}
+                          {downloadsEnabled ? 'Inclus' : 'Désactivé'}
                         </span>
-                      </p>
-                    </button>
+                      </label>
+                    </div>
 
                     {plan.id !== 'free' && (
                       <button

@@ -3882,7 +3882,12 @@ export async function createApiApp(): Promise<express.Express> {
       : null;
 
     const isFilmDetail = type === 'film' || baseDetail.item?.type === 'film';
-    const numericFilmId = isFilmDetail && /^\d+$/.test(id) ? Number(id) : 0;
+    const rawNumericId = /^\d+$/.test(id)
+      ? Number(id)
+      : /^\d+$/.test(String(baseDetail.item?.id ?? ''))
+        ? Number(baseDetail.item?.id)
+        : 0;
+    const numericFilmId = isFilmDetail && rawNumericId > 0 ? rawNumericId : 0;
     const canDownload = Boolean(
       auth && (auth.user.role === 'admin' || canPlanAccessFilmDownloads(auth.user.id))
     );
@@ -3904,11 +3909,7 @@ export async function createApiApp(): Promise<express.Express> {
     const downloadMessage = downloadLocked ? await getFilmDownloadMessage() : undefined;
 
     res.setHeader('Vary', 'Authorization, Cookie');
-    if (!auth && !extractToken(req)) {
-      res.setHeader('Cache-Control', 'public, max-age=120, s-maxage=600, stale-while-revalidate=1200');
-    } else {
-      res.setHeader('Cache-Control', 'private, no-cache');
-    }
+    res.setHeader('Cache-Control', 'private, no-cache');
 
     res.json({
       item: baseDetail.item,
@@ -6914,19 +6915,6 @@ export async function createApiApp(): Promise<express.Express> {
       return;
     }
 
-    if (isSupabaseEnabled() && auth.sbClient) {
-      const writer = createAdminClient() ?? auth.sbClient;
-      const now = new Date().toISOString();
-      const { error } = await writer.from('app_settings').upsert([
-        { key: 'film_download_api_url', value: urlValidation.url, updated_at: now },
-        { key: 'film_download_message', value: nextMessage, updated_at: now },
-      ]);
-      if (error) {
-        res.status(400).json({ error: error.message });
-        return;
-      }
-    }
-
     db.settings.film_download_api_url = urlValidation.url;
     db.settings.film_download_message = nextMessage;
     if (clearApiKey) {
@@ -6935,6 +6923,20 @@ export async function createApiApp(): Promise<express.Express> {
       db.settings.film_download_api_key = rawNewKey;
     }
     saveDb(db);
+
+    if (isSupabaseEnabled() && auth.sbClient) {
+      try {
+        const writer = createAdminClient() ?? auth.sbClient;
+        const now = new Date().toISOString();
+        await writer.from('app_settings').upsert([
+          { key: 'film_download_api_url', value: urlValidation.url, updated_at: now },
+          { key: 'film_download_message', value: nextMessage, updated_at: now },
+        ]);
+      } catch {
+        // Non-fatal: SQLite persistence remains authoritative for API credentials & settings
+      }
+    }
+
     invalidateSbSettingsCache();
     clearFilmDownloadsCache();
 
@@ -7186,7 +7188,7 @@ export async function createApiApp(): Promise<express.Express> {
   // SUBSCRIPTION PLANS, CRYPTOGATE & MANUAL PAYMENTS, MANUAL PRO ASSIGNMENT
   // ─────────────────────────────────────────────────────────────────────────
   app.get('/api/billing/plans', (_req, res) => {
-    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
+    res.setHeader('Cache-Control', 'private, no-cache');
     res.json({
       plans: listPlans(false),
       config: getBillingConfig(),

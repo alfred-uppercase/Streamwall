@@ -353,7 +353,7 @@ test('Public API endpoints expose Cache-Control headers while authenticated /api
   ]);
 
   assert.match(privacyRes.headers.get('cache-control') || '', /^public, max-age=\d+/);
-  assert.match(plansRes.headers.get('cache-control') || '', /^public, max-age=\d+/);
+  assert.equal(plansRes.headers.get('cache-control'), 'private, no-cache');
   assert.match(popupsRes.headers.get('cache-control') || '', /^public, max-age=\d+/);
   assert.match(siteRes.headers.get('cache-control') || '', /^public, max-age=\d+/);
   assert.match(genresRes.headers.get('cache-control') || '', /^public, max-age=\d+/);
@@ -1619,6 +1619,17 @@ test('film download links require Pro/Admin, mask Bearer key in admin settings, 
         });
       }
       const parsedBody = JSON.parse(String(init?.body ?? '{}')) as { film_id?: number };
+      if (parsedBody.film_id === 99999) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            film_id: 99999,
+            count: 0,
+            downloads: [],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
       return new Response(
         JSON.stringify({
           success: true,
@@ -1694,9 +1705,10 @@ test('film download links require Pro/Admin, mask Bearer key in admin settings, 
     assert.ok(testJson.sample?.protectToken);
     assert.equal(JSON.stringify(testJson).includes('https://cdn.example.com/film-12345-1080p.mp4'), false);
 
-    // 2. Guest hitting /api/details/film/12345 gets downloadLocked=true and empty downloads
+    // 2. Guest hitting /api/details/film/12345 gets downloadLocked=true, empty downloads, and no-cache headers
     const guestDetailRes = await realFetch(`${baseUrl}/api/details/film/12345`);
     assert.equal(guestDetailRes.status, 200);
+    assert.equal(guestDetailRes.headers.get('cache-control'), 'private, no-cache');
     const guestDetail = (await guestDetailRes.json()) as {
       downloads?: unknown[];
       downloadCount?: number;
@@ -1710,6 +1722,16 @@ test('film download links require Pro/Admin, mask Bearer key in admin settings, 
       guestDetail.downloadMessage,
       'Passez en Pro pour débloquer les téléchargements directs.'
     );
+
+    // 2b. Guest hitting /api/details/film/99999 (no download links) omits downloadLocked
+    const noDlGuestRes = await realFetch(`${baseUrl}/api/details/film/99999`);
+    assert.equal(noDlGuestRes.status, 200);
+    const noDlGuestJson = (await noDlGuestRes.json()) as {
+      downloadLocked?: boolean;
+      downloads?: unknown[];
+    };
+    assert.equal(noDlGuestJson.downloadLocked, undefined);
+    assert.equal(noDlGuestJson.downloads, undefined);
 
     // 3. Free member also gets downloadLocked=true and no leaked URLs
     const memberDetailRes = await realFetch(`${baseUrl}/api/details/film/12345`, {
@@ -1877,6 +1899,11 @@ test('film download links require Pro/Admin, mask Bearer key in admin settings, 
         }),
       });
       assert.equal(enableFreeDlRes.status, 200);
+
+      // /api/billing/plans also serves fresh private no-cache headers after admin update
+      const publicPlansRes = await realFetch(`${baseUrl}/api/billing/plans`);
+      assert.equal(publicPlansRes.status, 200);
+      assert.equal(publicPlansRes.headers.get('cache-control'), 'private, no-cache');
 
       // Guest still stays locked even when free plan allows downloads
       const guestStillLockedRes = await realFetch(`${baseUrl}/api/details/film/12345`);

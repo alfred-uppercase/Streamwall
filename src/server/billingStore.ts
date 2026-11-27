@@ -972,7 +972,10 @@ export function resolvePlanTemplateForUser(
 export function canPlanAccessFilmDownloads(userId: string | null): boolean {
   if (!userId) return false;
   const sub = getUserSubscription(userId);
-  const plan = getPlanById(sub.planId) ?? getFreePlan();
+  const plan =
+    getPlanById(sub.planId) ??
+    (sub.tier === 'pro' ? billingDb.plans.find((p) => p.tier === 'pro' && p.active) ?? billingDb.plans.find((p) => p.tier === 'pro') : undefined) ??
+    getFreePlan();
   if (typeof plan.filmDownloadsEnabled === 'boolean') {
     return plan.filmDownloadsEnabled;
   }

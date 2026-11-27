@@ -39,7 +39,6 @@ import type {
   FilmDownloadItem,
   PlayerKey,
   PlayerTemplates,
-  SubscriptionPlan,
 } from '../shared/types';
 import { api, useAuth } from '../lib/client';
 import { useDocumentTitle, useSiteConfig } from '../lib/siteConfig';
@@ -348,37 +347,6 @@ export function AdminPage() {
     onSuccess: (report) => setFilmDlTestReport(report),
     onError: (err) =>
       toast.error(err instanceof Error ? err.message : "Échec du test de l'API téléchargement"),
-  });
-
-  const togglePlanDownloadsMutation = useMutation({
-    mutationFn: ({ plan, enabled }: { plan: SubscriptionPlan; enabled: boolean }) =>
-      api.adminSavePlan({
-        id: plan.id,
-        tier: plan.tier,
-        name: plan.name,
-        description: plan.description,
-        price: plan.price,
-        currency: plan.currency,
-        billingCycle: plan.billingCycle,
-        durationDays: plan.durationDays,
-        autoRenew: plan.autoRenew,
-        active: plan.active,
-        features: plan.features,
-        players: plan.players,
-        filmDownloadsEnabled: enabled,
-      }),
-    onSuccess: (res) => {
-      void queryClient.invalidateQueries({ queryKey: ['admin-billing'] });
-      void queryClient.invalidateQueries({ queryKey: ['billing-plans'] });
-      void queryClient.invalidateQueries({ queryKey: ['details'] });
-      toast.success(
-        `Téléchargement films ${
-          res.plan.filmDownloadsEnabled ? 'activé' : 'désactivé'
-        } pour « ${res.plan.name} ».`
-      );
-    },
-    onError: (err) =>
-      toast.error(err instanceof Error ? err.message : 'Mise à jour de l’offre impossible'),
   });
 
   const healthMutation = useMutation({
@@ -940,7 +908,15 @@ export function AdminPage() {
                   <span>Téléchargement Films (api_f.php)</span>
                 </h2>
                 <p className="text-sm text-muted-foreground">
-                  Affiche les liens de téléchargement direct sur la fiche détail des films selon les offres autorisées (Gratuit / Pro) et pour les administrateurs. La clé Bearer reste strictement côté serveur.
+                  Connecte l’API de téléchargement des films. Le choix des offres autorisées (Gratuit / Pro) se gère uniquement dans{' '}
+                  <button
+                    type="button"
+                    onClick={() => setTab('offers')}
+                    className="font-semibold text-primary hover:underline"
+                  >
+                    Offres & Paiements
+                  </button>
+                  .
                 </p>
               </div>
               <span
@@ -955,63 +931,6 @@ export function AdminPage() {
                   : 'Clé API manquante'}
               </span>
             </div>
-
-            {availablePlans.length > 0 && (
-              <div className="mb-5 rounded-lg border border-border bg-background/60 p-4 space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h3 className="text-xs font-semibold uppercase tracking-wider text-foreground">
-                      Accès lié aux offres
-                    </h3>
-                    <p className="text-xs text-muted-foreground">
-                      Choisissez quelles offres peuvent voir et débloquer les téléchargements (les administrateurs y ont toujours accès).
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setTab('offers')}
-                    className="text-xs font-semibold text-primary hover:underline"
-                  >
-                    Configurer dans Offres & Paiements
-                  </button>
-                </div>
-                <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
-                  {availablePlans.map((plan) => {
-                    const enabled =
-                      typeof plan.filmDownloadsEnabled === 'boolean'
-                        ? plan.filmDownloadsEnabled
-                        : plan.tier === 'pro';
-                    return (
-                      <label
-                        key={plan.id}
-                        className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-border bg-card px-3 py-2 text-xs transition-colors hover:bg-accent/50"
-                      >
-                        <div className="min-w-0">
-                          <span className="block truncate font-semibold text-foreground">
-                            {plan.name}
-                          </span>
-                          <span className="text-[11px] text-muted-foreground">
-                            {plan.tier === 'free' ? 'Simple utilisateur (Gratuit)' : 'Membre Pro'}
-                          </span>
-                        </div>
-                        <input
-                          type="checkbox"
-                          checked={enabled}
-                          disabled={togglePlanDownloadsMutation.isPending}
-                          onChange={(e) =>
-                            togglePlanDownloadsMutation.mutate({
-                              plan,
-                              enabled: e.target.checked,
-                            })
-                          }
-                          className="size-4 shrink-0 accent-primary"
-                        />
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
 
             <form
               onSubmit={(e) => {
